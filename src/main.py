@@ -8,6 +8,8 @@ from src.components.tiered import TieredMemoryComponent
 from src.components.critic import CriticComponent
 from src.components.reader import SequentialReaderComponent
 from src.components.system import SystemComponent
+from src.components.tasks import TaskQueueComponent
+from src.components.directives import DirectivesComponent
 from src.adapters.mqtt import MQTTAdapter
 
 async def main():
@@ -15,10 +17,12 @@ async def main():
     agent = AgentCore()
     
     # Register all components to create a fully capable agent
+    agent.register_component(DirectivesComponent())
     agent.register_component(SystemComponent())
     agent.register_component(AuditLogComponent(log_dir="logs"))
     agent.register_component(TieredMemoryComponent(db_path="memory.db", max_messages=20, summarize_chunk=10))
     agent.register_component(CriticComponent(frequency=5))
+    agent.register_component(TaskQueueComponent(db_path="tasks.db"))
     agent.register_component(StructuredNotesComponent(db_path="notes.db"))
     agent.register_component(KnowledgeBaseComponent())
     agent.register_component(SequentialReaderComponent(library_dir="/vault/ebook"))
