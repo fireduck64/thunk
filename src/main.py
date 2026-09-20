@@ -10,6 +10,7 @@ from src.components.reader import SequentialReaderComponent
 from src.components.system import SystemComponent
 from src.components.tasks import TaskQueueComponent
 from src.components.clock import ClockComponent
+from src.components.directives import DirectivesComponent
 from src.adapters.mqtt import MQTTAdapter
 
 async def main():
