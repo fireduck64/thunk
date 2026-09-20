@@ -2,7 +2,7 @@ import asyncio
 import pytest
 import os
 from src.core.agent import AgentCore
-from src.memory.tiered import TieredMemoryComponent
+from src.components.tiered import TieredMemoryComponent
 
 @pytest.mark.asyncio
 async def test_tiered_memory():

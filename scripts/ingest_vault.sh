@@ -2,6 +2,7 @@
 set -euo pipefail
 
 VENV_DIR="${THUNK_VENV_DIR:-/tmp/thunk_venv}"
+VAULT_DIR="/vault/ebooks"
 
 if [ ! -d "$VENV_DIR" ]; then
     echo "Error: Virtual environment not found at $VENV_DIR."
@@ -11,5 +12,5 @@ fi
 
 source "$VENV_DIR/bin/activate"
 
-echo "Starting Thunk Agent..."
-PYTHONPATH=. python3 src/main.py
+echo "Starting recursive directory ingestion for $VAULT_DIR..."
+PYTHONPATH=. python3 src/tools/ingest_dir.py "$VAULT_DIR"
