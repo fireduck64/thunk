@@ -25,7 +25,12 @@ async def main():
     agent.register_component(DirectivesComponent())
     agent.register_component(SystemComponent())
     agent.register_component(AuditLogComponent(log_dir="logs", verbose=True))
-    agent.register_component(TieredMemoryComponent(db_path="memory.db", max_messages=20, summarize_chunk=10))
+    
+    # We aggressively tune the memory component because large context windows
+    # on local models can cause timeouts. 
+    # Max messages: 12. Chunk to summarize: 6.
+    agent.register_component(TieredMemoryComponent(db_path="memory.db", max_messages=12, summarize_chunk=6))
+    
     agent.register_component(CriticComponent(frequency=5))
     agent.register_component(TaskQueueComponent(db_path="tasks.db"))
     agent.register_component(StructuredNotesComponent(db_path="notes.db"))
