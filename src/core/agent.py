@@ -102,8 +102,9 @@ class AgentCore:
         # Ensure system prompt is always at the top of working memory
         if not self.messages or self.messages[0].get("role") != "system":
             self.messages.insert(0, {"role": "system", "content": system_prompt})
-
-        await self.event_bus.publish("agent_started")
+            
+        # Tell components the agent is starting (e.g. to load their own state)
+        await self.event_bus.publish("agent_started", {"agent": self})
         print(f"[Core] Agent loop started. (Model: {self.model})")
 
         while True:

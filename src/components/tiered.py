@@ -53,7 +53,11 @@ class TieredMemoryComponent(BaseComponent):
         )
 
     async def on_event(self, event_name: str, payload: Dict[str, Any]) -> None:
-        if event_name == "message_added":
+        if event_name == "agent_started":
+            agent = payload["agent"]
+            self._restore_working_memory(agent)
+            
+        elif event_name == "message_added":
             msg = payload["message"]
             role = msg.get("role", "unknown")
             
@@ -77,7 +81,39 @@ class TieredMemoryComponent(BaseComponent):
                 print(f"[Memory] Context window exceeded ({len(agent.messages)} msgs). Compressing...")
                 await self._compress_memory(agent)
 
-    async def _compress_memory(self, agent: Any):
+    def _restore_working_memory(self, agent: Any):
+        """
+        On startup, re-populates the agent's short-term context window (Tier 1 memory)
+        from the archival log so it can seamlessly resume its previous thought process.
+        """
+        print("[Memory] Restoring agent's working memory from previous session...")
+        with sqlite3.connect(self.db_path) as conn:
+            # We fetch the last N messages, where N is max_messages
+            # We sort descending to get the newest, then reverse them to chronological order
+            cursor = conn.execute(
+                "SELECT role, content FROM archival_log ORDER BY id DESC LIMIT ?",
+                (self.max_messages,)
+            )
+            rows = cursor.fetchall()
+            
+        if not rows:
+            return
+            
+        rows.reverse() # Put them back in chronological order
+        
+        for role, content in rows:
+            # The archival log saves tool calls as a string "[Tool Calls Requested]" for humans,
+            # which breaks OpenAI's strict tool_call format if we just shove it back into context.
+            # For now, if it was a tool call that we didn't serialize perfectly, we skip it or 
+            # insert it as a generic assistant message to provide context without breaking the API.
+            if content == "[Tool Calls Requested]":
+                # We skip injecting broken tool calls into the strict OpenAI context window on restore
+                continue
+                
+            agent.messages.append({
+                "role": role,
+                "content": content
+            })
         """Extracts the oldest M messages, asks the LLM to summarize them, and evicts them."""
         # Index 0 is System Prompt. We want to pop index 1 through summarize_chunk
         messages_to_compress = agent.messages[1:self.summarize_chunk + 1]
