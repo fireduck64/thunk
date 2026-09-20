@@ -4,6 +4,7 @@ class BaseComponent:
     """
     The foundational class for all modules attached to the Agent Core.
     """
+    agent: Any = None # Will be populated by AgentCore during registration
     
     def get_system_prompt_addition(self) -> str:
         """Return text to be appended to the agent's main system prompt."""

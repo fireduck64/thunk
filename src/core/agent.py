@@ -30,6 +30,7 @@ class AgentCore:
 
     def register_component(self, component: BaseComponent):
         """Attaches a component to the agent."""
+        component.agent = self
         self.components.append(component)
         # Bind the component to the event bus
         self.event_bus.subscribe("agent_started", component.on_event)
