@@ -14,9 +14,12 @@ class AgentCore:
         self.components: list[BaseComponent] = []
         
         # Initialize OpenAI Client (Compatible with standard endpoints and Ollama)
+        # We set a high timeout (5 minutes) because massive context windows or 
+        # complex compression tasks can take a long time on local models.
         self.client = AsyncOpenAI(
             base_url=self.config["llm"]["api_url"],
-            api_key=self.config["llm"]["api_key"]
+            api_key=self.config["llm"]["api_key"],
+            timeout=300.0
         )
         self.model = self.config["llm"]["model_name"]
         

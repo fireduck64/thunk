@@ -148,23 +148,37 @@ class TieredMemoryComponent(BaseComponent):
             "Return ONLY the raw text of the new summary. Do not include introductory text."
         )
 
-        try:
-            # We make a direct LLM call using the agent's client
-            response = await agent.client.chat.completions.create(
-                model=agent.model,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            new_summary = response.choices[0].message.content.strip()
-            
-            # Save the new summary
-            self._update_core_summary(new_summary)
-            print(f"[Memory] New Core Summary Generated: {new_summary[:50]}...")
-            
-            # Safely remove the compressed messages from the agent's working memory
-            del agent.messages[1:self.summarize_chunk + 1]
-            
-            # Ask the agent to rebuild its system prompt so the new summary is injected immediately
-            agent.rebuild_system_prompt()
-            
-        except Exception as e:
-            print(f"[Memory Error] Compression failed: {e}")
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # We make a direct LLM call using the agent's client
+                response = await agent.client.chat.completions.create(
+                    model=agent.model,
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                new_summary = response.choices[0].message.content.strip()
+                
+                # Save the new summary
+                self._update_core_summary(new_summary)
+                print(f"[Memory] New Core Summary Generated: {new_summary[:50]}...")
+                
+                # Safely remove the compressed messages from the agent's working memory
+                del agent.messages[1:self.summarize_chunk + 1]
+                
+                # Ask the agent to rebuild its system prompt so the new summary is injected immediately
+                agent.rebuild_system_prompt()
+                return # Success, exit the compression function
+                
+            except Exception as e:
+                print(f"[Memory Error] Compression attempt {attempt + 1}/{max_retries} failed: {e}")
+                import asyncio
+                await asyncio.sleep(5) # Wait before retrying
+                
+        # --- Emergency Eviction (Circuit Breaker) ---
+        # If we failed all 3 times (e.g. Nginx is completely dead, or context is so large 
+        # that even the compression prompt exceeds OpenAI limits), we must forcefully 
+        # evict the oldest messages without summarizing them. Otherwise, the agent's 
+        # context window will remain over the threshold, and it will be deadlocked forever.
+        print("[Memory CRITICAL] All compression retries failed. Forcefully evicting oldest messages to prevent deadlock.")
+        del agent.messages[1:self.summarize_chunk + 1]
+        agent.rebuild_system_prompt()
