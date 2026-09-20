@@ -31,8 +31,11 @@ class AgentCore:
     def register_component(self, component: BaseComponent):
         """Attaches a component to the agent."""
         self.components.append(component)
-        # Assuming components might need to hook into the event bus in the future
-        # component.bind_events(self.event_bus) 
+        # Bind the component to the event bus
+        self.event_bus.subscribe("agent_started", component.on_event)
+        self.event_bus.subscribe("tool_executed", component.on_event)
+        self.event_bus.subscribe("message_added", component.on_event)
+        self.event_bus.subscribe("context_window_check", component.on_event)
 
     def _build_system_prompt(self) -> str:
         """Aggregates all component system instructions."""
@@ -54,9 +57,20 @@ class AgentCore:
                 self.tools.append(schema)
                 self.tool_map[func.__name__] = func
 
-    def add_message(self, role: str, content: str):
+    def rebuild_system_prompt(self):
+        """Rebuilds the system prompt (Index 0 of messages) using all current component states."""
+        system_prompt = self._build_system_prompt()
+        if self.messages and self.messages[0].get("role") == "system":
+            self.messages[0]["content"] = system_prompt
+            
+    async def _append_message(self, message: dict):
+        """Internal helper to safely append a message and notify the event bus."""
+        self.messages.append(message)
+        await self.event_bus.publish("message_added", {"message": message})
+
+    async def add_message(self, role: str, content: str):
         """Adds a message to the agent's working memory context."""
-        self.messages.append({"role": role, "content": content})
+        await self._append_message({"role": role, "content": content})
 
     async def execute_tool(self, name: str, args_str: str) -> str:
         """Safely executes a Python tool function and returns the string result."""
@@ -108,8 +122,15 @@ class AgentCore:
                 
                 message = response.choices[0].message
                 
-                # We must append the exact Assistant message back to context for OpenAI format rules
-                self.messages.append(message)
+                # Convert the object to a dict safely to store in our messages list
+                msg_dict = {"role": "assistant"}
+                if message.content:
+                    msg_dict["content"] = message.content
+                if message.tool_calls:
+                    # We have to keep the exact pydantic objects for tool calls for OpenAI compatibility
+                    msg_dict["tool_calls"] = message.tool_calls
+                    
+                await self._append_message(msg_dict)
                 
                 # 2. Check for Tool Calls
                 if message.tool_calls:
@@ -124,7 +145,7 @@ class AgentCore:
                         print(f"[Tool Result] -> {result}\n")
                         
                         # Add tool result back to the context
-                        self.messages.append({
+                        await self._append_message({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
                             "name": tool_call.function.name,
@@ -141,13 +162,16 @@ class AgentCore:
                     # If it just outputted text and no tools, we leave the suspended flag cleared
                     if not message.tool_calls:
                         print("[Core] Agent is waiting for next event...")
+                        
+                # 4. Context Window Check
+                await self.event_bus.publish("context_window_check", {"agent": self})
 
             except Exception as e:
                 print(f"[Core Error] LLM Call Failed: {e}")
                 await asyncio.sleep(5) # Prevent tight error loops
 
-    def resume(self, user_message: str = None):
+    async def resume(self, user_message: str = None):
         """Wakes the agent up, optionally with new information."""
         if user_message:
-            self.add_message("user", user_message)
+            await self.add_message("user", user_message)
         self.suspended.set()
