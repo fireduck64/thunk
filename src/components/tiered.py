@@ -114,6 +114,8 @@ class TieredMemoryComponent(BaseComponent):
                 "role": role,
                 "content": content
             })
+            
+    async def _compress_memory(self, agent: Any):
         """Extracts the oldest M messages, asks the LLM to summarize them, and evicts them."""
         # Index 0 is System Prompt. We want to pop index 1 through summarize_chunk
         messages_to_compress = agent.messages[1:self.summarize_chunk + 1]

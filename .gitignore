@@ -35,6 +35,7 @@ config.toml
 *.sqlite
 *.sqlite3
 books/
+logs/
 
 # OS Files
 .DS_Store
