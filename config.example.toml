@@ -1,0 +1,16 @@
+[llm]
+# The main agent inference model (e.g., Llama 3, Mixtral)
+api_url = "https://ollama-api.example.com/v1"
+api_key = "YOUR_API_KEY_HERE"
+model_name = "llama3" 
+
+[embeddings]
+# The fast embedding model for vector DB ingestion/search
+api_url = "http://localhost:11434/api/embeddings"
+api_key = ""
+model_name = "nomic-embed-text"
+
+[vectordb]
+host = "localhost"
+port = 6333
+collection_name = "knowledge_base"

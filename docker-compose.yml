@@ -1,0 +1,16 @@
+services:
+  vectordb:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    # Optional: if you don't want it backed up, you can ensure it restarts cleanly
+    restart: unless-stopped
+
+  # We can add Ollama here later if needed, though running it natively on the host 
+  # is usually easier for GPU access.
+
+volumes:
+  qdrant_data:
+    # This creates a named docker volume, keeping data out of your project directory
