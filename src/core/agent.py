@@ -159,10 +159,11 @@ class AgentCore:
 
                 # 3. Check for standard text output
                 if message.content:
-                    print(f"[Agent]: {message.content}")
-                    # If it just outputted text and no tools, we leave the suspended flag cleared
+                    print(f"[Agent Monologue]: {message.content}")
+                    # If it just outputted text and no tools, we must suspend to prevent an infinite loop
                     if not message.tool_calls:
-                        print("[Core] Agent is waiting for next event...")
+                        print("[Core] Agent produced no tool calls. Auto-suspending...")
+                        self.suspended.clear()
                         await self.event_bus.publish("agent_suspended", {"agent": self})
                         
                 # 4. Context Window Check

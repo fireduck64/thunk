@@ -8,7 +8,7 @@ class MQTTAdapter:
     """
     Connects the AgentCore to an MQTT broker.
     Listens for messages on an inbox topic to wake the agent.
-    Publishes the agent's responses to an outbox topic.
+    Publishes the agent's explicit `send_to_operator` events to an outbox topic.
     """
     def __init__(self, agent: AgentCore):
         self.agent = agent
@@ -23,21 +23,19 @@ class MQTTAdapter:
         
         self.client = None
 
-    async def _on_agent_message_added(self, event_name: str, payload: dict):
-        """Intercept messages added to the core. If it's from the agent, publish it."""
-        msg = payload.get("message", {})
-        if msg.get("role") == "assistant" and msg.get("content"):
-            if self.client:
-                print(f"[MQTT] Publishing to {self.outbox_topic}")
-                try:
-                    await self.client.publish(self.outbox_topic, msg["content"].encode('utf-8'))
-                except Exception as e:
-                    print(f"[MQTT Error] Failed to publish: {e}")
+    async def _on_send_to_operator(self, event_name: str, payload: dict):
+        """Intercept explicit operator messages and publish via MQTT."""
+        msg_content = payload.get("message", "")
+        if msg_content and self.client:
+            print(f"[MQTT] Publishing to {self.outbox_topic}")
+            try:
+                await self.client.publish(self.outbox_topic, msg_content.encode('utf-8'))
+            except Exception as e:
+                print(f"[MQTT Error] Failed to publish: {e}")
 
     async def start(self):
         """Connect to MQTT and start the listener loop."""
-        # Subscribe to agent output so we can forward it to MQTT
-        self.agent.event_bus.subscribe("message_added", self._on_agent_message_added)
+        self.agent.event_bus.subscribe("send_to_operator", self._on_send_to_operator)
         
         print(f"[MQTT] Connecting to broker at {self.host}:{self.port}...")
         try:
