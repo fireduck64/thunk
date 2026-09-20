@@ -9,7 +9,7 @@ from src.components.critic import CriticComponent
 from src.components.reader import SequentialReaderComponent
 from src.components.system import SystemComponent
 from src.components.tasks import TaskQueueComponent
-from src.components.directives import DirectivesComponent
+from src.components.clock import ClockComponent
 from src.adapters.mqtt import MQTTAdapter
 
 async def main():
@@ -17,6 +17,7 @@ async def main():
     agent = AgentCore()
     
     # Register all components to create a fully capable agent
+    agent.register_component(ClockComponent())
     agent.register_component(DirectivesComponent())
     agent.register_component(SystemComponent())
     agent.register_component(AuditLogComponent(log_dir="logs"))

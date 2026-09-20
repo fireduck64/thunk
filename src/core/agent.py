@@ -107,6 +107,9 @@ class AgentCore:
         await self.event_bus.publish("agent_started", {"agent": self})
         print(f"[Core] Agent loop started. (Model: {self.model})")
 
+        # Automatically wake the agent up on boot so it can process background tasks
+        self.suspended.set()
+
         while True:
             # Wait until there's an explicit reason to run (like a user message or un-suspended state)
             await self.suspended.wait()
