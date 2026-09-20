@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-VENV_DIR="${THUNK_VENV_DIR:-/tmp/thunk_venv}"
+VENV_DIR="${THUNK_VENV_DIR:-/var/nvme/thunk_venv}"
 
 if [ ! -d "$VENV_DIR" ]; then
     echo "Error: Virtual environment not found at $VENV_DIR."

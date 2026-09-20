@@ -27,7 +27,7 @@ class SequentialReaderComponent(BaseComponent):
             "You have access to a sequential document reader. While your knowledge base search "
             "is good for finding facts, the sequential reader allows you to sit down and read "
             "an entire book from start to finish.\n"
-            "Use `list_library` to see available books. Use `open_book` to load a book into "
+            "Use `search_library` to find books by title. Use `open_book` to load a book into "
             "your active reading state. Use `read_next_chunk` and `read_previous_chunk` to navigate "
             "through the open book."
         )
@@ -38,9 +38,30 @@ class SequentialReaderComponent(BaseComponent):
             
         return prompt
 
+    def search_library(self, query: str) -> List[str]:
+        """
+        Searches for books in the library whose filenames match the query.
+        Returns a list of matching relative file paths that can be passed to open_book.
+        """
+        search_pattern = os.path.join(self.library_dir, "**", "*.epub")
+        files = glob.glob(search_pattern, recursive=True)
+        
+        matches = []
+        query_lower = query.lower()
+        for f in files:
+            rel_path = os.path.relpath(f, self.library_dir)
+            if query_lower in rel_path.lower():
+                matches.append(rel_path)
+                
+        # Limit to 50 results to prevent context window explosion
+        if len(matches) > 50:
+            return matches[:50] + [f"... and {len(matches) - 50} more. Please refine your search."]
+        return matches
+
     def get_tools(self) -> List[Callable]:
         return [
             self.list_library,
+            self.search_library,
             self.open_book,
             self.read_next_chunk,
             self.read_previous_chunk
@@ -50,8 +71,11 @@ class SequentialReaderComponent(BaseComponent):
 
     def list_library(self) -> List[str]:
         """Returns a list of all EPUB filenames available to read."""
-        files = glob.glob(os.path.join(self.library_dir, "*.epub"))
-        return [os.path.basename(f) for f in files]
+        search_pattern = os.path.join(self.library_dir, "**", "*.epub")
+        files = glob.glob(search_pattern, recursive=True)
+        # We only return the filenames, not the full absolute paths, to save context window.
+        # But we need the relative paths so open_book can find them if they are in subdirectories.
+        return [os.path.relpath(f, self.library_dir) for f in files]
 
     def open_book(self, filename: str) -> str:
         """
