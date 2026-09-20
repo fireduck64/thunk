@@ -163,6 +163,7 @@ class AgentCore:
                     # If it just outputted text and no tools, we leave the suspended flag cleared
                     if not message.tool_calls:
                         print("[Core] Agent is waiting for next event...")
+                        await self.event_bus.publish("agent_suspended", {"agent": self})
                         
                 # 4. Context Window Check
                 await self.event_bus.publish("context_window_check", {"agent": self})

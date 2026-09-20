@@ -10,7 +10,8 @@ api_url = "http://localhost:11434/api/embeddings"
 api_key = ""
 model_name = "nomic-embed-text"
 
-[vectordb]
+[mqtt]
 host = "localhost"
-port = 6333
-collection_name = "knowledge_base"
+port = 1883
+inbox_topic = "thunk/agent/inbox"
+outbox_topic = "thunk/agent/outbox"

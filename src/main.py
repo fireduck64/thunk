@@ -1,44 +1,32 @@
 import asyncio
+import sys
 from src.core.agent import AgentCore
 from src.components.notes import StructuredNotesComponent
+from src.components.knowledge import KnowledgeBaseComponent
+from src.adapters.mqtt import MQTTAdapter
 
 async def main():
-    # Initialize the core
+    print("Initializing Thunk Agent...")
     agent = AgentCore()
     
     # Register components
-    notes_component = StructuredNotesComponent(db_path="test_notes.db")
-    agent.register_component(notes_component)
+    agent.register_component(StructuredNotesComponent(db_path="notes.db"))
+    agent.register_component(KnowledgeBaseComponent())
     
-    # Run the agent in the background
-    # We use asyncio.create_task so we can send it messages while it runs
-    agent_task = asyncio.create_task(agent.start())
+    # Create the MQTT adapter
+    mqtt_adapter = MQTTAdapter(agent)
     
-    # Give the agent a moment to start
-    await asyncio.sleep(1)
-    
-    # 1. Ask the agent to save a note using the tool
-    print("\n--- Sending User Message 1 ---")
-    agent.resume("Please save a note with the key 'project_ideas' and the value '1. Learn async. 2. Build robots.'")
-    
-    # Wait to let the agent process and use the tool
-    await asyncio.sleep(10)
-    
-    # 2. Ask the agent to recall the note
-    print("\n--- Sending User Message 2 ---")
-    agent.resume("What were the project ideas I just asked you to save? Use your tools to check.")
-    
-    await asyncio.sleep(10)
-    
-    print("\n--- Checking the SQLite DB directly to verify ---")
-    print("Database contents:", notes_component.get_note("project_ideas"))
-    
-    # Cancel the infinite loop
-    agent_task.cancel()
+    # Run both the agent loop and the MQTT listener concurrently
+    try:
+        await asyncio.gather(
+            agent.start(),
+            mqtt_adapter.start()
+        )
+    except asyncio.CancelledError:
+        print("\nShutting down gracefully...")
 
 if __name__ == "__main__":
-    # Windows/Linux specific asyncio boilerplate for graceful shutdown
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        pass
+        sys.exit(0)
