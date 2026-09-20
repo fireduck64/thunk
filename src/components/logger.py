@@ -9,8 +9,9 @@ class AuditLogComponent(BaseComponent):
     Subscribes to all system events and writes a deterministic, 
     raw JSONL record of exactly what the system executed.
     """
-    def __init__(self, log_dir: str = "logs"):
+    def __init__(self, log_dir: str = "logs", verbose: bool = False):
         self.log_dir = log_dir
+        self.verbose = verbose
         os.makedirs(self.log_dir, exist_ok=True)
         
         # Create a new log file for each session
@@ -26,7 +27,24 @@ class AuditLogComponent(BaseComponent):
             serializable_payload = {}
             for k, v in payload.items():
                 if k == "agent":
-                    continue # Skip serializing the entire agent core object
+                    if self.verbose:
+                        # In verbose mode, we dump the entire working memory of the agent
+                        # to see exactly what context it is operating on
+                        try:
+                            # Try to cleanly extract the messages without breaking on pydantic objects
+                            messages = []
+                            for msg in v.messages:
+                                safe_msg = {"role": msg.get("role"), "content": msg.get("content")}
+                                if "tool_calls" in msg and msg["tool_calls"]:
+                                    safe_msg["tool_calls"] = [
+                                        {"name": tc.function.name, "arguments": tc.function.arguments}
+                                        for tc in msg["tool_calls"]
+                                    ]
+                                messages.append(safe_msg)
+                            serializable_payload["agent_state"] = {"messages": messages}
+                        except Exception:
+                            serializable_payload["agent_state"] = "Error serializing agent state"
+                    continue # Always skip serializing the raw python class object itself
                 
                 # Handle OpenAI message structures safely
                 if k == "message" and isinstance(v, dict):

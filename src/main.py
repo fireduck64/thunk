@@ -23,7 +23,7 @@ async def main():
     agent.register_component(ClockComponent())
     agent.register_component(DirectivesComponent())
     agent.register_component(SystemComponent())
-    agent.register_component(AuditLogComponent(log_dir="logs"))
+    agent.register_component(AuditLogComponent(log_dir="logs", verbose=True))
     agent.register_component(TieredMemoryComponent(db_path="memory.db", max_messages=20, summarize_chunk=10))
     agent.register_component(CriticComponent(frequency=5))
     agent.register_component(TaskQueueComponent(db_path="tasks.db"))
