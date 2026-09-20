@@ -164,7 +164,8 @@ class AgentCore:
                         
                     # Set the flag so it loops immediately to see tool results
                     self.suspended.set()
-                    continue 
+                    # We do NOT 'continue' here because we still need to run 
+                    # the context window checks and trigger other event hooks!
 
                 # 3. Check for standard text output
                 if message.content:
