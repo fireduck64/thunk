@@ -10,8 +10,9 @@ api_url = "http://localhost:11434/api/embeddings"
 api_key = ""
 model_name = "nomic-embed-text"
 
-[mqtt]
-host = "localhost"
-port = 1883
-inbox_topic = "thunk/agent/inbox"
-outbox_topic = "thunk/agent/outbox"
+[discord]
+# To get a token, create an application at https://discord.com/developers/applications
+# Ensure you enable the "Message Content Intent" in the Bot settings.
+bot_token = "YOUR_DISCORD_BOT_TOKEN_HERE"
+# Optional: Restrict the bot to only listen/reply in a specific channel ID
+# allowed_channel_id = 123456789012345678

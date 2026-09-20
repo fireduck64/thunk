@@ -14,6 +14,7 @@ from src.components.directives import DirectivesComponent
 from src.components.vector_memory import VectorMemoryComponent
 from src.components.global_search import GlobalSearchComponent
 from src.adapters.mqtt import MQTTAdapter
+from src.adapters.discord_adapter import DiscordAdapter
 
 async def main():
     print("Initializing Thunk Agent...")
@@ -33,14 +34,16 @@ async def main():
     agent.register_component(SequentialReaderComponent(library_dir="/vault/ebook"))
     agent.register_component(GlobalSearchComponent())
     
-    # Create the MQTT adapter
+    # Create adapters
     mqtt_adapter = MQTTAdapter(agent)
+    discord_adapter = DiscordAdapter(agent)
     
-    # Run both the agent loop and the MQTT listener concurrently
+    # Run the agent loop and all listeners concurrently
     try:
         await asyncio.gather(
             agent.start(),
-            mqtt_adapter.start()
+            mqtt_adapter.start(),
+            discord_adapter.start()
         )
     except asyncio.CancelledError:
         print("\nShutting down gracefully...")
