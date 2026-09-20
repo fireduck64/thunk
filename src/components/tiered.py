@@ -110,6 +110,12 @@ class TieredMemoryComponent(BaseComponent):
                 # We skip injecting broken tool calls into the strict OpenAI context window on restore
                 continue
                 
+            # If the database stored a raw empty string, and it's not a tool call (because we skipped those),
+            # OpenAI will crash if we try to send {"role": "assistant", "content": ""}. 
+            # We must normalize empty content to a string with at least one space or skip it.
+            if not content:
+                continue
+                
             agent.messages.append({
                 "role": role,
                 "content": content

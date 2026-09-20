@@ -132,6 +132,11 @@ class AgentCore:
                     # We have to keep the exact pydantic objects for tool calls for OpenAI compatibility
                     msg_dict["tool_calls"] = message.tool_calls
                     
+                # OpenAI strictly forbids assistant messages with both null content AND no tool_calls,
+                # though it shouldn't happen, we provide a fallback empty string just in case
+                if "content" not in msg_dict and "tool_calls" not in msg_dict:
+                    msg_dict["content"] = ""
+                    
                 await self._append_message(msg_dict)
                 
                 # 2. Check for Tool Calls
