@@ -12,6 +12,7 @@ from src.components.tasks import TaskQueueComponent
 from src.components.clock import ClockComponent
 from src.components.directives import DirectivesComponent
 from src.components.vector_memory import VectorMemoryComponent
+from src.components.global_search import GlobalSearchComponent
 from src.adapters.mqtt import MQTTAdapter
 
 async def main():
@@ -30,6 +31,7 @@ async def main():
     agent.register_component(KnowledgeBaseComponent())
     agent.register_component(VectorMemoryComponent(collection_name="agent_memory"))
     agent.register_component(SequentialReaderComponent(library_dir="/vault/ebook"))
+    agent.register_component(GlobalSearchComponent())
     
     # Create the MQTT adapter
     mqtt_adapter = MQTTAdapter(agent)

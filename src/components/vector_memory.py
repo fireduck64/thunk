@@ -43,14 +43,18 @@ class VectorMemoryComponent(BaseComponent):
 
     def get_system_prompt_addition(self) -> str:
         return (
-            "You have access to a Semantic Vector Memory (a personal, writable vector database). "
-            "Unlike Structured Notes (which require specific keys), you can use `save_semantic_memory` "
-            "to store unstructured facts, thoughts, or lore. You can then use `search_semantic_memory` "
-            "to recall them later based on meaning or concepts rather than exact keywords."
+            "You have a personal Semantic Vector Memory. Use `save_semantic_memory` "
+            "to store unstructured facts, thoughts, or lore. "
+            "(To retrieve them, use the `global_search` tool)."
         )
 
     def get_tools(self) -> List[Callable]:
-        return [self.save_semantic_memory, self.search_semantic_memory]
+        # We only expose the save tool directly
+        return [self.save_semantic_memory]
+
+    def execute_search(self, query: str) -> str:
+        """Standardized interface for GlobalSearchComponent."""
+        return self.search_semantic_memory(query, num_results=2)
 
     def _get_embedding(self, text: str) -> list[float]:
         """Helper to call the embeddings API."""

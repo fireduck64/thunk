@@ -24,17 +24,20 @@ class KnowledgeBaseComponent(BaseComponent):
         self._client = None
 
     def get_system_prompt_addition(self) -> str:
-        return (
-            "You have access to a vast Knowledge Base containing books, manuals, and documents. "
-            "If you need to look up facts, lore, or specific information that you do not "
-            "currently have in memory, use the `search_knowledge_base` tool. It performs "
-            "semantic searches, so you can search using natural language questions."
-        )
+        # We remove the tool instruction here, as GlobalSearch handles it now
+        return ""
 
     def get_tools(self) -> List[Callable]:
-        return [self.search_knowledge_base]
+        # We no longer expose this directly to the LLM
+        return []
 
-    def _get_embedding(self, text: str) -> list[float]:
+    def execute_search(self, query: str) -> str:
+        """Standardized interface for GlobalSearchComponent."""
+        # We just reuse the existing search logic, but limit it to 2 results 
+        # so GlobalSearch doesn't explode the context window with too much text
+        return self.search_knowledge_base(query, num_results=2)
+
+    def search_knowledge_base(self, query: str, num_results: int = 3) -> str:
         """Helper to call the embeddings API."""
         headers = {}
         if self.api_key:

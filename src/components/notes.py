@@ -20,17 +20,34 @@ class StructuredNotesComponent(BaseComponent):
         return (
             "You have access to a Structured Notes system. Treat this like a desk where "
             "you can store specific information blocks for later retrieval. Use `put_note` "
-            "to save things you don't want to lose from your working memory, and `list_note_keys` "
-            "to see what you have saved."
+            "to save things you don't want to lose, and `list_note_keys` to see what you have saved. "
+            "(You can also retrieve notes via the `global_search` tool)."
         )
 
     def get_tools(self) -> List[Callable]:
+        # We still expose get_note for explicit precise lookups, 
+        # but the agent can also rely on global_search.
         return [
             self.list_note_keys,
             self.get_note,
             self.put_note,
             self.delete_note
         ]
+
+    def execute_search(self, query: str) -> str:
+        """Standardized interface for GlobalSearchComponent."""
+        # Simple string matching across all note keys and values
+        query_lower = query.lower()
+        results = []
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT key, value FROM notes")
+            for key, value in cursor.fetchall():
+                if query_lower in key.lower() or query_lower in value.lower():
+                    results.append(f"Note '{key}':\n{value}")
+                    
+        if not results:
+            return "" # Return empty string so GlobalSearch skips this component
+        return "\n\n".join(results)
 
     # --- Tool Implementations ---
 
