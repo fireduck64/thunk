@@ -169,14 +169,16 @@ class AgentCore:
                 # 3. Check for standard text output
                 if message.content:
                     print(f"[Agent Monologue]: {message.content}")
-                    # If it just outputted text and no tools, we must suspend to prevent an infinite loop
-                    if not message.tool_calls:
-                        print("[Core] Agent produced no tool calls. Auto-suspending...")
-                        self.suspended.clear()
-                        await self.event_bus.publish("agent_suspended", {"agent": self})
-                        
+
                 # 4. Context Window Check
                 await self.event_bus.publish("context_window_check", {"agent": self})
+                
+                # 5. Suspend if no tools were called (to prevent infinite monologue loops)
+                # We do this AFTER the context window check so memory compression can run
+                if message.content and not message.tool_calls:
+                    print("[Core] Agent produced no tool calls. Auto-suspending...")
+                    self.suspended.clear()
+                    await self.event_bus.publish("agent_suspended", {"agent": self})
 
             except Exception as e:
                 print(f"[Core Error] LLM Call Failed: {e}")
