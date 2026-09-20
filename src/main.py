@@ -3,6 +3,7 @@ import sys
 from src.core.agent import AgentCore
 from src.components.notes import StructuredNotesComponent
 from src.components.knowledge import KnowledgeBaseComponent
+from src.components.logger import AuditLogComponent
 from src.adapters.mqtt import MQTTAdapter
 
 async def main():
@@ -10,6 +11,7 @@ async def main():
     agent = AgentCore()
     
     # Register components
+    agent.register_component(AuditLogComponent())
     agent.register_component(StructuredNotesComponent(db_path="notes.db"))
     agent.register_component(KnowledgeBaseComponent())
     
