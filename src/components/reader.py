@@ -82,13 +82,24 @@ class SequentialReaderComponent(BaseComponent):
         Opens an EPUB file from the library, extracts its text, and prepares it for reading.
         Resets your reading position to the beginning.
         """
+        # Because we return relative paths in list_library/search_library,
+        # we can safely join the filename with the library_dir
         file_path = os.path.join(self.library_dir, filename)
-        if not os.path.exists(file_path):
-            return f"Error: Book '{filename}' not found in the library."
+        
+        # Security check: Ensure the resolved path is still inside the library directory
+        # to prevent directory traversal attacks (e.g. filename="../../etc/passwd")
+        abs_library_dir = os.path.abspath(self.library_dir)
+        abs_file_path = os.path.abspath(file_path)
+        
+        if not abs_file_path.startswith(abs_library_dir):
+            return f"Error: Invalid filename '{filename}'. Path traversal is not allowed."
+
+        if not os.path.exists(abs_file_path):
+            return f"Error: Book '{filename}' not found at {abs_file_path}."
 
         try:
-            print(f"[Reader] Extracting text from {filename}...")
-            book = epub.read_epub(file_path)
+            print(f"[Reader] Extracting text from {abs_file_path}...")
+            book = epub.read_epub(abs_file_path)
             full_text = []
             
             # Simple linear extraction
