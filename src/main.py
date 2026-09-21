@@ -14,6 +14,7 @@ from src.components.directives import DirectivesComponent
 from src.components.vector_memory import VectorMemoryComponent
 from src.components.global_search import GlobalSearchComponent
 from src.components.subconscious import SubconsciousRecallComponent
+from src.components.file_reader import FileReaderComponent
 from src.adapters.mqtt import MQTTAdapter
 from src.adapters.discord_adapter import DiscordAdapter
 
@@ -40,6 +41,7 @@ async def main():
     agent.register_component(VectorMemoryComponent(collection_name="agent_memory"))
     agent.register_component(SequentialReaderComponent(library_dir="/vault/ebook"))
     agent.register_component(GlobalSearchComponent())
+    agent.register_component(FileReaderComponent(allowed_dir="/"))
     
     # Create adapters
     mqtt_adapter = MQTTAdapter(agent)
