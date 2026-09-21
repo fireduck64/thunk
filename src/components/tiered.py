@@ -133,6 +133,15 @@ class TieredMemoryComponent(BaseComponent):
             content = msg.get("content", "")
             if not content and msg.get("tool_calls"):
                 content = "Called tools."
+                
+            # If this message was a user message that had a [Subconscious Recall] block prepended to it,
+            # we want to strip that block out of the transcript before we summarize it!
+            # The subconscious recall is just transient context, not a permanent event that happened.
+            if role == "user" and content.startswith("[Subconscious Recall Triggered"):
+                parts = content.split("--- End Recall ---\n\n", 1)
+                if len(parts) == 2:
+                    content = parts[1] # Keep only what the Operator actually said
+                    
             transcript += f"[{role.upper()}]: {content}\n"
 
         current_summary = self._get_core_summary()
@@ -161,6 +170,19 @@ class TieredMemoryComponent(BaseComponent):
                 # Save the new summary
                 self._update_core_summary(new_summary)
                 print(f"[Memory] New Core Summary Generated: {new_summary[:50]}...")
+                
+                # --- MEMORY CONSOLIDATION (Subconscious Integration) ---
+                # As discussed in MEMORY_REMODEL, we want synthesized summaries to automatically
+                # flow into the long-term semantic vector database, much like human sleep consolidation.
+                for comp in agent.components:
+                    if comp.__class__.__name__ == "VectorMemoryComponent":
+                        try:
+                            # Save the transcript + summary as a consolidated block
+                            consolidation = f"Consolidated Memory Block:\nSummary: {new_summary}\nRaw Events:\n{transcript}"
+                            comp.save_semantic_memory(consolidation)
+                            print("[Memory] Sent consolidated block to long-term Vector Memory.")
+                        except Exception as e:
+                            print(f"[Memory] Failed to consolidate to Vector Memory: {e}")
                 
                 # Safely remove the compressed messages from the agent's working memory
                 del agent.messages[1:self.summarize_chunk + 1]

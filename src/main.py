@@ -13,6 +13,7 @@ from src.components.clock import ClockComponent
 from src.components.directives import DirectivesComponent
 from src.components.vector_memory import VectorMemoryComponent
 from src.components.global_search import GlobalSearchComponent
+from src.components.subconscious import SubconsciousRecallComponent
 from src.adapters.mqtt import MQTTAdapter
 from src.adapters.discord_adapter import DiscordAdapter
 
@@ -21,6 +22,7 @@ async def main():
     agent = AgentCore()
     
     # Register all components to create a fully capable agent
+    agent.register_component(SubconsciousRecallComponent())
     agent.register_component(ClockComponent())
     agent.register_component(DirectivesComponent())
     agent.register_component(SystemComponent())

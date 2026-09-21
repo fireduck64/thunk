@@ -39,6 +39,7 @@ class AgentCore:
         self.event_bus.subscribe("agent_started", component.on_event)
         self.event_bus.subscribe("tool_executed", component.on_event)
         self.event_bus.subscribe("message_added", component.on_event)
+        self.event_bus.subscribe("before_user_message_added", component.on_event)
         self.event_bus.subscribe("context_window_check", component.on_event)
 
     def _build_system_prompt(self) -> str:
@@ -67,14 +68,15 @@ class AgentCore:
         if self.messages and self.messages[0].get("role") == "system":
             self.messages[0]["content"] = system_prompt
             
-    async def _append_message(self, message: dict):
+    async def _append_message(self, message: dict, publish_event: bool = True):
         """Internal helper to safely append a message and notify the event bus."""
         self.messages.append(message)
-        await self.event_bus.publish("message_added", {"message": message})
+        if publish_event:
+            await self.event_bus.publish("message_added", {"message": message})
 
-    async def add_message(self, role: str, content: str):
+    async def add_message(self, role: str, content: str, publish_event: bool = True):
         """Adds a message to the agent's working memory context."""
-        await self._append_message({"role": role, "content": content})
+        await self._append_message({"role": role, "content": content}, publish_event)
 
     async def execute_tool(self, name: str, args_str: str) -> str:
         """Safely executes a Python tool function and returns the string result."""
@@ -191,5 +193,21 @@ class AgentCore:
     async def resume(self, user_message: str = None):
         """Wakes the agent up, optionally with new information."""
         if user_message:
-            await self.add_message("user", user_message)
+            # We intercept User messages here. 
+            # If the user sends a message, we do a subconscious associative search
+            # across internal memory and inject the results transparently.
+            # We don't want to save this injected text to the archival log though!
+            
+            # Fire an event that components can hook into to modify the message BEFORE it gets saved
+            # or to append context. We use a dict so it's mutable by reference.
+            msg_context = {"content": user_message}
+            await self.event_bus.publish("before_user_message_added", msg_context)
+            
+            # Save the clean message to the archival log
+            await self.add_message("user", user_message, publish_event=True)
+            
+            # If a component added subconscious context, we replace the working memory content
+            if msg_context["content"] != user_message:
+                self.messages[-1]["content"] = msg_context["content"]
+            
         self.suspended.set()
