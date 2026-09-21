@@ -58,6 +58,12 @@ class AuditLogComponent(BaseComponent):
                             for tc in v["tool_calls"]
                         ]
                     serializable_payload[k] = safe_msg
+                elif k == "response":
+                    # Serialize the raw OpenAI ChatCompletion response object
+                    try:
+                        serializable_payload[k] = v.model_dump()
+                    except Exception:
+                        serializable_payload[k] = "Error serializing raw response object"
                 else:
                     serializable_payload[k] = v
 
@@ -78,8 +84,8 @@ class AuditLogComponent(BaseComponent):
         if event_name in ["context_window_check", "agent_suspended"]:
             return
             
-        # We only log before_llm_call if verbose is True, because it contains the entire context window
-        if event_name == "before_llm_call" and not self.verbose:
+        # We only log before/after llm_call if verbose is True, because they are massive
+        if event_name in ["before_llm_call", "after_llm_call"] and not self.verbose:
             return
             
         self._write_log(event_name, payload)

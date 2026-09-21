@@ -42,6 +42,7 @@ class AgentCore:
         self.event_bus.subscribe("before_user_message_added", component.on_event)
         self.event_bus.subscribe("context_window_check", component.on_event)
         self.event_bus.subscribe("before_llm_call", component.on_event)
+        self.event_bus.subscribe("after_llm_call", component.on_event)
 
     def _build_system_prompt(self) -> str:
         """Aggregates all component system instructions."""
@@ -133,6 +134,9 @@ class AgentCore:
                     # Tool choice auto ensures it can choose to use tools or output text
                     tool_choice="auto" if self.tools else "none" 
                 )
+                
+                # Tell the logger exactly what the LLM returned (useful for debugging token usage and full responses)
+                await self.event_bus.publish("after_llm_call", {"agent": self, "response": response})
                 
                 message = response.choices[0].message
                 
