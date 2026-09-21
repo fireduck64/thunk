@@ -132,7 +132,9 @@ class AgentCore:
                     messages=self.messages,
                     tools=self.tools if self.tools else None,
                     # Tool choice auto ensures it can choose to use tools or output text
-                    tool_choice="auto" if self.tools else "none" 
+                    tool_choice="auto" if self.tools else "none",
+                    frequency_penalty=0.2, # Light penalty to prevent "<|channel>thought" infinite loops
+                    presence_penalty=0.2
                 )
                 
                 # Tell the logger exactly what the LLM returned (useful for debugging token usage and full responses)
