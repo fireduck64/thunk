@@ -78,4 +78,8 @@ class AuditLogComponent(BaseComponent):
         if event_name in ["context_window_check", "agent_suspended"]:
             return
             
+        # We only log before_llm_call if verbose is True, because it contains the entire context window
+        if event_name == "before_llm_call" and not self.verbose:
+            return
+            
         self._write_log(event_name, payload)

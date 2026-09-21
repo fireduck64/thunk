@@ -41,6 +41,7 @@ class AgentCore:
         self.event_bus.subscribe("message_added", component.on_event)
         self.event_bus.subscribe("before_user_message_added", component.on_event)
         self.event_bus.subscribe("context_window_check", component.on_event)
+        self.event_bus.subscribe("before_llm_call", component.on_event)
 
     def _build_system_prompt(self) -> str:
         """Aggregates all component system instructions."""
@@ -121,6 +122,9 @@ class AgentCore:
             self.suspended.clear() # Clear the flag so it suspends again after processing
                 
             try:
+                # Tell the logger exactly what we are sending to the LLM
+                await self.event_bus.publish("before_llm_call", {"agent": self, "messages": self.messages})
+                
                 # 1. Prompt the LLM
                 response = await self.client.chat.completions.create(
                     model=self.model,
