@@ -58,6 +58,17 @@ class AuditLogComponent(BaseComponent):
                             for tc in v["tool_calls"]
                         ]
                     serializable_payload[k] = safe_msg
+                elif k == "messages" and isinstance(v, list):
+                    safe_messages = []
+                    for msg in v:
+                        safe_msg = {"role": msg.get("role"), "content": msg.get("content")}
+                        if "tool_calls" in msg and msg["tool_calls"]:
+                            safe_msg["tool_calls"] = [
+                                {"name": tc.function.name, "arguments": tc.function.arguments}
+                                for tc in msg["tool_calls"]
+                            ]
+                        safe_messages.append(safe_msg)
+                    serializable_payload[k] = safe_messages
                 elif k == "response":
                     # Serialize the raw OpenAI ChatCompletion response object
                     try:
