@@ -144,6 +144,11 @@ class TieredMemoryComponent(BaseComponent):
                     
             transcript += f"[{role.upper()}]: {content}\n"
 
+        # IMPORTANT FIX: We aggressively evict the messages from the agent's context 
+        # BEFORE making the LLM call. This guarantees the context window shrinks 
+        # even if the summarization LLM call times out or crashes.
+        del agent.messages[1:self.summarize_chunk + 1]
+
         current_summary = self._get_core_summary()
         
         prompt = (
@@ -184,8 +189,7 @@ class TieredMemoryComponent(BaseComponent):
                         except Exception as e:
                             print(f"[Memory] Failed to consolidate to Vector Memory: {e}")
                 
-                # Safely remove the compressed messages from the agent's working memory
-                del agent.messages[1:self.summarize_chunk + 1]
+                # NOTE: The messages were already deleted at the top of this function!
                 
                 # Ask the agent to rebuild its system prompt so the new summary is injected immediately
                 agent.rebuild_system_prompt()
@@ -197,10 +201,5 @@ class TieredMemoryComponent(BaseComponent):
                 await asyncio.sleep(5) # Wait before retrying
                 
         # --- Emergency Eviction (Circuit Breaker) ---
-        # If we failed all 3 times (e.g. Nginx is completely dead, or context is so large 
-        # that even the compression prompt exceeds OpenAI limits), we must forcefully 
-        # evict the oldest messages without summarizing them. Otherwise, the agent's 
-        # context window will remain over the threshold, and it will be deadlocked forever.
-        print("[Memory CRITICAL] All compression retries failed. Forcefully evicting oldest messages to prevent deadlock.")
-        del agent.messages[1:self.summarize_chunk + 1]
+        print("[Memory CRITICAL] All compression retries failed. The messages were evicted, but the summary was lost.")
         agent.rebuild_system_prompt()
