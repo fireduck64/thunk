@@ -1,5 +1,6 @@
 import asyncio
 import json
+import inspect
 from openai import AsyncOpenAI
 
 from src.core.events import EventBus
@@ -89,13 +90,17 @@ class AgentCore:
             args = json.loads(args_str)
             func = self.tool_map[name]
             
+            # Filter out any hallucinated arguments not in the function signature
+            valid_params = inspect.signature(func).parameters.keys()
+            safe_args = {k: v for k, v in args.items() if k in valid_params}
+            
             # If the tool is an async function, await it, otherwise just call it.
             if asyncio.iscoroutinefunction(func):
-                result = await func(**args)
+                result = await func(**safe_args)
             else:
-                result = func(**args)
+                result = func(**safe_args)
                 
-            await self.event_bus.publish("tool_executed", {"name": name, "args": args, "result": result})
+            await self.event_bus.publish("tool_executed", {"name": name, "args": safe_args, "result": result})
             return str(result)
             
         except Exception as e:
@@ -189,12 +194,9 @@ class AgentCore:
                 # 4. Context Window Check
                 await self.event_bus.publish("context_window_check", {"agent": self})
                 
-                # 5. Suspend if no tools were called (to prevent infinite monologue loops)
-                # We do this AFTER the context window check so memory compression can run
-                if message.content and not message.tool_calls:
-                    print("[Core] Agent produced no tool calls. Auto-suspending...")
-                    self.suspended.clear()
-                    await self.event_bus.publish("agent_suspended", {"agent": self})
+                # Note: We removed the auto-suspension logic here. 
+                # The agent is now expected to explicitly use the `wait_for_next_event` tool
+                # from the SystemComponent when it is finished working.
 
             except Exception as e:
                 print(f"[Core Error] LLM Call Failed: {e}")
