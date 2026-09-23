@@ -26,31 +26,43 @@ class SequentialReaderComponent(BaseComponent):
 
     def _init_db(self):
         """Initializes the SQLite DB used to store the reader's state."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS reader_state (
-                    id INTEGER PRIMARY KEY CHECK (id = 1),
-                    current_book TEXT,
-                    current_index INTEGER
-                )
-            """)
-            # Ensure there is always a row to update
-            conn.execute("INSERT OR IGNORE INTO reader_state (id, current_book, current_index) VALUES (1, NULL, 0)")
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS reader_state (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        current_book TEXT,
+                        current_index INTEGER
+                    )
+                """)
+                # Ensure there is always a row to update
+                conn.execute("INSERT OR IGNORE INTO reader_state (id, current_book, current_index) VALUES (1, NULL, 0)")
 
+        finally:
+            conn.close()
     def _save_state(self):
         """Saves the current bookmark to SQLite."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "UPDATE reader_state SET current_book = ?, current_index = ? WHERE id = 1",
-                (self.current_book, self.current_index)
-            )
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                conn.execute(
+                    "UPDATE reader_state SET current_book = ?, current_index = ? WHERE id = 1",
+                    (self.current_book, self.current_index)
+                )
 
+        finally:
+            conn.close()
     def _load_state(self):
         """Loads the bookmark from SQLite and rebuilds the text chunks if a book was open."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("SELECT current_book, current_index FROM reader_state WHERE id = 1")
-            row = cursor.fetchone()
-            
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                cursor = conn.execute("SELECT current_book, current_index FROM reader_state WHERE id = 1")
+                row = cursor.fetchone()
+
+        finally:
+            conn.close()
         self.current_book = row[0]
         self.current_index = row[1]
         self.current_chunks = []

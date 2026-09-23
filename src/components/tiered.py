@@ -16,33 +16,45 @@ class TieredMemoryComponent(BaseComponent):
         self._init_db()
 
     def _init_db(self):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS archival_log (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                    role TEXT, 
-                    content TEXT, 
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS core_summary (
-                    id INTEGER PRIMARY KEY, 
-                    summary TEXT
-                )
-            """)
-            # Ensure there is always a row 1 for the summary
-            conn.execute("INSERT OR IGNORE INTO core_summary (id, summary) VALUES (1, 'No summary yet.')")
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS archival_log (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                        role TEXT, 
+                        content TEXT, 
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS core_summary (
+                        id INTEGER PRIMARY KEY, 
+                        summary TEXT
+                    )
+                """)
+                # Ensure there is always a row 1 for the summary
+                conn.execute("INSERT OR IGNORE INTO core_summary (id, summary) VALUES (1, 'No summary yet.')")
 
+        finally:
+            conn.close()
     def _get_core_summary(self) -> str:
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("SELECT summary FROM core_summary WHERE id = 1")
-            return cursor.fetchone()[0]
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                cursor = conn.execute("SELECT summary FROM core_summary WHERE id = 1")
+                return cursor.fetchone()[0]
 
+        finally:
+            conn.close()
     def _update_core_summary(self, new_summary: str):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("UPDATE core_summary SET summary = ? WHERE id = 1", (new_summary,))
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                conn.execute("UPDATE core_summary SET summary = ? WHERE id = 1", (new_summary,))
 
+        finally:
+            conn.close()
     def get_system_prompt_addition(self) -> str:
         summary = self._get_core_summary()
         return (
@@ -67,12 +79,16 @@ class TieredMemoryComponent(BaseComponent):
                 # Need to handle pydantic/OpenAI objects safely for logging
                 content = f"[Tool Calls Requested]"
                 
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute(
-                    "INSERT INTO archival_log (role, content) VALUES (?, ?)", 
-                    (role, str(content))
-                )
+            conn = sqlite3.connect(self.db_path)
+            try:
+                with conn:
+                    conn.execute(
+                        "INSERT INTO archival_log (role, content) VALUES (?, ?)", 
+                        (role, str(content))
+                    )
 
+            finally:
+                conn.close()
         elif event_name == "context_window_check":
             agent = payload["agent"]
             
@@ -87,15 +103,19 @@ class TieredMemoryComponent(BaseComponent):
         from the archival log so it can seamlessly resume its previous thought process.
         """
         print("[Memory] Restoring agent's working memory from previous session...")
-        with sqlite3.connect(self.db_path) as conn:
-            # We fetch the last N messages, where N is max_messages
-            # We sort descending to get the newest, then reverse them to chronological order
-            cursor = conn.execute(
-                "SELECT role, content FROM archival_log ORDER BY id DESC LIMIT ?",
-                (self.max_messages,)
-            )
-            rows = cursor.fetchall()
-            
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                # We fetch the last N messages, where N is max_messages
+                # We sort descending to get the newest, then reverse them to chronological order
+                cursor = conn.execute(
+                    "SELECT role, content FROM archival_log ORDER BY id DESC LIMIT ?",
+                    (self.max_messages,)
+                )
+                rows = cursor.fetchall()
+
+        finally:
+            conn.close()
         if not rows:
             return
             

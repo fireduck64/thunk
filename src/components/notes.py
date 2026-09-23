@@ -11,11 +11,15 @@ class StructuredNotesComponent(BaseComponent):
         self._init_db()
 
     def _init_db(self):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS notes (key TEXT PRIMARY KEY, value TEXT)"
-            )
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS notes (key TEXT PRIMARY KEY, value TEXT)"
+                )
 
+        finally:
+            conn.close()
     def get_system_prompt_addition(self) -> str:
         return (
             "You have access to a Structured Notes system. Treat this like a desk where "
@@ -39,12 +43,16 @@ class StructuredNotesComponent(BaseComponent):
         # Simple string matching across all note keys and values
         query_lower = query.lower()
         results = []
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("SELECT key, value FROM notes")
-            for key, value in cursor.fetchall():
-                if query_lower in key.lower() or query_lower in value.lower():
-                    results.append(f"Note '{key}':\n{value}")
-                    
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                cursor = conn.execute("SELECT key, value FROM notes")
+                for key, value in cursor.fetchall():
+                    if query_lower in key.lower() or query_lower in value.lower():
+                        results.append(f"Note '{key}':\n{value}")
+
+        finally:
+            conn.close()
         if not results:
             return "" # Return empty string so GlobalSearch skips this component
         return "\n\n".join(results)
@@ -53,31 +61,47 @@ class StructuredNotesComponent(BaseComponent):
 
     def list_note_keys(self) -> List[str]:
         """Returns a list of all currently saved note keys."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("SELECT key FROM notes")
-            return [row[0] for row in cursor.fetchall()]
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                cursor = conn.execute("SELECT key FROM notes")
+                return [row[0] for row in cursor.fetchall()]
 
+        finally:
+            conn.close()
     def get_note(self, key: str) -> str:
         """Retrieves the contents of a specific note."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("SELECT value FROM notes WHERE key = ?", (key,))
-            row = cursor.fetchone()
-            if row:
-                return row[0]
-            return f"Error: Note with key '{key}' not found."
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                cursor = conn.execute("SELECT value FROM notes WHERE key = ?", (key,))
+                row = cursor.fetchone()
+                if row:
+                    return row[0]
+                return f"Error: Note with key '{key}' not found."
 
+        finally:
+            conn.close()
     def put_note(self, key: str, value: str) -> str:
         """Creates or overwrites a note with the given key and value."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "INSERT INTO notes (key, value) VALUES (?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value", 
-                (key, value)
-            )
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                conn.execute(
+                    "INSERT INTO notes (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value", 
+                    (key, value)
+                )
+        finally:
+            conn.close()
         return f"Success: Note '{key}' saved."
 
     def delete_note(self, key: str) -> str:
         """Deletes a note."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("DELETE FROM notes WHERE key = ?", (key,))
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                conn.execute("DELETE FROM notes WHERE key = ?", (key,))
+        finally:
+            conn.close()
         return f"Success: Note '{key}' deleted if it existed."
