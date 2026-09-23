@@ -45,12 +45,13 @@ class VectorMemoryComponent(BaseComponent):
         return (
             "You have a personal Semantic Vector Memory. Use `save_semantic_memory` "
             "to store unstructured facts, thoughts, or lore. "
-            "(To retrieve them, use the `global_search` tool)."
+            "(To retrieve them, use the `global_search` tool). "
+            "Use `dump_semantic_memory` to view all saved items."
         )
 
     def get_tools(self) -> List[Callable]:
-        # We only expose the save tool directly
-        return [self.save_semantic_memory]
+        # Expose the save tool and the dump tool directly
+        return [self.save_semantic_memory, self.dump_semantic_memory]
 
     def execute_search(self, query: str) -> str:
         """Standardized interface for GlobalSearchComponent."""
@@ -134,3 +135,43 @@ class VectorMemoryComponent(BaseComponent):
             
         except Exception as e:
             return f"Error accessing semantic memory: {str(e)}"
+
+    def dump_semantic_memory(self, limit: int = 10, offset: int = 0) -> str:
+        """
+        Dumps the raw contents of your personal semantic memory. 
+        Use this tool to see exactly what you have stored in the vector database.
+        Use limit and offset to paginate through large memory collections.
+        """
+        print(f"[VectorMemory] Dumping memory (limit={limit}, offset={offset})...")
+        try:
+            if not self._client:
+                self._client = QdrantClient(host=self.host, port=self.port)
+            
+            # Use scroll to retrieve raw points without vector search
+            result, next_page_offset = self._client.scroll(
+                collection_name=self.collection,
+                limit=limit,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            
+            if not result:
+                return f"No memories found (offset={offset})."
+                
+            dump_lines = []
+            for i, point in enumerate(result):
+                text = point.payload.get('text', '')
+                timestamp = point.payload.get('timestamp', 'Unknown Time')
+                dump_lines.append(f"--- Record {offset + i + 1} (Saved: {timestamp}) ID: {point.id} ---\n{text}")
+                
+            response = "\n\n".join(dump_lines)
+            if next_page_offset:
+                response += f"\n\n(More records exist. To view them, call this tool again with offset={next_page_offset})"
+            else:
+                response += f"\n\n(End of memory records)"
+                
+            return response
+            
+        except Exception as e:
+            return f"Error dumping semantic memory: {str(e)}"
