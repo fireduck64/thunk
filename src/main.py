@@ -34,14 +34,14 @@ async def main():
     # Max messages: 12. Chunk to summarize: 6.
     agent.register_component(TieredMemoryComponent(db_path="memory.db", max_messages=12, summarize_chunk=6))
     
-    agent.register_component(CriticComponent(frequency=5))
+    agent.register_component(CriticComponent(frequency=8))
     agent.register_component(TaskQueueComponent(db_path="tasks.db"))
     agent.register_component(StructuredNotesComponent(db_path="notes.db"))
     agent.register_component(KnowledgeBaseComponent())
     agent.register_component(VectorMemoryComponent(collection_name="agent_memory"))
     agent.register_component(SequentialReaderComponent(library_dir="/vault/ebook"))
     agent.register_component(GlobalSearchComponent())
-    agent.register_component(FileReaderComponent(allowed_dir="/"))
+    agent.register_component(FileReaderComponent(libraries={"thunk_source": "/home/fireduck/projects/thunk/src"}))
     
     # Create adapters
     mqtt_adapter = MQTTAdapter(agent)

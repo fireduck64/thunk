@@ -1,4 +1,4 @@
-from typing import List, Callable
+from typing import List, Callable, Dict, Any
 import sqlite3
 from src.components.base import BaseComponent
 
@@ -24,7 +24,10 @@ class StructuredNotesComponent(BaseComponent):
         return (
             "You have access to a Structured Notes system. Treat this like a desk where "
             "you can store specific information blocks for later retrieval. Use `put_note` "
-            "to save things you don't want to lose, and `list_note_keys` to see what you have saved. "
+            "to save things you don't want to lose.\n"
+            "You can organize notes hierarchically using '/' in your keys (e.g., 'book/character/name'). "
+            "Use `list_note_keys` with an optional 'path' argument to navigate folders. "
+            "Use `rename_note` to move or rename notes. "
             "(You can also retrieve notes via the `global_search` tool)."
         )
 
@@ -35,7 +38,8 @@ class StructuredNotesComponent(BaseComponent):
             self.list_note_keys,
             self.get_note,
             self.put_note,
-            self.delete_note
+            self.delete_note,
+            self.rename_note
         ]
 
     def execute_search(self, query: str) -> str:
@@ -59,16 +63,45 @@ class StructuredNotesComponent(BaseComponent):
 
     # --- Tool Implementations ---
 
-    def list_note_keys(self) -> List[str]:
-        """Returns a list of all currently saved note keys."""
+    def list_note_keys(self, path: str = "") -> List[Dict[str, Any]]:
+        """
+        Returns a structured list of note keys and pseudo-directories under the specified path.
+        Leave path empty to list the root level.
+        """
         conn = sqlite3.connect(self.db_path)
         try:
             with conn:
-                cursor = conn.execute("SELECT key FROM notes")
-                return [row[0] for row in cursor.fetchall()]
-
+                cursor = conn.execute("SELECT key, LENGTH(value) FROM notes")
+                rows = cursor.fetchall()
         finally:
             conn.close()
+
+        prefix = path if not path or path.endswith('/') else path + '/'
+        
+        dirs = {}
+        files = []
+        
+        for key, length in rows:
+            if key.startswith(prefix):
+                remainder = key[len(prefix):]
+                if '/' in remainder:
+                    # It's a pseudo-directory
+                    dir_name = remainder.split('/')[0]
+                    dirs[dir_name] = dirs.get(dir_name, 0) + 1
+                else:
+                    # It's a direct note at this level
+                    files.append({"type": "note", "name": remainder, "size_chars": length or 0})
+                    
+        results = []
+        # Sort directories and append
+        for d in sorted(dirs.keys()):
+            results.append({"type": "dir", "name": d, "count": dirs[d]})
+            
+        # Sort files by name and append
+        results.extend(sorted(files, key=lambda x: x["name"]))
+        
+        return results
+
     def get_note(self, key: str) -> str:
         """Retrieves the contents of a specific note."""
         conn = sqlite3.connect(self.db_path)
@@ -82,6 +115,7 @@ class StructuredNotesComponent(BaseComponent):
 
         finally:
             conn.close()
+            
     def put_note(self, key: str, value: str) -> str:
         """Creates or overwrites a note with the given key and value."""
         conn = sqlite3.connect(self.db_path)
@@ -105,3 +139,25 @@ class StructuredNotesComponent(BaseComponent):
         finally:
             conn.close()
         return f"Success: Note '{key}' deleted if it existed."
+        
+    def rename_note(self, old_key: str, new_key: str) -> str:
+        """Renames or moves a note from old_key to new_key."""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                # Check if old_key exists
+                cursor = conn.execute("SELECT 1 FROM notes WHERE key = ?", (old_key,))
+                if not cursor.fetchone():
+                    return f"Error: Source note '{old_key}' does not exist."
+                    
+                # Check if new_key already exists to prevent accidental overwrite
+                cursor = conn.execute("SELECT 1 FROM notes WHERE key = ?", (new_key,))
+                if cursor.fetchone():
+                    return f"Error: Destination note '{new_key}' already exists. Delete it first if you want to overwrite."
+                    
+                # Perform the rename
+                conn.execute("UPDATE notes SET key = ? WHERE key = ?", (new_key, old_key))
+        finally:
+            conn.close()
+            
+        return f"Success: Note renamed from '{old_key}' to '{new_key}'."

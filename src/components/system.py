@@ -12,16 +12,23 @@ class SystemComponent(BaseComponent):
             "--- COMMUNICATION & LIFECYCLE ---\n"
             "Your standard text output is your INTERNAL MONOLOGUE (thoughts). The operator CANNOT see it.\n"
             "To communicate with the operator, you MUST use the `send_message_to_operator` tool.\n"
+            "If replying to a specific message, always set the 'medium' argument to match the medium the operator reached out on (e.g., 'discord' or 'mqtt').\n"
             "When you have finished a task and are waiting for a reply, use the `wait_for_next_event` tool to suspend your execution."
         )
 
     def get_tools(self) -> List[Callable]:
         return [self.send_message_to_operator, self.wait_for_next_event]
 
-    async def send_message_to_operator(self, message: str) -> str:
-        """Sends a message to the human operator."""
-        await self.agent.event_bus.publish("send_to_operator", {"message": message})
-        return "Message sent successfully."
+    async def send_message_to_operator(self, message: str, medium: str = "all") -> str:
+        """
+        Sends a message to the human operator.
+        Use the 'medium' parameter to route the message ('discord', 'mqtt', or 'all').
+        """
+        await self.agent.event_bus.publish("send_to_operator", {
+            "message": message,
+            "medium": medium
+        })
+        return f"Message sent successfully via {medium}."
 
     async def wait_for_next_event(self) -> str:
         """

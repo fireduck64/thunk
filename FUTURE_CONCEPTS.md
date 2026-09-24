@@ -17,9 +17,10 @@ This document tracks concepts, features, and integrations planned for future dev
 *   **Goal:** Add a configuration flag (e.g., `debug_mode = true`) that forces the logger to serialize and dump *everything*, including the full `AgentCore` state, memory tiers, and raw API responses, rather than stripping it down for clean JSONL.
 *   **Implementation Notes:** Helpful for tracing exact token usage, context window limits, and diagnosing complex LLM hallucination chains.
 
-## 4. Local File Reader Module
+## 4. Local File Reader Module (COMPLETED)
 *   **Concept:** A new `FileReaderComponent`.
-*   **Goal:** Give the agent a tool to explicitly read arbitrary local text/code files (e.g., `read_file(path="/var/log/syslog")`). 
+*   **Goal:** Give the agent a tool to explicitly read arbitrary local text/code files (e.g., `read_file(library="thunk_source", filepath="main.py")`). 
 *   **Implementation Notes:** 
     *   Needs strict path traversal protections (similar to the `SequentialReaderComponent` fix).
-    *   Should probably support line-offset reading (e.g., `read_file(path, start_line=100, end_line=150)`) to prevent standard files from exploding the context window.
+    *   Should probably support line-offset reading (e.g., `read_file(filepath, start_line=100, end_line=150)`) to prevent standard files from exploding the context window.
+    *   Supports multiple mounted libraries (e.g. `thunk_source`) and directory listing via `list_libraries` and `list_files`.

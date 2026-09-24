@@ -7,18 +7,21 @@ class CriticComponent(BaseComponent):
     Periodically reviews recent actions to determine if the agent is stuck in a loop.
     Injects feelings/intuitions directly into working memory to course-correct.
     """
-    def __init__(self, frequency: int = 5):
+    def __init__(self, frequency: int = 8):
         # How many tools must be executed before the critic wakes up
         self.frequency = frequency
         self.action_count = 0
+        self.needs_evaluation = False
 
     async def on_event(self, event_name: str, payload: Dict[str, Any]) -> None:
         if event_name == "tool_executed":
             self.action_count += 1
             if self.action_count >= self.frequency:
                 self.action_count = 0
-                # We trigger evaluation asynchronously so we don't hold up the event bus,
-                # but we still await it because we want the injection to happen before the next LLM call.
+                self.needs_evaluation = True
+        elif event_name == "before_llm_call":
+            if self.needs_evaluation:
+                self.needs_evaluation = False
                 await self._evaluate_progress()
 
     async def _evaluate_progress(self):
@@ -51,7 +54,8 @@ class CriticComponent(BaseComponent):
             "Analyze the agent's behavior. Is the agent stuck in an infinite loop? Is it repeating the same "
             "failed tool calls blindly? Is it making good progress towards its goal?\n\n"
             "Output a brief, 1-2 sentence 'feeling' or 'intuition' to guide the agent. "
-            "Speak in the second person directly to the agent (e.g., 'You feel like you are stuck...', 'You feel confident you are on the right track...'). "
+            "Speak in an observational, non-imperative tone (e.g., 'I notice you have been...', 'It seems like...'). "
+            "Do NOT issue direct commands or directives like 'You must stop'. Just offer a gentle observation of the current pattern.\n"
             "Do NOT provide any introductory text, just the raw feeling."
         )
 

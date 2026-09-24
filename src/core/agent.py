@@ -123,9 +123,12 @@ class AgentCore:
         self.suspended.set()
 
         while True:
+            print("  Agent loop top")
             # Wait until there's an explicit reason to run (like a user message or un-suspended state)
             await self.suspended.wait()
-            self.suspended.clear() # Clear the flag so it suspends again after processing
+            # self.suspended.clear() # Clear the flag so it suspends again after processing
+
+            print("  Doing things")
                 
             try:
                 # Tell the logger exactly what we are sending to the LLM

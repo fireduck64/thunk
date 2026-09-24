@@ -48,18 +48,23 @@ class DiscordAdapter:
             if self.allowed_channel_id and message.channel.id != self.allowed_channel_id:
                 return
                 
-            # Update the last seen channel so we know where to reply
+            # Update the last channel so we know where to reply
             self.last_channel_id = message.channel.id
             
-            # Format the payload so the agent knows who is speaking
-            payload = f"{message.author.display_name} says: {message.content}"
+            # Format the payload so the agent knows who is speaking and where it came from
+            payload = f"[Via Discord] {message.author.display_name} says: {message.content}"
             print(f"[Discord Incoming] {payload}")
             
             # Wake the agent up!
             await self.agent.resume(payload)
 
     async def _on_send_to_operator(self, event_name: str, payload: dict):
-        """Intercept explicit operator messages and publish via Discord."""
+        """Intercept explicit operator messages and publish via Discord if requested."""
+        # Only process if intended for Discord or broadcast
+        medium = payload.get("medium", "all").lower()
+        if medium not in ["discord", "all"]:
+            return
+            
         msg_content = payload.get("message", "")
         if msg_content and self.last_channel_id:
             try:

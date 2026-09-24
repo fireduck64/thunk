@@ -24,7 +24,12 @@ class MQTTAdapter:
         self.client = None
 
     async def _on_send_to_operator(self, event_name: str, payload: dict):
-        """Intercept explicit operator messages and publish via MQTT."""
+        """Intercept explicit operator messages and publish via MQTT if requested."""
+        # Only process if intended for MQTT or broadcast
+        medium = payload.get("medium", "all").lower()
+        if medium not in ["mqtt", "all"]:
+            return
+            
         msg_content = payload.get("message", "")
         if msg_content and self.client:
             print(f"[MQTT] Publishing to {self.outbox_topic}")
@@ -45,11 +50,12 @@ class MQTTAdapter:
                 await client.subscribe(self.inbox_topic)
                 
                 async for message in client.messages:
-                    payload = message.payload.decode('utf-8')
-                    print(f"\n[MQTT Incoming] {message.topic}: {payload}")
+                    payload_raw = message.payload.decode('utf-8')
+                    print(f"\n[MQTT Incoming] {message.topic}: {payload_raw}")
                     
-                    # Wake up the agent with the new message
-                    await self.agent.resume(payload)
+                    # Wake up the agent and tag it so it knows it came from MQTT
+                    formatted_payload = f"[Via MQTT] Operator says: {payload_raw}"
+                    await self.agent.resume(formatted_payload)
                     
         except aiomqtt.MqttError as error:
             print(f"[MQTT Error] Connection failed: {error}")
