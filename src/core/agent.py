@@ -131,6 +131,11 @@ class AgentCore:
             print("  Doing things")
                 
             try:
+                # 4. Context Window Check
+                # We moved this to the TOP of the loop so it guarantees the context 
+                # is pruned before the LLM is called, preventing timeout death spirals.
+                await self.event_bus.publish("context_window_check", {"agent": self})
+
                 # Tell the logger exactly what we are sending to the LLM
                 await self.event_bus.publish("before_llm_call", {"agent": self, "messages": self.messages})
                 
@@ -194,9 +199,6 @@ class AgentCore:
                 if message.content:
                     print(f"[Agent Monologue]: {message.content}")
 
-                # 4. Context Window Check
-                await self.event_bus.publish("context_window_check", {"agent": self})
-                
                 # Note: We removed the auto-suspension logic here. 
                 # The agent is now expected to explicitly use the `wait_for_next_event` tool
                 # from the SystemComponent when it is finished working.

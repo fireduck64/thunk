@@ -37,7 +37,7 @@ class KnowledgeBaseComponent(BaseComponent):
         # so GlobalSearch doesn't explode the context window with too much text
         return self.search_knowledge_base(query, num_results=2)
 
-    def search_knowledge_base(self, query: str, num_results: int = 3) -> str:
+    def _get_embedding(self, text: str) -> list[float]:
         """Helper to call the embeddings API."""
         headers = {}
         if self.api_key:

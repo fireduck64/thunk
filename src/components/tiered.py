@@ -93,7 +93,7 @@ class TieredMemoryComponent(BaseComponent):
             agent = payload["agent"]
             
             # Count how many messages we have (excluding the system prompt at index 0)
-            if len(agent.messages) > self.max_messages + 1:
+            while len(agent.messages) > self.max_messages + 1:
                 print(f"[Memory] Context window exceeded ({len(agent.messages)} msgs). Compressing...")
                 await self._compress_memory(agent)
 
