@@ -7,10 +7,17 @@ This document tracks concepts, features, and integrations planned for future dev
 *   **Goal:** Allow the agent to reside in a Discord server, read channel history, and interact with users natively.
 *   **Implementation Notes:** Would likely require the `discord.py` library and an event hook to wake the agent when `@mentioned` or when specific channels receive activity.
 
-## 2. ZIM File Imports (Offline Wikipedia)
-*   **Concept:** Expand the Knowledge Base capabilities to ingest `.zim` files.
-*   **Goal:** Allow the agent to RAG against massive offline repositories like the entirety of Wikipedia, StackExchange, or medical encyclopedias without relying on web search.
-*   **Implementation Notes:** Need a tool/script similar to `ingest_dir.py` but utilizing `libzim` to parse and chunk the compressed archives before embedding them into Qdrant.
+## 2. ZIM File Support (Offline Wikipedia)
+*   **Concept:** Provide the agent with access to massive offline encyclopedias (like Wikipedia) stored in `.zim` format.
+*   **Architectural Options to Consider:**
+    *   **Option A: Full Vector DB Ingestion (Semantic Search)**
+        *   *Approach:* Write a script (e.g., `ingest_zim.py`) that uses `libzim` to extract every HTML article, strip metadata, chunk the text, compute embeddings via Ollama, and batch-upload to Qdrant.
+        *   *Pros:* Allows the agent to use `global_search` to find concepts across the entire encyclopedia purely based on semantic meaning, without knowing exact titles.
+        *   *Cons:* Extremely slow. Embedding 6.5 million Wikipedia articles locally at 50 chunks/sec would take months of 24/7 processing and bloat the vector database heavily.
+    *   **Option B: Lazy-Load ZimReaderComponent (Real-time Lookup)**
+        *   *Approach:* Create a native agent component (`ZimReaderComponent`) equipped with tools like `search_wiki_titles(keyword)` and `get_wiki_article(title)`. The agent explicitly queries the ZIM file on-the-fly when it needs information.
+        *   *Pros:* Instant setup. Zero ingestion time, zero storage bloat. Uses the ZIM file's highly optimized internal index.
+        *   *Cons:* The agent must search by article title/keywords rather than abstract semantic concepts. Relies on the agent to independently choose to save important findings to its personal `VectorMemoryComponent` for long-term retention.
 
 ## 3. Comprehensive Audit Logging (Debugging Mode)
 *   **Concept:** Enhance the `AuditLogComponent`.
