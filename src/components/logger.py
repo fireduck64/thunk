@@ -70,7 +70,7 @@ class AuditLogComponent(BaseComponent):
                         safe_messages.append(safe_msg)
                     serializable_payload[k] = safe_messages
                 elif k == "response":
-                    # Serialize the raw OpenAI ChatCompletion response object
+                    # Serialize the reconstructed ChatCompletionMessage object
                     try:
                         serializable_payload[k] = v.model_dump()
                     except Exception:

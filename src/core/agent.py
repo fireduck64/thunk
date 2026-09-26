@@ -1,7 +1,10 @@
 import asyncio
 import json
 import inspect
+import httpx
 from openai import AsyncOpenAI
+from openai.types.chat.chat_completion_message import ChatCompletionMessage
+from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall, Function
 
 from src.core.events import EventBus
 from src.utils.config import load_config
@@ -15,12 +18,12 @@ class AgentCore:
         self.components: list[BaseComponent] = []
         
         # Initialize OpenAI Client (Compatible with standard endpoints and Ollama)
-        # We set a high timeout (5 minutes) because massive context windows or 
-        # complex compression tasks can take a long time on local models.
+        # We disable the local client timeout entirely (timeout=None) 
+        # and rely on the streaming keep-alive to bypass Nginx timeouts.
         self.client = AsyncOpenAI(
             base_url=self.config["llm"]["api_url"],
             api_key=self.config["llm"]["api_key"],
-            timeout=300.0
+            timeout=httpx.Timeout(None)
         )
         self.model = self.config["llm"]["model_name"]
         
@@ -106,6 +109,57 @@ class AgentCore:
         except Exception as e:
             return f"Error executing tool '{name}': {str(e)}"
 
+    async def _accumulate_stream(self, stream) -> ChatCompletionMessage:
+        """
+        Consumes an OpenAI async stream chunk-by-chunk to prevent proxy timeouts,
+        then reconstructs and returns the final parsed ChatCompletionMessage.
+        """
+        content = ""
+        tool_calls_dict = {}
+        
+        async for chunk in stream:
+            if not chunk.choices:
+                continue
+                
+            delta = chunk.choices[0].delta
+            
+            if delta.content:
+                content += delta.content
+                
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    idx = tc.index
+                    if idx not in tool_calls_dict:
+                        tool_calls_dict[idx] = {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {"name": tc.function.name, "arguments": ""}
+                        }
+                    if tc.function.arguments:
+                        tool_calls_dict[idx]["function"]["arguments"] += tc.function.arguments
+
+        tool_calls = []
+        if tool_calls_dict:
+            # Sort by index to ensure order is preserved
+            for idx in sorted(tool_calls_dict.keys()):
+                tc_data = tool_calls_dict[idx]
+                tool_calls.append(
+                    ChatCompletionMessageToolCall(
+                        id=tc_data["id"],
+                        type="function",
+                        function=Function(
+                            name=tc_data["function"]["name"], 
+                            arguments=tc_data["function"]["arguments"]
+                        )
+                    )
+                )
+
+        return ChatCompletionMessage(
+            role="assistant",
+            content=content if content else None,
+            tool_calls=tool_calls if tool_calls else None
+        )
+
     async def start(self):
         """The main continuous thinking loop."""
         self._build_tools()
@@ -139,21 +193,24 @@ class AgentCore:
                 # Tell the logger exactly what we are sending to the LLM
                 await self.event_bus.publish("before_llm_call", {"agent": self, "messages": self.messages})
                 
-                # 1. Prompt the LLM
-                response = await self.client.chat.completions.create(
+                # 1. Prompt the LLM using a stream to keep Nginx alive
+                response_stream = await self.client.chat.completions.create(
                     model=self.model,
                     messages=self.messages,
                     tools=self.tools if self.tools else None,
                     # Tool choice auto ensures it can choose to use tools or output text
                     tool_choice="auto" if self.tools else "none",
                     frequency_penalty=0.2, # Light penalty to prevent "<|channel>thought" infinite loops
-                    presence_penalty=0.2
+                    presence_penalty=0.2,
+                    stream=True
                 )
                 
-                # Tell the logger exactly what the LLM returned (useful for debugging token usage and full responses)
-                await self.event_bus.publish("after_llm_call", {"agent": self, "response": response})
+                # Reconstruct the message object silently
+                message = await self._accumulate_stream(response_stream)
                 
-                message = response.choices[0].message
+                # Tell the logger exactly what the LLM returned
+                # (We pass the reconstructed message instead of the raw stream)
+                await self.event_bus.publish("after_llm_call", {"agent": self, "response": message})
                 
                 # Convert the object to a dict safely to store in our messages list
                 msg_dict = {"role": "assistant"}
@@ -205,6 +262,8 @@ class AgentCore:
 
             except Exception as e:
                 print(f"[Core Error] LLM Call Failed: {e}")
+                import traceback
+                traceback.print_exc()
                 await asyncio.sleep(5) # Prevent tight error loops
 
     async def resume(self, user_message: str = None):

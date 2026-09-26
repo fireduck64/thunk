@@ -62,12 +62,14 @@ class CriticComponent(BaseComponent):
         try:
             # We use the main agent's client, but we don't give the critic access to tools
             # or the full context window. It just acts as a pure text-in text-out evaluator.
-            response = await self.agent.client.chat.completions.create(
+            response_stream = await self.agent.client.chat.completions.create(
                 model=self.agent.model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.7 # Add a bit of creativity so feelings aren't always identical
+                temperature=0.7, # Add a bit of creativity so feelings aren't always identical
+                stream=True
             )
-            feeling = response.choices[0].message.content.strip()
+            message = await self.agent._accumulate_stream(response_stream)
+            feeling = message.content.strip()
             
             print(f"[Critic Feeling]: {feeling}\n")
             

@@ -185,12 +185,14 @@ class TieredMemoryComponent(BaseComponent):
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                # We make a direct LLM call using the agent's client
-                response = await agent.client.chat.completions.create(
+                # We make a direct LLM call using the agent's client with a stream
+                response_stream = await agent.client.chat.completions.create(
                     model=agent.model,
-                    messages=[{"role": "user", "content": prompt}]
+                    messages=[{"role": "user", "content": prompt}],
+                    stream=True
                 )
-                new_summary = response.choices[0].message.content.strip()
+                message = await agent._accumulate_stream(response_stream)
+                new_summary = message.content.strip()
                 
                 # Save the new summary
                 self._update_core_summary(new_summary)
