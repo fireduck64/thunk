@@ -20,11 +20,16 @@ class TieredMemoryComponent(BaseComponent):
         self.low_watermark = self.config.get("memory", {}).get("low_watermark", 8000)
         
         try:
-            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_model)
+            # We set a large model_max_length to prevent warnings when counting tokens 
+            # for sequences larger than the tokenizer's default limit (e.g. 8192 for Gemma 7B)
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                tokenizer_model, 
+                model_max_length=100000
+            )
         except Exception as e:
             print(f"[Memory Warning] Could not load tokenizer '{tokenizer_model}': {e}")
             print("[Memory Warning] Falling back to 'gpt2' tokenizer for approximate token counting.")
-            self.tokenizer = AutoTokenizer.from_pretrained("gpt2")
+            self.tokenizer = AutoTokenizer.from_pretrained("gpt2", model_max_length=100000)
             
         self._init_db()
 
