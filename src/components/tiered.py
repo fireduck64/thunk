@@ -63,6 +63,12 @@ class TieredMemoryComponent(BaseComponent):
             conn.close()
 
     def _update_core_summary(self, new_summary: str):
+        # Hard limit to prevent LLM hallucinations from exploding the system prompt
+        max_chars = 6000
+        if len(new_summary) > max_chars:
+            print(f"[Memory Warning] Summary exceeded {max_chars} chars. Truncating.")
+            new_summary = new_summary[:max_chars] + "... [TRUNCATED]"
+            
         conn = sqlite3.connect(self.db_path)
         try:
             with conn:
@@ -122,10 +128,20 @@ class TieredMemoryComponent(BaseComponent):
             agent = payload["agent"]
             
             total_tokens = self._count_tokens(agent.messages)
-            while total_tokens > self.high_watermark:
+            last_tokens = total_tokens
+            
+            while total_tokens > self.high_watermark and len(agent.messages) > 1:
                 print(f"[Memory] Context window exceeded ({total_tokens} tokens > {self.high_watermark}). Compressing...")
                 await self._compress_memory(agent)
                 total_tokens = self._count_tokens(agent.messages)
+                
+                if total_tokens == last_tokens:
+                    print("[Memory CRITICAL] Compression did not reduce token count. Breaking to prevent infinite loop.")
+                    break
+                last_tokens = total_tokens
+                
+            if total_tokens > self.high_watermark:
+                print(f"[Memory WARNING] Context window is {total_tokens} tokens, exceeding {self.high_watermark}, but no further messages can be compressed.")
 
     def _restore_working_memory(self, agent: Any):
         """
