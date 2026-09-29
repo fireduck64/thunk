@@ -43,12 +43,12 @@ class OracleComponent(BaseComponent):
         print(f"[Oracle] Consulting the oracle for: '{query}'")
         
         try:
-            # We use the synchronous generate_content method inside asyncio.to_thread 
-            # to avoid blocking the agent's main event loop.
-            response = await asyncio.to_thread(
-                self.client.models.generate_content,
+            response = await self.client.aio.models.generate_content(
                 model=self.model_name,
                 contents=query,
+                config=types.GenerateContentConfig(
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
+                )
             )
             return response.text
         except Exception as e:
