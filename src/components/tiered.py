@@ -18,6 +18,7 @@ class TieredMemoryComponent(BaseComponent):
         tokenizer_model = self.config.get("tokenizer", {}).get("model_name", "unsloth/gemma-7b")
         self.high_watermark = self.config.get("memory", {}).get("high_watermark", 16000)
         self.low_watermark = self.config.get("memory", {}).get("low_watermark", 8000)
+        self.max_summarize_tokens = self.config.get("memory", {}).get("max_summarize_tokens", 6000)
         
         try:
             # We set a large model_max_length to prevent warnings when counting tokens 
@@ -203,10 +204,6 @@ class TieredMemoryComponent(BaseComponent):
         if target_tokens_to_evict <= 0:
             return
             
-        # To avoid blowing up the summarizer LLM's own context window, 
-        # we cap the batch of messages we summarize at once.
-        MAX_SUMMARIZE_TOKENS = 6000
-        
         messages_to_compress = []
         accumulated_tokens = 0
         num_to_evict = 0
@@ -222,7 +219,7 @@ class TieredMemoryComponent(BaseComponent):
                 break
                 
             # Stop if we hit the safe chunk limit for the summarizer
-            if accumulated_tokens >= MAX_SUMMARIZE_TOKENS:
+            if accumulated_tokens >= self.max_summarize_tokens:
                 break
                 
         if num_to_evict == 0:

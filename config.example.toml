@@ -10,6 +10,7 @@ model_name = "unsloth/gemma-7b"
 [memory]
 high_watermark = 16000
 low_watermark = 8000
+max_summarize_tokens = 6000
 
 [embeddings]
 # The fast embedding model for vector DB ingestion/search
