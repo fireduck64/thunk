@@ -4,6 +4,13 @@ api_url = "https://ollama-api.example.com/v1"
 api_key = "YOUR_API_KEY_HERE"
 model_name = "llama3" 
 
+[tokenizer]
+model_name = "unsloth/gemma-7b"
+
+[memory]
+high_watermark = 16000
+low_watermark = 8000
+
 [embeddings]
 # The fast embedding model for vector DB ingestion/search
 api_url = "http://localhost:11434/api/embeddings"

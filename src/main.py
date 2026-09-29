@@ -29,10 +29,9 @@ async def main():
     agent.register_component(SystemComponent())
     agent.register_component(AuditLogComponent(log_dir="logs", verbose=True))
     
-    # We aggressively tune the memory component because large context windows
-    # on local models can cause timeouts. 
-    # Max messages: 12. Chunk to summarize: 6.
-    agent.register_component(TieredMemoryComponent(db_path="memory.db", max_messages=12, summarize_chunk=6))
+    # We manage memory buffers using dynamic token counting limits (watermarks).
+    # Token limits are now configured in config.toml
+    agent.register_component(TieredMemoryComponent(db_path="memory.db"))
     
     agent.register_component(CriticComponent(frequency=8))
     agent.register_component(TaskQueueComponent(db_path="tasks.db"))

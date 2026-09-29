@@ -1,18 +1,31 @@
 import sqlite3
 import json
 from typing import List, Dict, Callable, Any
+from transformers import AutoTokenizer
 from src.components.base import BaseComponent
+from src.utils.config import load_config
 
 class TieredMemoryComponent(BaseComponent):
     """
     Manages the agent's memory tiers:
     1. Archival Memory (Logs all messages to SQLite)
-    2. Core Summary (Compresses old messages into a sliding summary)
+    2. Core Summary (Compresses old messages into a sliding summary based on token count)
     """
-    def __init__(self, db_path: str = "memory.db", max_messages: int = 10, summarize_chunk: int = 4):
+    def __init__(self, db_path: str = "memory.db"):
         self.db_path = db_path
-        self.max_messages = max_messages
-        self.summarize_chunk = summarize_chunk
+        self.config = load_config()
+        
+        tokenizer_model = self.config.get("tokenizer", {}).get("model_name", "unsloth/gemma-7b")
+        self.high_watermark = self.config.get("memory", {}).get("high_watermark", 16000)
+        self.low_watermark = self.config.get("memory", {}).get("low_watermark", 8000)
+        
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_model)
+        except Exception as e:
+            print(f"[Memory Warning] Could not load tokenizer '{tokenizer_model}': {e}")
+            print("[Memory Warning] Falling back to 'gpt2' tokenizer for approximate token counting.")
+            self.tokenizer = AutoTokenizer.from_pretrained("gpt2")
+            
         self._init_db()
 
     def _init_db(self):
@@ -38,6 +51,7 @@ class TieredMemoryComponent(BaseComponent):
 
         finally:
             conn.close()
+
     def _get_core_summary(self) -> str:
         conn = sqlite3.connect(self.db_path)
         try:
@@ -47,6 +61,7 @@ class TieredMemoryComponent(BaseComponent):
 
         finally:
             conn.close()
+
     def _update_core_summary(self, new_summary: str):
         conn = sqlite3.connect(self.db_path)
         try:
@@ -55,6 +70,7 @@ class TieredMemoryComponent(BaseComponent):
 
         finally:
             conn.close()
+
     def get_system_prompt_addition(self) -> str:
         summary = self._get_core_summary()
         return (
@@ -63,6 +79,19 @@ class TieredMemoryComponent(BaseComponent):
             "----------------------------\n"
             "Use this summary to remember past interactions and your current overarching goals."
         )
+
+    def _count_tokens(self, messages: List[Dict[str, Any]]) -> int:
+        """Helper to roughly approximate the token count of a list of messages."""
+        content = ""
+        for msg in messages:
+            content += f"Role: {msg.get('role', 'unknown')}\n"
+            text = msg.get("content") or ""
+            content += f"{text}\n"
+            if "tool_calls" in msg and msg["tool_calls"]:
+                # Approximation of tool calls JSON string
+                content += str(msg["tool_calls"]) + "\n"
+                
+        return len(self.tokenizer.encode(content))
 
     async def on_event(self, event_name: str, payload: Dict[str, Any]) -> None:
         if event_name == "agent_started":
@@ -92,10 +121,11 @@ class TieredMemoryComponent(BaseComponent):
         elif event_name == "context_window_check":
             agent = payload["agent"]
             
-            # Count how many messages we have (excluding the system prompt at index 0)
-            while len(agent.messages) > self.max_messages + 1:
-                print(f"[Memory] Context window exceeded ({len(agent.messages)} msgs). Compressing...")
+            total_tokens = self._count_tokens(agent.messages)
+            while total_tokens > self.high_watermark:
+                print(f"[Memory] Context window exceeded ({total_tokens} tokens > {self.high_watermark}). Compressing...")
                 await self._compress_memory(agent)
+                total_tokens = self._count_tokens(agent.messages)
 
     def _restore_working_memory(self, agent: Any):
         """
@@ -106,46 +136,77 @@ class TieredMemoryComponent(BaseComponent):
         conn = sqlite3.connect(self.db_path)
         try:
             with conn:
-                # We fetch the last N messages, where N is max_messages
-                # We sort descending to get the newest, then reverse them to chronological order
+                # We fetch a large chunk of recent messages
                 cursor = conn.execute(
-                    "SELECT role, content FROM archival_log ORDER BY id DESC LIMIT ?",
-                    (self.max_messages,)
+                    "SELECT role, content FROM archival_log ORDER BY id DESC LIMIT 500"
                 )
                 rows = cursor.fetchall()
 
         finally:
             conn.close()
+            
         if not rows:
             return
             
-        rows.reverse() # Put them back in chronological order
+        messages_to_restore = []
+        # Current tokens is just the system prompt at this point
+        current_tokens = self._count_tokens(agent.messages)
         
         for role, content in rows:
-            # The archival log saves tool calls as a string "[Tool Calls Requested]" for humans,
-            # which breaks OpenAI's strict tool_call format if we just shove it back into context.
-            # For now, if it was a tool call that we didn't serialize perfectly, we skip it or 
-            # insert it as a generic assistant message to provide context without breaking the API.
-            if content == "[Tool Calls Requested]":
-                # We skip injecting broken tool calls into the strict OpenAI context window on restore
+            # Skip invalid/unserializable legacy tool calls
+            if content == "[Tool Calls Requested]" or not content:
                 continue
                 
-            # If the database stored a raw empty string, and it's not a tool call (because we skipped those),
-            # OpenAI will crash if we try to send {"role": "assistant", "content": ""}. 
-            # We must normalize empty content to a string with at least one space or skip it.
-            if not content:
-                continue
+            msg = {"role": role, "content": content}
+            msg_tokens = self._count_tokens([msg])
+            
+            # Stop restoring if it would exceed our low watermark
+            if current_tokens + msg_tokens > self.low_watermark:
+                break
                 
-            agent.messages.append({
-                "role": role,
-                "content": content
-            })
+            messages_to_restore.append(msg)
+            current_tokens += msg_tokens
+            
+        # Put them back in chronological order
+        messages_to_restore.reverse() 
+        agent.messages.extend(messages_to_restore)
+        print(f"[Memory] Restored {len(messages_to_restore)} messages ({current_tokens} tokens).")
             
     async def _compress_memory(self, agent: Any):
-        """Extracts the oldest M messages, asks the LLM to summarize them, and evicts them."""
-        # Index 0 is System Prompt. We want to pop index 1 through summarize_chunk
-        messages_to_compress = agent.messages[1:self.summarize_chunk + 1]
+        """Extracts older messages, asks the LLM to summarize them, and evicts them."""
+        # Index 0 is System Prompt. 
+        # We want to evict messages starting from index 1 until we drop below low_watermark.
+        current_tokens = self._count_tokens(agent.messages)
+        target_tokens_to_evict = current_tokens - self.low_watermark
         
+        if target_tokens_to_evict <= 0:
+            return
+            
+        # To avoid blowing up the summarizer LLM's own context window, 
+        # we cap the batch of messages we summarize at once.
+        MAX_SUMMARIZE_TOKENS = 6000
+        
+        messages_to_compress = []
+        accumulated_tokens = 0
+        num_to_evict = 0
+        
+        for i, msg in enumerate(agent.messages[1:]):
+            msg_tokens = self._count_tokens([msg])
+            messages_to_compress.append(msg)
+            accumulated_tokens += msg_tokens
+            num_to_evict += 1
+            
+            # Stop if we have gathered enough tokens to hit our low watermark target
+            if accumulated_tokens >= target_tokens_to_evict:
+                break
+                
+            # Stop if we hit the safe chunk limit for the summarizer
+            if accumulated_tokens >= MAX_SUMMARIZE_TOKENS:
+                break
+                
+        if num_to_evict == 0:
+            return
+            
         # Build a transcript
         transcript = ""
         for msg in messages_to_compress:
@@ -154,20 +215,18 @@ class TieredMemoryComponent(BaseComponent):
             if not content and msg.get("tool_calls"):
                 content = "Called tools."
                 
-            # If this message was a user message that had a [Subconscious Recall] block prepended to it,
-            # we want to strip that block out of the transcript before we summarize it!
-            # The subconscious recall is just transient context, not a permanent event that happened.
+            # Strip transient subconscious recall blocks from transcript
             if role == "user" and content.startswith("[Subconscious Recall Triggered"):
                 parts = content.split("--- End Recall ---\n\n", 1)
                 if len(parts) == 2:
-                    content = parts[1] # Keep only what the Operator actually said
+                    content = parts[1]
                     
             transcript += f"[{role.upper()}]: {content}\n"
 
         # IMPORTANT FIX: We aggressively evict the messages from the agent's context 
         # BEFORE making the LLM call. This guarantees the context window shrinks 
         # even if the summarization LLM call times out or crashes.
-        del agent.messages[1:self.summarize_chunk + 1]
+        del agent.messages[1 : 1 + num_to_evict]
 
         current_summary = self._get_core_summary()
         
@@ -199,8 +258,6 @@ class TieredMemoryComponent(BaseComponent):
                 print(f"[Memory] New Core Summary Generated: {new_summary[:50]}...")
                 
                 # --- MEMORY CONSOLIDATION (Subconscious Integration) ---
-                # As discussed in MEMORY_REMODEL, we want synthesized summaries to automatically
-                # flow into the long-term semantic vector database, much like human sleep consolidation.
                 for comp in agent.components:
                     if comp.__class__.__name__ == "VectorMemoryComponent":
                         try:
@@ -210,8 +267,6 @@ class TieredMemoryComponent(BaseComponent):
                             print("[Memory] Sent consolidated block to long-term Vector Memory.")
                         except Exception as e:
                             print(f"[Memory] Failed to consolidate to Vector Memory: {e}")
-                
-                # NOTE: The messages were already deleted at the top of this function!
                 
                 # Ask the agent to rebuild its system prompt so the new summary is injected immediately
                 agent.rebuild_system_prompt()
