@@ -21,15 +21,28 @@ class StructuredNotesComponent(BaseComponent):
         finally:
             conn.close()
     def get_system_prompt_addition(self) -> str:
-        return (
+        prompt = (
             "You have access to a Structured Notes system. Treat this like a desk where "
             "you can store specific information blocks for later retrieval. Use `put_note` "
             "to save things you don't want to lose.\n"
             "You can organize notes hierarchically using '/' in your keys (e.g., 'book/character/name'). "
             "Use `list_note_keys` with an optional 'path' argument to navigate folders. "
             "Use `rename_note` to move or rename notes. "
-            "(You can also retrieve notes via the `global_search` tool)."
+            "(You can also retrieve notes via the `global_search` tool).\n"
+            "A note named 'sticky' is always included in your system prompt if it exists."
         )
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                cursor = conn.execute("SELECT value FROM notes WHERE key = ?", ("sticky",))
+                row = cursor.fetchone()
+                if row:
+                    prompt += f"\n\n--- STICKY NOTE ---\n{row[0]}"
+        finally:
+            conn.close()
+
+        return prompt
 
     def get_tools(self) -> List[Callable]:
         # We still expose get_note for explicit precise lookups, 
