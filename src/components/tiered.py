@@ -19,6 +19,7 @@ class TieredMemoryComponent(BaseComponent):
         self.high_watermark = self.config.get("memory", {}).get("high_watermark", 16000)
         self.low_watermark = self.config.get("memory", {}).get("low_watermark", 8000)
         self.max_summarize_tokens = self.config.get("memory", {}).get("max_summarize_tokens", 6000)
+        self.max_summary_tokens = self.config.get("memory", {}).get("max_summary_tokens", 4000)
         
         try:
             # We set a large model_max_length to prevent warnings when counting tokens 
@@ -70,10 +71,12 @@ class TieredMemoryComponent(BaseComponent):
 
     def _update_core_summary(self, new_summary: str):
         # Hard limit to prevent LLM hallucinations from exploding the system prompt
-        max_chars = 6000
-        if len(new_summary) > max_chars:
-            print(f"[Memory Warning] Summary exceeded {max_chars} chars. Truncating.")
-            new_summary = new_summary[:max_chars] + "... [TRUNCATED]"
+        tokens = self.tokenizer.encode(new_summary)
+        if len(tokens) > self.max_summary_tokens:
+            print(f"[Memory Warning] Summary exceeded {self.max_summary_tokens} tokens. Truncating.")
+            # Decode only the tokens up to the limit
+            truncated_tokens = tokens[:self.max_summary_tokens]
+            new_summary = self.tokenizer.decode(truncated_tokens) + "... [TRUNCATED]"
             
         conn = sqlite3.connect(self.db_path)
         try:
