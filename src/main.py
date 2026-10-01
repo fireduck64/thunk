@@ -16,6 +16,7 @@ from src.components.global_search import GlobalSearchComponent
 from src.components.subconscious import SubconsciousRecallComponent
 from src.components.file_reader import FileReaderComponent
 from src.components.oracle import OracleComponent
+from src.components.skills import SkillComponent
 from src.adapters.mqtt import MQTTAdapter
 from src.adapters.discord_adapter import DiscordAdapter
 
@@ -43,6 +44,7 @@ async def main():
     agent.register_component(GlobalSearchComponent())
     agent.register_component(FileReaderComponent(libraries={"thunk_source": "/home/fireduck/projects/thunk/src"}))
     agent.register_component(OracleComponent())
+    agent.register_component(SkillComponent(skills_dir="skills"))
     
     # Create adapters
     mqtt_adapter = MQTTAdapter(agent)
