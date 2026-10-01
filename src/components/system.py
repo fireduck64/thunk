@@ -13,7 +13,7 @@ class SystemComponent(BaseComponent):
             "Your standard text output is your INTERNAL MONOLOGUE (thoughts). The operator CANNOT see it.\n"
             "To communicate with the operator, you MUST use the `send_message_to_operator` tool.\n"
             "If replying to a specific message, always set the 'medium' argument to match the medium the operator reached out on (e.g., 'discord' or 'mqtt').\n"
-            "When you have finished a task and are waiting for a reply, use the `wait_for_next_event` tool to suspend your execution."
+            "You must only use the `wait_for_next_event` tool as a last resort when you have absolutely zero tasks in your queue, no books left to explore, and require direct operator input to proceed. Prefer finding new autonomous work over suspending your execution."
         )
 
     def get_tools(self) -> List[Callable]:
