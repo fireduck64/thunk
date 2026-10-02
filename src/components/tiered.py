@@ -257,8 +257,12 @@ class TieredMemoryComponent(BaseComponent):
             f"<current_summary>\n{current_summary}\n</current_summary>\n\n"
             "Here is a transcript of the oldest recent interactions that are being evicted from the active context window:\n"
             f"<transcript>\n{transcript}\n</transcript>\n\n"
-            "Please update the Core Summary to incorporate any important new facts, user preferences, or goal updates from the transcript. "
-            "Keep the summary concise and written from the perspective of the agent (e.g., 'The user asked me to...'). "
+            "Please rewrite and update the Core Summary to incorporate the new facts, lore, or goal updates from the transcript.\n"
+            "CRITICAL INSTRUCTIONS:\n"
+            "- Aggressively condense or completely discard older, stale information (e.g., books you have already finished, resolved quests, or old context) to make room for current priorities.\n"
+            "- Prioritize recent events, current state, and active goals over past history.\n"
+            "- Remember that evicted facts are safely archived in Vector Memory, so it is safe to drop them from this active summary.\n"
+            "- Keep the summary highly condensed and written from the perspective of the agent (e.g., 'I am currently reading...').\n"
             "Return ONLY the raw text of the new summary. Do not include introductory text."
         )
 
