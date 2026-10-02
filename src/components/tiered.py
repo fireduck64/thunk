@@ -53,8 +53,15 @@ class TieredMemoryComponent(BaseComponent):
                         summary TEXT
                     )
                 """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS memory_settings (
+                        key TEXT PRIMARY KEY, 
+                        value TEXT
+                    )
+                """)
                 # Ensure there is always a row 1 for the summary
                 conn.execute("INSERT OR IGNORE INTO core_summary (id, summary) VALUES (1, 'No summary yet.')")
+                conn.execute("INSERT OR IGNORE INTO memory_settings (key, value) VALUES ('last_compacted_id', '0')")
 
         finally:
             conn.close()
@@ -66,6 +73,27 @@ class TieredMemoryComponent(BaseComponent):
                 cursor = conn.execute("SELECT summary FROM core_summary WHERE id = 1")
                 return cursor.fetchone()[0]
 
+        finally:
+            conn.close()
+
+    def _get_last_compacted_id(self) -> int:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                cursor = conn.execute("SELECT value FROM memory_settings WHERE key = 'last_compacted_id'")
+                row = cursor.fetchone()
+                return int(row[0]) if row else 0
+        finally:
+            conn.close()
+
+    def _set_last_compacted_id(self, last_id: int):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO memory_settings (key, value) VALUES ('last_compacted_id', ?)",
+                    (str(last_id),)
+                )
         finally:
             conn.close()
 
@@ -126,10 +154,11 @@ class TieredMemoryComponent(BaseComponent):
             conn = sqlite3.connect(self.db_path)
             try:
                 with conn:
-                    conn.execute(
+                    cursor = conn.execute(
                         "INSERT INTO archival_log (role, content) VALUES (?, ?)", 
                         (role, str(content))
                     )
+                    msg["_db_id"] = cursor.lastrowid
 
             finally:
                 conn.close()
@@ -158,15 +187,25 @@ class TieredMemoryComponent(BaseComponent):
         from the archival log so it can seamlessly resume its previous thought process.
         """
         print("[Memory] Restoring agent's working memory from previous session...")
+        
+        last_compacted_id = self._get_last_compacted_id()
+        
         conn = sqlite3.connect(self.db_path)
         try:
             with conn:
-                # We fetch a large chunk of recent messages
-                cursor = conn.execute(
-                    "SELECT role, content FROM archival_log ORDER BY id DESC LIMIT 500"
-                )
-                rows = cursor.fetchall()
-
+                if last_compacted_id == 0:
+                    # Legacy fallback: fetch a chunk of recent messages
+                    cursor = conn.execute(
+                        "SELECT id, role, content FROM archival_log ORDER BY id DESC LIMIT 500"
+                    )
+                    rows = cursor.fetchall()
+                else:
+                    # Modern restore: load everything since the last successful compaction
+                    cursor = conn.execute(
+                        "SELECT id, role, content FROM archival_log WHERE id > ? ORDER BY id ASC",
+                        (last_compacted_id,)
+                    )
+                    rows = cursor.fetchall()
         finally:
             conn.close()
             
@@ -177,23 +216,36 @@ class TieredMemoryComponent(BaseComponent):
         # Current tokens is just the system prompt at this point
         current_tokens = self._count_tokens(agent.messages)
         
-        for role, content in rows:
-            # Skip invalid/unserializable legacy tool calls
-            if content == "[Tool Calls Requested]" or not content:
-                continue
+        if last_compacted_id == 0:
+            # Legacy fallback: restore backwards until low_watermark
+            for row_id, role, content in rows:
+                if content == "[Tool Calls Requested]" or not content:
+                    continue
+                    
+                msg = {"role": role, "content": content, "_db_id": row_id}
+                msg_tokens = self._count_tokens([msg])
                 
-            msg = {"role": role, "content": content}
-            msg_tokens = self._count_tokens([msg])
-            
-            # Stop restoring if it would exceed our low watermark
-            if current_tokens + msg_tokens > self.low_watermark:
-                break
+                if current_tokens + msg_tokens > self.low_watermark:
+                    break
+                    
+                messages_to_restore.append(msg)
+                current_tokens += msg_tokens
                 
-            messages_to_restore.append(msg)
-            current_tokens += msg_tokens
+            messages_to_restore.reverse()
             
-        # Put them back in chronological order
-        messages_to_restore.reverse() 
+            # Now set the last_compacted_id so next time it works perfectly
+            if messages_to_restore:
+                first_restored_id = messages_to_restore[0]["_db_id"]
+                self._set_last_compacted_id(first_restored_id - 1)
+        else:
+            for row_id, role, content in rows:
+                if content == "[Tool Calls Requested]" or not content:
+                    continue
+                    
+                msg = {"role": role, "content": content, "_db_id": row_id}
+                messages_to_restore.append(msg)
+                current_tokens += self._count_tokens([msg])
+                
         agent.messages.extend(messages_to_restore)
         print(f"[Memory] Restored {len(messages_to_restore)} messages ({current_tokens} tokens).")
             
@@ -210,12 +262,16 @@ class TieredMemoryComponent(BaseComponent):
         messages_to_compress = []
         accumulated_tokens = 0
         num_to_evict = 0
+        max_evicted_id = 0
         
         for i, msg in enumerate(agent.messages[1:]):
             msg_tokens = self._count_tokens([msg])
             messages_to_compress.append(msg)
             accumulated_tokens += msg_tokens
             num_to_evict += 1
+            
+            if "_db_id" in msg:
+                max_evicted_id = max(max_evicted_id, msg["_db_id"])
             
             # Stop if we have gathered enough tokens to hit our low watermark target
             if accumulated_tokens >= target_tokens_to_evict:
@@ -281,6 +337,10 @@ class TieredMemoryComponent(BaseComponent):
                 # Save the new summary
                 self._update_core_summary(new_summary)
                 print(f"[Memory] New Core Summary Generated: {new_summary[:50]}...")
+                
+                # Mark these messages as successfully compacted
+                if max_evicted_id > 0:
+                    self._set_last_compacted_id(max_evicted_id)
                 
                 # --- MEMORY CONSOLIDATION (Subconscious Integration) ---
                 for comp in agent.components:
