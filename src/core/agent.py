@@ -200,8 +200,6 @@ class AgentCore:
                     tools=self.tools if self.tools else None,
                     # Tool choice auto ensures it can choose to use tools or output text
                     tool_choice="auto" if self.tools else "none",
-                    frequency_penalty=0.2, # Light penalty to prevent "<|channel>thought" infinite loops
-                    presence_penalty=0.2,
                     stream=True
                 )
                 
