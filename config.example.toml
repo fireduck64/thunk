@@ -29,3 +29,7 @@ bot_token = "YOUR_DISCORD_BOT_TOKEN_HERE"
 [oracle]
 gemini_api_key = "YOUR_GEMINI_API_KEY_HERE"
 gemini_model = "gemini-3.8-flash"
+
+[debug]
+# Set to true to print LLM output to the console as it generates in real-time
+stream_output = true
