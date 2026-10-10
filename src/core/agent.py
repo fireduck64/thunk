@@ -146,16 +146,16 @@ class AgentCore:
             # Sort by index to ensure order is preserved
             for idx in sorted(tool_calls_dict.keys()):
                 tc_data = tool_calls_dict[idx]
-                        tool_calls.append(
-                            ChatCompletionMessageToolCall(
-                                id=tc_data["id"],
-                                type="function",
-                                function=Function(
-                                    name=tc_data["function"]["name"], 
-                                    arguments=tc_data["function"]["arguments"]
-                                )
-                            )
+                tool_calls.append(
+                    ChatCompletionMessageToolCall(
+                        id=tc_data["id"],
+                        type="function",
+                        function=Function(
+                            name=tc_data["function"]["name"], 
+                            arguments=tc_data["function"]["arguments"]
                         )
+                    )
+                )
 
         if self.debug_stream and content:
             print() # Print a final newline after the stream finishes
