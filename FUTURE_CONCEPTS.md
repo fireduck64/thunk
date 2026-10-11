@@ -1,43 +1,46 @@
 # Thunk: Future Development Concepts & Backlog
 
-This document tracks concepts, features, and integrations planned for future development.
+This document tracks upcoming concepts, architectural plans, and completed milestones for the Thunk agent framework.
 
-## 1. Discord Integration
-*   **Concept:** Build a `DiscordAdapter` (similar to the current `MQTTAdapter`).
-*   **Goal:** Allow the agent to reside in a Discord server, read channel history, and interact with users natively.
-*   **Implementation Notes:** Would likely require the `discord.py` library and an event hook to wake the agent when `@mentioned` or when specific channels receive activity.
+---
 
-## 2. ZIM File Support (Offline Wikipedia)
-*   **Concept:** Provide the agent with access to massive offline encyclopedias (like Wikipedia) stored in `.zim` format.
-*   **Architectural Options to Consider:**
-    *   **Option A: Full Vector DB Ingestion (Semantic Search)**
-        *   *Approach:* Write a script (e.g., `ingest_zim.py`) that uses `libzim` to extract every HTML article, strip metadata, chunk the text, compute embeddings via Ollama, and batch-upload to Qdrant.
-        *   *Pros:* Allows the agent to use `global_search` to find concepts across the entire encyclopedia purely based on semantic meaning, without knowing exact titles.
-        *   *Cons:* Extremely slow. Embedding 6.5 million Wikipedia articles locally at 50 chunks/sec would take months of 24/7 processing and bloat the vector database heavily.
-    *   **Option B: Lazy-Load ZimReaderComponent (Real-time Lookup)**
-        *   *Approach:* Create a native agent component (`ZimReaderComponent`) equipped with tools like `search_wiki_titles(keyword)` and `get_wiki_article(title)`. The agent explicitly queries the ZIM file on-the-fly when it needs information.
-        *   *Pros:* Instant setup. Zero ingestion time, zero storage bloat. Uses the ZIM file's highly optimized internal index.
-        *   *Cons:* The agent must search by article title/keywords rather than abstract semantic concepts. Relies on the agent to independently choose to save important findings to its personal `VectorMemoryComponent` for long-term retention.
+## Active Backlog & Future Concepts
 
-## 3. Comprehensive Audit Logging (Debugging Mode)
-*   **Concept:** Enhance the `AuditLogComponent`.
-*   **Goal:** Add a configuration flag (e.g., `debug_mode = true`) that forces the logger to serialize and dump *everything*, including the full `AgentCore` state, memory tiers, and raw API responses, rather than stripping it down for clean JSONL.
-*   **Implementation Notes:** Helpful for tracing exact token usage, context window limits, and diagnosing complex LLM hallucination chains.
+### 1. ZIM File Support (Offline Wikipedia)
+* **Concept:** Provide the agent with access to massive offline encyclopedias (like Wikipedia or WikiVoyage) stored in compressed `.zim` format.
+* **Architectural Options to Consider:**
+  * **Option A: Full Vector DB Ingestion (Semantic Search)**
+    * *Approach:* Use `libzim` to extract HTML articles, strip boilerplate, chunk the text, compute embeddings via Ollama, and batch-upload to Qdrant.
+    * *Pros:* Allows the agent to query broad knowledge via `global_search` using abstract concepts rather than exact page titles.
+    * *Cons:* Ingestion is computationally heavy and time-consuming for full Wikipedia (6.5M+ articles).
+  * **Option B: Lazy-Load `ZimReaderComponent` (Real-Time Lookup)**
+    * *Approach:* Create a native `ZimReaderComponent` with tools like `search_wiki_titles(keyword)` and `get_wiki_article(title)`. The agent queries the local ZIM file index on demand.
+    * *Pros:* Instant setup. Zero embedding computation time or vector storage bloat.
+    * *Cons:* Searches must be title/keyword based. Relies on the agent to summarize and persist important findings to `VectorMemoryComponent` for long-term conceptual recall.
 
-## 4. Local File Reader Module (COMPLETED)
-*   **Concept:** A new `FileReaderComponent`.
-*   **Goal:** Give the agent a tool to explicitly read arbitrary local text/code files (e.g., `read_file(library="thunk_source", filepath="main.py")`). 
-*   **Implementation Notes:** 
-    *   Needs strict path traversal protections (similar to the `SequentialReaderComponent` fix).
-    *   Should probably support line-offset reading (e.g., `read_file(filepath, start_line=100, end_line=150)`) to prevent standard files from exploding the context window.
-## 5. Productionization & Portability
-*   **Concept:** Make the system easily deployable by other users on their own hardware.
-*   **Goal:** Standardize the deployment pipeline, state management, and backup processes.
-*   **Implementation Notes:**
-    *   **Environment Setup:** Ensure the virtual environment (`venv`) path is highly configurable. Provide streamlined scripts to set up the Python environment predictably across different host OSes.
-    *   **Relational DBs (SQLite vs. Postgres/MySQL):** Re-evaluate the current multi-file SQLite architecture. Decide whether to consolidate into a single robust Postgres/MySQL container or stick with SQLite. 
-    *   **Docker Volumes & Naming:** All persistent data (databases, logs, vector storage) should reside in explicitly defined Docker volumes. Volumes should be prefixed with a consistent project name to prevent collisions and make cleanup/management intuitive.
-    *   **Vector Database Separation:** Split the Qdrant infrastructure into two logically/physically isolated stores to optimize backups:
-        1.  *Knowledge DB:* Large storage footprint, low intrinsic value (can be trivially regenerated by re-ingesting EPUBs/ZIMs).
-        2.  *Memory Vector DB:* Small storage footprint, high intrinsic value (contains the agent's thoughts, consolidated episodic memories, and learned behavior). 
-        *   *Benefit:* Backing up the agent's "brain" becomes extremely fast and lightweight without dragging along gigabytes of static book embeddings.
+### 2. Productionization & Portability
+* **Concept:** Standardize deployment for automated host provisioning and self-contained environments.
+* **Implementation Goals:**
+  * **Configurable Environment Management:** Standardize virtual environment paths across heterogeneous hosts while keeping the git workspace clean.
+  * **Database Strategy:** Evaluate consolidating multi-file SQLite databases (`memory.db`, `notes.db`, `tasks.db`, `reader_state.db`) into a unified PostgreSQL or MySQL service container for multi-agent support.
+  * **Docker Storage Standard:** Ensure all persistent state (Qdrant, databases, logs, reader cache) is backed by named Docker volumes with standardized prefixes.
+  * **Vector Database Separation:** Split the Qdrant infrastructure into two distinct collections/instances:
+    1. *Knowledge Store:* High storage footprint, static (re-ingestible from books/wikis).
+    2. *Memory Vector Store:* Low storage footprint, high intrinsic value (contains agent reflections, episodic memories, and learned skills). Backing up the agent's "brain" remains lightweight and independent of static libraries.
+
+### 3. Proactive Skill Execution
+* **Concept:** Expand `SkillComponent` so the agent can autonomously trigger specialized skills based on pattern matches in its task queue or incoming user intents, rather than requiring explicit manual tool lookups.
+
+---
+
+## Completed Architecture Milestones
+
+* [x] **Discord Integration:** Full bidirectional `DiscordAdapter` using `discord.py` supporting channel whitelisting and direct message relay.
+* [x] **Cloud AI Oracle:** Integrated `OracleComponent` connecting to Google Gemini (`google-genai` / `gemini-3.8-flash`) for live web knowledge, fact verification, and current events.
+* [x] **Procedural Skills Engine:** Built `SkillComponent` to store reusable multi-step markdown procedures in `skills/` with YAML frontmatter, 10-skill cap, and dynamic prompt injection.
+* [x] **Multi-Library Local File Reader:** Implemented `FileReaderComponent` with path traversal protections and named library mappings for examining source code and local files.
+* [x] **Real-Time Streaming Output & Log Formatting:** Added `stream_output` debug configuration for live token streaming in the console and built `scripts/extract-monolog.sh` to parse JSONL session logs into clean, human-readable timelines.
+* [x] **MQTT Auto-Reconnect:** Implemented resilient reconnection loops with backoff in `MQTTAdapter` and built `scripts/send-notification.py` to pipe stdin directly to the agent.
+* [x] **Crash-Resilient Token Watermark Memory:** Replaced message-count limits with `transformers.AutoTokenizer` token counting (`high_watermark` / `low_watermark`), token-capped core summaries, and SQLite `last_compacted_id` tracking to prevent memory holes on process termination.
+* [x] **Subconscious Associative Recall:** Added `SubconsciousRecallComponent` to query semantic vector memory on incoming user messages, injecting memories into the prompt without polluting persistent logs.
+* [x] **Hierarchical Notes & Sticky Injection:** Upgraded `StructuredNotesComponent` to support pseudo-directory navigation (`/`) and automatic persistent injection of notes named `sticky`.

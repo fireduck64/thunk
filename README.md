@@ -1,68 +1,135 @@
+# Thunk: Autonomous Modular Agent Framework
 
+**Thunk** is a framework for building stateful, long-running, and self-directed Large Language Model (LLM) agents. 
 
-# Autonomous Modular Agent Framework (Thunk)
+Unlike standard chat bots, Thunk operates in a continuous asynchronous event loop. It maintains multi-tiered memory across sessions, plans and tracks goals in a persistent queue, creates and manages its own procedural skills, reads entire documents chunk by chunk, consults cloud models when necessary, and interacts with human operators over MQTT and Discord.
 
-A framework for building long-running, stateful, and highly autonomous Large Language Model (LLM) agents. 
-
-This system is designed around a central **Agent Core** (an asynchronous event loop) that delegates capabilities, memory, and tooling to pluggable **Components**. It is built in Python, designed to run locally, and optimized for OpenAI-compatible endpoints (specifically Ollama).
+---
 
 ## Core Architecture
 
-The framework is built to solve the limitations of standard "chat" interfaces by enabling continuous processing, metacognition, and structured memory.
+Thunk's architecture decouples agent cognition from capabilities through an event-driven component model:
 
-1. **The Agent Core (`asyncio` Event Loop):**
-   - Operates a continuous "thinking loop".
-   - Collects context and tools from all attached components.
-   - Prompts the LLM and executes requested tools.
-   - Can suspend its own execution until specific events occur (e.g., a webhook trigger or a timer).
+1. **Agent Core (`src/core/agent.py`):**
+   * Drives the continuous thinking loop.
+   * Auto-generates OpenAI-compatible tool JSON schemas directly from Python type annotations and docstrings via `inspect`.
+   * Supports parallel tool execution: processes batches of tool calls sequentially, appending individual `role: tool` responses with matching `tool_call_id`s before returning context to the model.
+   * Streams LLM completions with keep-alive accumulation to avoid proxy timeouts, with optional real-time console streaming.
+   * Dynamically rebuilds system prompts as component states change.
 
-2. **The Component Interface:**
-   - All capabilities are isolated into modules that inherit from a standard `BaseComponent`.
-   - Components can inject instructions into the main System Prompt.
-   - Components can expose Python functions as LLM tools (auto-generating JSON schemas via Pydantic).
-   - Components can hook into system lifecycle events (`on_start`, `on_llm_response`, `on_error`).
+2. **Event Bus (`src/core/events.py`):**
+   * Decouples components and external adapters through pub/sub event channels (`agent_started`, `message_added`, `before_user_message_added`, `context_window_check`, `before_llm_call`, `after_llm_call`, `tool_executed`, `send_to_operator`, `agent_suspended`).
 
-3. **Event Bus & API:**
-   - A lightweight background server (e.g., FastAPI) listens for external triggers (webhooks, user CLI inputs) and injects them into the event loop, waking the agent if it is suspended.
+3. **Pluggable Components (`src/components/`):**
+   * All modular capabilities inherit from `BaseComponent`.
+   * Components can inject text into the system prompt, expose tools to the LLM, and subscribe to lifecycle events.
 
----
-
-## The "Mind" of the Agent (Information Management)
-
-To solve context window exhaustion and infinite loops, the framework utilizes a structured approach to memory:
-
-*   **Tier 1: Working Memory (Context Window):** Managed automatically as a sliding window of recent dialogue and tool executions.
-*   **Tier 2: Archival Memory (Database):** An immutable log of every interaction.
-*   **Tier 3: Core Summary:** A continuously updated scratchpad of current facts, user preferences, and the overarching goal. (Injected into every system prompt).
-*   **Tier 4: Structured Notes:** Deliberately managed by the agent via tools (`put_note`, `get_note`) for specific information blocks.
-*   **Tier 5: Knowledge Base:** Vector-searchable repositories of broad information (Books, Wikis, Skills).
+4. **External Adapters (`src/adapters/`):**
+   * Interface adapters connect external protocols to the agent loop, waking the agent when messages arrive.
 
 ---
 
-## Planned Modules (Components)
+## The 16 Pluggable Components
 
-### Core System Modules
+| Component | Responsibility | Key Tools / Actions |
+| :--- | :--- | :--- |
+| **`SubconsciousRecallComponent`** | Automatically performs semantic vector recall on incoming user messages and injects relevant context without polluting persistent transcripts. | Transparent context injection |
+| **`ClockComponent`** | Injects current system time truncated to the hour to maximize `llama.cpp` / Ollama prefix cache hits. | System prompt time injection |
+| **`DirectivesComponent`** | Injects high-level directives (intellectual curiosity, knowledge curation, self-reliance, cross-thread synthesis). | Behavioral guidance prompt |
+| **`SystemComponent`** | Provides operator communication and explicit lifecycle suspension. | `send_message_to_operator`, `wait_for_next_event` |
+| **`AuditLogComponent`** | Writes deterministic, structured JSONL logs of all events, tool calls, and LLM completions. | Session logging to `logs/` |
+| **`TieredMemoryComponent`** | Enforces token-based high/low watermarks, compacts older messages into a rolling core summary, archives all messages to SQLite, tracks `last_compacted_id` for crash resilience, and consolidates evicted contexts into vector memory. | Context compaction & archival |
+| **`CriticComponent`** | Subconscious monitor that reviews recent interaction history and injects gentle observations/intuitions to prevent loop stalls. | Progress monitoring & guidance |
+| **`TaskQueueComponent`** | Priority-based SQLite task queue for breaking down multi-step autonomous goals. | `add_task`, `pop_highest_priority_task`, `list_tasks` |
+| **`StructuredNotesComponent`** | Hierarchical key-value scratchpad supporting pseudo-directories via `/` keys, plus automatic injection of any note named `sticky` into the system prompt. | `put_note`, `get_note`, `list_note_keys`, `rename_note`, `delete_note` |
+| **`KnowledgeBaseComponent`** | Read-only vector retrieval against ingested external reference documents in Qdrant. | Vector search across reference material |
+| **`VectorMemoryComponent`** | Personal semantic and episodic vector memory stored in Qdrant for long-term fact and thought recall. | `save_semantic_memory`, `dump_semantic_memory` |
+| **`SequentialReaderComponent`** | Chunk-by-chunk EPUB document reader that maintains persistent SQLite bookmark state across restarts. | `list_library`, `search_library`, `open_book`, `read_next_chunk`, `read_previous_chunk` |
+| **`GlobalSearchComponent`** | Unified meta-search component that fans out queries simultaneously across structured notes, vector memory, and the knowledge base. | `global_search` |
+| **`FileReaderComponent`** | Multi-library local file reader with strict path traversal protections for inspecting project source code and local text files. | `list_libraries`, `list_files`, `read_file` |
+| **`OracleComponent`** | Direct integration with Google Gemini via `google-genai` for querying current events, facts, or advanced reasoning beyond local context. | `ask_oracle` |
+| **`SkillComponent`** | Procedural memory engine where the agent writes, reads, and manages reusable markdown workflows with YAML frontmatter in `skills/`, capped at 10 active skills. | `list_skills`, `load_skill`, `save_skill`, `delete_skill` |
 
-*   **Lifecycle Controller:** Provides tools for the agent to control its execution state (e.g., `suspend_execution`, `sleep`).
-*   **Tiered Memory Manager:** Monitors Working Memory size. Triggers background LLM tasks to summarize old conversations into the Core Summary before evicting them from the active context window.
-*   **Audit Logger:** Subscribes to all system events and writes a deterministic, raw JSONL record of exactly what the system executed (distinct from the agent's filtered memory).
+---
 
-### Metacognition
+## External Adapters
 
-*   **The Critic Agent:** A supervisor module running on a smaller, faster LLM model. It periodically reviews the Audit Log to determine if the main agent is stuck in a loop or making progress, and injects "internal feelings" (e.g., *"You feel stuck on this file, try something else"*) into the Working Memory.
+* **MQTT Adapter (`src/adapters/mqtt.py`):**
+  * Subscribes to an incoming MQTT topic (`thunk/agent/inbox`) to wake the agent with external commands or sensor data.
+  * Publishes outbound messages from `send_message_to_operator` to an outbox topic (`thunk/agent/outbox`).
+  * Features an automatic reconnect loop with backoff to recover from broker disconnects.
 
-### Tooling & Capabilities
+* **Discord Adapter (`src/adapters/discord_adapter.py`):**
+  * Connects Thunk to a Discord server using `discord.py`.
+  * Wakes the agent when messages arrive in allowed channels.
+  * Relays agent responses directly back to the active Discord channel.
 
-*   **Structured Notes:** Provides a key-value database for the agent to use as a deliberate scratchpad. (Tools: `list_note_keys`, `get_note`, `put_note`, `delete_note`).
-*   **Skills Database:** Connects to a vector database. Allows the agent to look up proven workflows or save new complex workflows it discovers for future use. (Tools: `search_skills`, `save_skill`).
-*   **Global Search (Meta-Component):** Aggregates search functionality across all capable modules. Instead of exposing 10 different search tools, it exposes a single `global_search(query)` tool that fans out to the Wiki, Book, and Skill databases and aggregates the results.
-*   **Document Knowledge Base (Read-Only):** RAG component connecting to a vector database of ingested EPUBs and Wikis. Accessed primarily through the Global Search component.
-*   **Sequential Book Reader:** Allows the agent to deeply comprehend large texts in a stateful manner, chunk by chunk, rather than just relying on semantic search. (Tools: `list_library`, `open_document`, `read_next_page`).
+---
 
-## Technology Stack
+## Memory & Context Management
 
-*   **Language:** Python 3.11+ (Leveraging `asyncio` and advanced typing).
-*   **LLM Integration:** `openai` Python SDK (targeting local Ollama endpoints).
-*   **Tool Schema Generation:** `pydantic` (and potentially `instructor` or `marvin`).
-*   **Storage:** SQLite (for Notes, Archival Memory, State) and ChromaDB / Qdrant (for Vector/Skills storage).
-*   **Deployment:** Designed to run via Docker Compose, coordinating the Python agent, Vector DB, and Ollama instance.
+Thunk employs a layered memory architecture designed to eliminate context exhaustion and memory loss:
+
+1. **Working Memory (Tier 1):** The active sliding window of messages sent to the LLM. Sized dynamically using `transformers.AutoTokenizer` against configured token watermarks (`high_watermark` and `low_watermark`).
+2. **Archival Log (Tier 2):** SQLite database (`memory.db`) storing an immutable, sequential record of every message and tool execution with database IDs.
+3. **Core Summary (Tier 3):** When working memory exceeds `high_watermark`, the oldest messages are summarized by the LLM and evicted from Tier 1. The summary is persisted in SQLite, capped by `max_summary_tokens`, and injected into every prompt.
+4. **Crash Resilience:** The `last_compacted_id` pointer in `memory.db` tracks exactly which messages have been safely summarized. If the agent process is terminated mid-compaction, it resumes on startup without skipping uncompacted messages.
+5. **Subconscious Associative Recall:** Incoming user messages query vector memory in the background, automatically injecting relevant past thoughts as a transient prefix that does not pollute archival logs.
+6. **Semantic Vector Memory:** Evicted message transcripts and summaries are automatically consolidated into Qdrant for conceptual retrieval via `global_search`.
+7. **Sticky Notes:** Any note saved under the key `sticky` in `StructuredNotesComponent` is permanently appended to the system prompt.
+
+---
+
+## CLI Utilities & Scripts
+
+The `scripts/` and `tools/` directories provide administrative and operational commands:
+
+* **`scripts/run.sh`**: Production launcher script that activates the virtual environment, sets `PYTHONPATH`, and starts `src/main.py`.
+* **`scripts/setup.sh`**: Sets up an isolated Python virtual environment (defaults to `THUNK_VENV_DIR` or `/var/nvme/thunk_venv`).
+* **`scripts/extract-monolog.sh`**: Formats session JSONL audit logs into a clean, human-readable timeline showing internal monologues, tool calls, tool results, operator dispatches, critic intuitions, and user messages.
+* **`scripts/send-notification.py`**: Reads `stdin` to EOF and publishes the payload to the agent's MQTT inbox topic.
+* **`scripts/ask-oracle.py`**: Queries the configured Google Gemini model directly from the command line using `stdin`.
+* **`scripts/list-oracle-models.py`**: Lists all available Gemini models for the configured API key.
+* **`tools/ingest.py`**: Chunks and embeds EPUB books and documents into the Qdrant knowledge base collection.
+* **`tools/dump_vector_db.py`**: CLI utility for inspecting points stored in Qdrant collections.
+
+---
+
+## Quickstart Guide
+
+### 1. Prerequisites
+* Linux host (Ubuntu/Debian recommended)
+* Docker & Docker Compose (for Qdrant vector database)
+* Python 3.11+
+* Ollama or an OpenAI-compatible inference server with an appropriate model (e.g., `gemma4:31b` or `llama3`)
+
+### 2. Start Supporting Services
+Start the Qdrant vector database container:
+```bash
+docker compose up -d
+```
+
+### 3. Create Virtual Environment
+Run the setup script to create and populate the external virtual environment:
+```bash
+./scripts/setup.sh
+```
+*(By default, this creates `/var/nvme/thunk_venv` to keep the workspace directory clean. You can customize the path by setting `export THUNK_VENV_DIR=/path/to/venv` beforehand).*
+
+### 4. Configure Thunk
+Copy the example configuration:
+```bash
+cp config.example.toml config.toml
+```
+Edit `config.toml` to specify your LLM endpoint, API keys, Discord bot token, and MQTT broker details.
+
+### 5. Launch Thunk
+```bash
+./scripts/run.sh
+```
+
+### 6. Inspect Logs
+View the live agent timeline from any session log:
+```bash
+./scripts/extract-monolog.sh logs/session_YYYYMMDD_HHMMSS.jsonl
+```

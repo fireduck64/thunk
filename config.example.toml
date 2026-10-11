@@ -1,35 +1,52 @@
 [llm]
-# The main agent inference model (e.g., Llama 3, Mixtral)
+# The main agent inference model endpoint (OpenAI-compatible, e.g. Ollama, vLLM, or OpenAI)
 api_url = "https://ollama-api.example.com/v1"
 api_key = "YOUR_API_KEY_HERE"
-model_name = "llama3" 
+model_name = "llama3"
 
 [tokenizer]
+# HuggingFace model path used strictly for token counting in tiered memory
 model_name = "unsloth/gemma-7b"
 
 [memory]
-high_watermark = 16000
-low_watermark = 8000
-max_summarize_tokens = 6000
-max_summary_tokens = 4000
+# Context window token watermarks and compression limits
+high_watermark = 16000        # Trigger memory compression when working memory exceeds this token count
+low_watermark = 8000          # Evict messages until working memory drops below this target
+max_summarize_tokens = 6000   # Maximum token chunk size sent to the summarizer in a single step
+max_summary_tokens = 4000     # Maximum token length permitted for the persistent core summary
 
 [embeddings]
-# The fast embedding model for vector DB ingestion/search
+# Embedding model for vector database ingestion and semantic search
 api_url = "http://localhost:11434/api/embeddings"
 api_key = ""
 model_name = "nomic-embed-text"
 
+[vectordb]
+# Qdrant vector database configuration
+host = "localhost"
+port = 6333
+collection_name = "knowledge_base"
+
+[mqtt]
+# MQTT broker for external event streaming and operator notifications
+host = "localhost"
+port = 1883
+inbox_topic = "thunk/agent/inbox"
+outbox_topic = "thunk/agent/outbox"
+
 [discord]
-# To get a token, create an application at https://discord.com/developers/applications
+# Discord bot integration
+# Create an application at https://discord.com/developers/applications
 # Ensure you enable the "Message Content Intent" in the Bot settings.
 bot_token = "YOUR_DISCORD_BOT_TOKEN_HERE"
-# Optional: Restrict the bot to only listen/reply in a specific channel ID
+# Optional: Restrict the bot to only listen and reply in a specific channel ID (integer)
 # allowed_channel_id = 123456789012345678
 
 [oracle]
+# Cloud AI Oracle (Google Gemini) integration for live current events and external reasoning
 gemini_api_key = "YOUR_GEMINI_API_KEY_HERE"
 gemini_model = "gemini-3.8-flash"
 
 [debug]
-# Set to true to print LLM output to the console as it generates in real-time
+# Set to true to print LLM output chunks to the console in real-time as they generate
 stream_output = true
