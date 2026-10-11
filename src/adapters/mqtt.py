@@ -39,23 +39,34 @@ class MQTTAdapter:
                 print(f"[MQTT Error] Failed to publish: {e}")
 
     async def start(self):
-        """Connect to MQTT and start the listener loop."""
+        """Connect to MQTT and start the listener loop with auto-reconnect."""
         self.agent.event_bus.subscribe("send_to_operator", self._on_send_to_operator)
         
-        print(f"[MQTT] Connecting to broker at {self.host}:{self.port}...")
-        try:
-            async with aiomqtt.Client(self.host, port=self.port) as client:
-                self.client = client
-                print(f"[MQTT] Connected. Listening on '{self.inbox_topic}'")
-                await client.subscribe(self.inbox_topic)
-                
-                async for message in client.messages:
-                    payload_raw = message.payload.decode('utf-8')
-                    print(f"\n[MQTT Incoming] {message.topic}: {payload_raw}")
+        while True:
+            print(f"[MQTT] Connecting to broker at {self.host}:{self.port}...")
+            try:
+                async with aiomqtt.Client(self.host, port=self.port) as client:
+                    self.client = client
+                    print(f"[MQTT] Connected. Listening on '{self.inbox_topic}'")
+                    await client.subscribe(self.inbox_topic)
                     
-                    # Wake up the agent and tag it so it knows it came from MQTT
-                    formatted_payload = f"[Via MQTT] Operator says: {payload_raw}"
-                    await self.agent.resume(formatted_payload)
-                    
-        except aiomqtt.MqttError as error:
-            print(f"[MQTT Error] Connection failed: {error}")
+                    async for message in client.messages:
+                        payload_raw = message.payload.decode('utf-8')
+                        print(f"\n[MQTT Incoming] {message.topic}: {payload_raw}")
+                        
+                        # Wake up the agent and tag it so it knows it came from MQTT
+                        formatted_payload = f"[Via MQTT] Operator says: {payload_raw}"
+                        await self.agent.resume(formatted_payload)
+                        
+            except aiomqtt.MqttError as error:
+                print(f"[MQTT Error] Connection failed or dropped: {error}. Reconnecting in 5 seconds...")
+                self.client = None
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                # Allow graceful shutdown
+                print("[MQTT] Shutting down adapter.")
+                break
+            except Exception as e:
+                print(f"[MQTT Error] Unexpected error: {e}. Reconnecting in 5 seconds...")
+                self.client = None
+                await asyncio.sleep(5)
