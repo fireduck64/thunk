@@ -13,11 +13,11 @@ class SystemComponent(BaseComponent):
             "Your standard text output is your INTERNAL MONOLOGUE (thoughts). The operator CANNOT see it.\n"
             "To communicate with the operator, you MUST use the `send_message_to_operator` tool.\n"
             "If replying to a specific message, always set the 'medium' argument to match the medium the operator reached out on (e.g., 'discord' or 'mqtt').\n"
-            "You must only use the `wait_for_next_event` tool as a last resort when you have absolutely zero tasks in your queue, no books left to explore, and require direct operator input to proceed. Prefer finding new autonomous work over suspending your execution."
+            "You must only use the `suspend_until_next_event` tool as a last resort when you have absolutely zero tasks in your queue, no books left to explore, and require direct operator input to proceed. Prefer finding new autonomous work over suspending your execution."
         )
 
     def get_tools(self) -> List[Callable]:
-        return [self.send_message_to_operator, self.wait_for_next_event]
+        return [self.send_message_to_operator, self.suspend_until_next_event]
 
     async def send_message_to_operator(self, message: str, medium: str = "all") -> str:
         """
@@ -30,7 +30,7 @@ class SystemComponent(BaseComponent):
         })
         return f"Message sent successfully via {medium}."
 
-    async def wait_for_next_event(self) -> str:
+    async def suspend_until_next_event(self) -> str:
         """
         Suspends your execution loop. Use this when you are done working and need to wait 
         for the operator to reply or for a new background event to trigger.

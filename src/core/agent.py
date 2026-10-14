@@ -261,7 +261,7 @@ class AgentCore:
                     print(f"[Agent Monologue]: {message.content}")
 
                 # Note: We removed the auto-suspension logic here. 
-                # The agent is now expected to explicitly use the `wait_for_next_event` tool
+                # The agent is now expected to explicitly use the `suspend_until_next_event` tool
                 # from the SystemComponent when it is finished working.
 
             except Exception as e:
