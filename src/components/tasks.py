@@ -1,3 +1,4 @@
+import os
 import sqlite3
 from typing import List, Callable
 from src.components.base import BaseComponent
@@ -17,6 +18,7 @@ class TaskQueueComponent(BaseComponent):
             self.db_path = tasks_cfg["db_path"]
         else:
             self.db_path = db_path
+        os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
         self._init_db()
 
     def _init_db(self):

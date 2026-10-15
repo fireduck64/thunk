@@ -88,6 +88,10 @@ class SkillComponent(BaseComponent):
             self.delete_skill
         ]
 
+    def _is_valid_skill_name(self, name: str) -> bool:
+        """Ensures skill names cannot traverse directories."""
+        return bool(name) and os.path.basename(name) == name and "/" not in name and "\\" not in name and ".." not in name
+
     def list_skills(self) -> List[Dict[str, str]]:
         """
         Lists all available skills and their summaries.
@@ -108,6 +112,9 @@ class SkillComponent(BaseComponent):
         """
         Loads the full instruction text of a specific skill.
         """
+        if not self._is_valid_skill_name(name):
+            return f"Error: Invalid skill name '{name}'."
+
         filepath = os.path.join(self.skills_dir, f"{name}.md")
         if not os.path.exists(filepath):
             return f"Error: Skill '{name}' does not exist."
@@ -120,7 +127,11 @@ class SkillComponent(BaseComponent):
         Saves or overwrites a skill. 
         The summary MUST start with 'Use when...' and be 1 sentence.
         """
+        if not self._is_valid_skill_name(name):
+            return f"Error: Invalid skill name '{name}'. Use a simple filename without slashes."
+
         filepath = os.path.join(self.skills_dir, f"{name}.md")
+        tmp_path = f"{filepath}.tmp"
         
         content = (
             "---\n"
@@ -130,8 +141,9 @@ class SkillComponent(BaseComponent):
         )
         
         try:
-            with open(filepath, 'w', encoding='utf-8') as f:
+            with open(tmp_path, 'w', encoding='utf-8') as f:
                 f.write(content)
+            os.replace(tmp_path, filepath)
                 
             # Check count for the warning message
             skill_count = len([f for f in os.listdir(self.skills_dir) if f.endswith(".md")])
@@ -140,12 +152,20 @@ class SkillComponent(BaseComponent):
                 msg += f" WARNING: You now have {skill_count} skills. You MUST delete an old skill to respect your 10-skill cap."
             return msg
         except Exception as e:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
             return f"Error saving skill: {e}"
 
     def delete_skill(self, name: str) -> str:
         """
         Deletes a skill permanently.
         """
+        if not self._is_valid_skill_name(name):
+            return f"Error: Invalid skill name '{name}'."
+
         filepath = os.path.join(self.skills_dir, f"{name}.md")
         if not os.path.exists(filepath):
             return f"Error: Skill '{name}' does not exist."

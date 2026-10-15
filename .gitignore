@@ -32,10 +32,14 @@ ENV/
 # Configuration and Agent Data
 config.toml
 data/
+discord.txt
+hf_token.sh
+reports/
 
 # Databases and Data
 *.db
 *.lock
+*.tmp
 *.sqlite
 *.sqlite3
 books/

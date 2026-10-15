@@ -35,8 +35,9 @@ class SequentialReaderComponent(BaseComponent):
             
         self.chunk_size = chunk_size
         
-        # Ensure library directory exists
+        # Ensure library and database parent directories exist
         os.makedirs(self.library_dir, exist_ok=True)
+        os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
         
         self._init_db()
         self._load_state()

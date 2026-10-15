@@ -1,4 +1,5 @@
 import fcntl
+import os
 import sqlite3
 import json
 from typing import List, Dict, Callable, Any
@@ -22,6 +23,7 @@ class TieredMemoryComponent(BaseComponent):
         else:
             self.db_path = db_path
 
+        os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
         self._acquire_lock()
         
         tokenizer_model = self.config.get("tokenizer", {}).get("model_name", "unsloth/gemma-7b")
@@ -75,6 +77,14 @@ class TieredMemoryComponent(BaseComponent):
                     )
                 """)
                 conn.execute("""
+                    CREATE TABLE IF NOT EXISTS core_summary_history (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        summary TEXT,
+                        compacted_up_to_id INTEGER,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                conn.execute("""
                     CREATE TABLE IF NOT EXISTS memory_settings (
                         key TEXT PRIMARY KEY, 
                         value TEXT
@@ -118,7 +128,10 @@ class TieredMemoryComponent(BaseComponent):
         finally:
             conn.close()
 
-    def _update_core_summary(self, new_summary: str):
+    def _update_core_summary(self, new_summary: str, max_evicted_id: int = 0):
+        if not new_summary or not new_summary.strip():
+            raise ValueError("Refusing to overwrite core_summary with an empty summary.")
+
         # Hard limit to prevent LLM hallucinations from exploding the system prompt
         tokens = self.tokenizer.encode(new_summary)
         if len(tokens) > self.max_summary_tokens:
@@ -131,6 +144,15 @@ class TieredMemoryComponent(BaseComponent):
         try:
             with conn:
                 conn.execute("UPDATE core_summary SET summary = ? WHERE id = 1", (new_summary,))
+                conn.execute(
+                    "INSERT INTO core_summary_history (summary, compacted_up_to_id) VALUES (?, ?)",
+                    (new_summary, max_evicted_id)
+                )
+                if max_evicted_id > 0:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO memory_settings (key, value) VALUES ('last_compacted_id', ?)",
+                        (str(max_evicted_id),)
+                    )
 
         finally:
             conn.close()
@@ -353,15 +375,11 @@ class TieredMemoryComponent(BaseComponent):
                     stream=True
                 )
                 message = await agent._accumulate_stream(response_stream)
-                new_summary = message.content.strip()
+                new_summary = (message.content or "").strip()
                 
-                # Save the new summary
-                self._update_core_summary(new_summary)
+                # Atomically save the new summary, append to history, and advance last_compacted_id
+                self._update_core_summary(new_summary, max_evicted_id=max_evicted_id)
                 print(f"[Memory] New Core Summary Generated: {new_summary[:50]}...")
-                
-                # Mark these messages as successfully compacted
-                if max_evicted_id > 0:
-                    self._set_last_compacted_id(max_evicted_id)
                 
                 # --- MEMORY CONSOLIDATION (Subconscious Integration) ---
                 for comp in agent.components:

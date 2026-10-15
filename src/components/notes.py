@@ -1,4 +1,5 @@
 from typing import List, Callable, Dict, Any
+import os
 import sqlite3
 from src.components.base import BaseComponent
 from src.utils.config import load_config
@@ -16,6 +17,7 @@ class StructuredNotesComponent(BaseComponent):
             self.db_path = notes_cfg["db_path"]
         else:
             self.db_path = db_path
+        os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
         self._init_db()
 
     def _init_db(self):
