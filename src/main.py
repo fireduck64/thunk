@@ -1,5 +1,13 @@
+#!./venv/bin/python3
+import argparse
 import asyncio
+import os
 import sys
+
+# Ensure the project root is on sys.path when invoked directly as ./src/main.py
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from src.utils.config import set_config_path
 from src.core.agent import AgentCore
 from src.components.notes import StructuredNotesComponent
 from src.components.knowledge import KnowledgeBaseComponent
@@ -57,6 +65,12 @@ async def main():
         print("\nShutting down gracefully...")
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Thunk Autonomous Agent")
+    parser.add_argument("-c", "--config", type=str, help="Path to the TOML configuration file")
+    args = parser.parse_args()
+    if args.config:
+        set_config_path(args.config)
+
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

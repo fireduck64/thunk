@@ -1,11 +1,12 @@
-#!/var/nvme/thunk_venv/bin/python
+#!./venv/bin/python3
+import argparse
 import sys
 import os
 
 # Ensure the script can import src modules when run from the project root
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.utils.config import load_config
+from src.utils.config import load_config, set_config_path
 
 try:
     from google import genai
@@ -14,6 +15,12 @@ except ImportError:
     sys.exit(1)
 
 def main():
+    parser = argparse.ArgumentParser(description="List available Google Gemini Oracle models")
+    parser.add_argument("-c", "--config", type=str, help="Path to the TOML configuration file")
+    args = parser.parse_args()
+    if args.config:
+        set_config_path(args.config)
+
     # Load config
     try:
         config = load_config()

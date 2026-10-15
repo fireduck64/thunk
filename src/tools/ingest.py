@@ -1,3 +1,4 @@
+import argparse
 import os
 import sys
 import json
@@ -10,28 +11,18 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import VectorParams, Distance, PointStruct
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from src.utils.config import load_config
+from src.utils.config import load_config, set_config_path
 
-config = load_config()
-
-# Configuration
-QDRANT_HOST = config["vectordb"]["host"]
-QDRANT_PORT = config["vectordb"]["port"]
-COLLECTION_NAME = config["vectordb"].get("knowledge_collection", config["vectordb"].get("collection_name", "knowledge_base"))
-OLLAMA_URL = config["embeddings"]["api_url"]
-EMBEDDING_MODEL = config["embeddings"]["model_name"]
-API_KEY = config["embeddings"]["api_key"]
-
-def get_embedding(text: str) -> list[float]:
+def get_embedding(text: str, ollama_url: str, embedding_model: str, api_key: str) -> list[float]:
     """Calls Ollama to convert text into a vector (list of floats)."""
     headers = {}
-    if API_KEY:
-        headers["Authorization"] = f"Bearer {API_KEY}"
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
         
     response = requests.post(
-        OLLAMA_URL, 
+        ollama_url, 
         json={
-            "model": EMBEDDING_MODEL,
+            "model": embedding_model,
             "prompt": text
         },
         headers=headers
@@ -67,18 +58,26 @@ def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> list[st
     return chunks
 
 def ingest_file(epub_path: str):
+    config = load_config()
+    qdrant_host = config["vectordb"]["host"]
+    qdrant_port = config["vectordb"]["port"]
+    collection_name = config["vectordb"].get("knowledge_collection", config["vectordb"].get("collection_name", "knowledge_base"))
+    ollama_url = config["embeddings"]["api_url"]
+    embedding_model = config["embeddings"]["model_name"]
+    api_key = config["embeddings"]["api_key"]
+
     # 1. Connect to Qdrant Vector DB
-    client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+    client = QdrantClient(host=qdrant_host, port=qdrant_port)
     
     # Check if collection exists, if not create it.
     # nomic-embed-text produces vectors of size 768.
     try:
-        client.get_collection(COLLECTION_NAME)
-        print(f"Collection '{COLLECTION_NAME}' exists.")
+        client.get_collection(collection_name)
+        print(f"Collection '{collection_name}' exists.")
     except Exception:
-        print(f"Creating collection '{COLLECTION_NAME}'...")
+        print(f"Creating collection '{collection_name}'...")
         client.create_collection(
-            collection_name=COLLECTION_NAME,
+            collection_name=collection_name,
             vectors_config=VectorParams(size=768, distance=Distance.COSINE),
         )
 
@@ -95,7 +94,7 @@ def ingest_file(epub_path: str):
         if i % 10 == 0:
             print(f"Embedding chunk {i}/{len(chunks)}...")
         
-        vector = get_embedding(chunk)
+        vector = get_embedding(chunk, ollama_url, embedding_model, api_key)
         
         # We store the original text in the payload so we can read it later
         payload = {
@@ -120,19 +119,21 @@ def ingest_file(epub_path: str):
 
         # Batch upload every 50 points to be efficient
         if len(points) >= 50:
-            client.upsert(collection_name=COLLECTION_NAME, points=points)
+            client.upsert(collection_name=collection_name, points=points)
             points = []
 
     # Upload any remaining points
     if points:
-        client.upsert(collection_name=COLLECTION_NAME, points=points)
+        client.upsert(collection_name=collection_name, points=points)
         
     print("Ingestion complete!")
 
 if __name__ == "__main__":
-    import sys
-    if len(sys.argv) < 2:
-        print("Usage: python src/tools/ingest.py <path_to_epub>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Ingest an EPUB file into Qdrant")
+    parser.add_argument("-c", "--config", type=str, help="Path to the TOML configuration file")
+    parser.add_argument("epub_path", type=str, help="Path to the EPUB file")
+    args = parser.parse_args()
+    if args.config:
+        set_config_path(args.config)
     
-    ingest_file(sys.argv[1])
+    ingest_file(args.epub_path)

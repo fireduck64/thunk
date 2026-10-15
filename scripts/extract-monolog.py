@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!./venv/bin/python3
 import sys
 import json
 
@@ -64,6 +64,6 @@ def format_log(filepath):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: ./extract-monolog.sh <logfile>")
+        print("Usage: ./scripts/extract-monolog.py <logfile>")
         sys.exit(1)
     format_log(sys.argv[1])

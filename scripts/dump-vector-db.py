@@ -1,4 +1,5 @@
-#!/usr/bin/env python3
+#!./venv/bin/python3
+import argparse
 import sys
 import os
 
@@ -6,15 +7,22 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from qdrant_client import QdrantClient
-from src.utils.config import load_config
+from src.utils.config import load_config, set_config_path
 
 def main():
+    parser = argparse.ArgumentParser(description="Dump records from a Qdrant vector collection")
+    parser.add_argument("-c", "--config", type=str, help="Path to the TOML configuration file")
+    parser.add_argument("collection", nargs="?", default=None, help="Collection name (defaults to memory_collection in config)")
+    args = parser.parse_args()
+    if args.config:
+        set_config_path(args.config)
+
     config = load_config()
     host = config.get("vectordb", {}).get("host", "localhost")
     port = config.get("vectordb", {}).get("port", 6333)
     
     # Use memory_collection from config if not provided via argv
-    collection_name = sys.argv[1] if len(sys.argv) > 1 else config.get("vectordb", {}).get("memory_collection", "agent_memory")
+    collection_name = args.collection if args.collection else config.get("vectordb", {}).get("memory_collection", "agent_memory")
     
     print(f"Connecting to Qdrant at {host}:{port}...")
     try:

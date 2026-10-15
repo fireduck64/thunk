@@ -82,16 +82,17 @@ Thunk employs a layered memory architecture designed to eliminate context exhaus
 
 ## CLI Utilities & Scripts
 
-The `scripts/` and `tools/` directories provide administrative and operational commands:
+The `scripts/` directory provides administrative and operational commands (all config-dependent scripts require `-c <config.toml>` or `THUNK_CONFIG`):
 
-* **`scripts/run.sh`**: Production launcher script that activates the virtual environment, sets `PYTHONPATH`, and starts `src/main.py`.
-* **`scripts/setup.sh`**: Sets up an isolated Python virtual environment (defaults to `THUNK_VENV_DIR` or `/var/nvme/thunk_venv`).
-* **`scripts/extract-monolog.sh`**: Formats session JSONL audit logs into a clean, human-readable timeline showing internal monologues, tool calls, tool results, operator dispatches, critic intuitions, and user messages.
-* **`scripts/send-notification.py`**: Reads `stdin` to EOF and publishes the payload to the agent's MQTT inbox topic.
-* **`scripts/ask-oracle.py`**: Queries the configured Google Gemini model directly from the command line using `stdin`.
-* **`scripts/list-oracle-models.py`**: Lists all available Gemini models for the configured API key.
-* **`tools/ingest.py`**: Chunks and embeds EPUB books and documents into the Qdrant knowledge base collection.
-* **`tools/dump_vector_db.py`**: CLI utility for inspecting points stored in Qdrant collections.
+* **`src/main.py`**: Main agent entry point (`./src/main.py -c data/thunk/config.toml`).
+* **`scripts/setup.sh`**: Sets up the Python virtual environment at `./venv` (or creates it externally at `THUNK_VENV_DIR` and symlinks `./venv` to it).
+* **`scripts/extract-monolog.py`**: Formats session JSONL audit logs into a clean, human-readable timeline showing internal monologues, tool calls, tool results, operator dispatches, critic intuitions, and user messages.
+* **`scripts/send-notification.py`**: Reads `stdin` to EOF and publishes the payload to the agent's MQTT inbox topic (`-c data/thunk/config.toml`).
+* **`scripts/mqtt-chat.py`**: Interactive terminal chat client over MQTT (`-c data/thunk/config.toml`).
+* **`scripts/ask-oracle.py`**: Queries the configured Google Gemini model directly from the command line using `stdin` (`-c data/thunk/config.toml`).
+* **`scripts/list-oracle-models.py`**: Lists all available Gemini models for the configured API key (`-c data/thunk/config.toml`).
+* **`scripts/dump-vector-db.py`**: CLI utility for inspecting points stored in Qdrant collections (`-c data/thunk/config.toml`).
+* **`scripts/ingest-vault.sh`**: Recursively chunks and embeds EPUB books from a directory into the Qdrant knowledge base collection (`-c data/thunk/config.toml`).
 
 ---
 
@@ -110,26 +111,28 @@ docker compose up -d
 ```
 
 ### 3. Create Virtual Environment
-Run the setup script to create and populate the external virtual environment:
+Run the setup script to create and populate the virtual environment at `./venv`:
 ```bash
 ./scripts/setup.sh
 ```
-*(By default, this creates `/var/nvme/thunk_venv` to keep the workspace directory clean. You can customize the path by setting `export THUNK_VENV_DIR=/path/to/venv` beforehand).*
+*(By default, this creates `./venv` in the project root, which is gitignored. To store the virtual environment on another disk or share it across multiple agent directories, set `export THUNK_VENV_DIR=/path/to/venv` beforehand and `setup.sh` will automatically symlink `./venv` to it).*
 
-### 4. Configure Thunk
-Copy the example configuration:
+### 4. Configure an Agent Instance
+Create an isolated data directory for your agent (e.g., `data/thunk`), copy the starter skills and example configuration:
 ```bash
-cp config.example.toml config.toml
+mkdir -p data/thunk/logs
+cp -r skills data/thunk/skills
+cp config.example.toml data/thunk/config.toml
 ```
-Edit `config.toml` to specify your LLM endpoint, API keys, Discord bot token, and MQTT broker details.
+Edit `data/thunk/config.toml` to specify your LLM endpoint, API keys, Discord bot token, and MQTT broker details.
 
 ### 5. Launch Thunk
 ```bash
-./scripts/run.sh
+./src/main.py -c data/thunk/config.toml
 ```
 
 ### 6. Inspect Logs
 View the live agent timeline from any session log:
 ```bash
-./scripts/extract-monolog.sh logs/session_YYYYMMDD_HHMMSS.jsonl
+./scripts/extract-monolog.py data/thunk/logs/session_YYYYMMDD_HHMMSS.jsonl
 ```

@@ -1,29 +1,21 @@
+import argparse
 import sys
 import os
 import requests
 from qdrant_client import QdrantClient
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from src.utils.config import load_config
+from src.utils.config import load_config, set_config_path
 
-config = load_config()
-
-QDRANT_HOST = config["vectordb"]["host"]
-QDRANT_PORT = config["vectordb"]["port"]
-COLLECTION_NAME = config["vectordb"].get("knowledge_collection", config["vectordb"].get("collection_name", "knowledge_base"))
-OLLAMA_URL = config["embeddings"]["api_url"]
-EMBEDDING_MODEL = config["embeddings"]["model_name"]
-API_KEY = config["embeddings"]["api_key"]
-
-def get_embedding(text: str) -> list[float]:
+def get_embedding(text: str, ollama_url: str, embedding_model: str, api_key: str) -> list[float]:
     headers = {}
-    if API_KEY:
-        headers["Authorization"] = f"Bearer {API_KEY}"
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
         
     response = requests.post(
-        OLLAMA_URL, 
+        ollama_url, 
         json={
-            "model": EMBEDDING_MODEL,
+            "model": embedding_model,
             "prompt": text
         },
         headers=headers
@@ -32,16 +24,24 @@ def get_embedding(text: str) -> list[float]:
     return response.json()["embedding"]
 
 def search(query: str, limit: int = 3):
+    config = load_config()
+    qdrant_host = config["vectordb"]["host"]
+    qdrant_port = config["vectordb"]["port"]
+    collection_name = config["vectordb"].get("knowledge_collection", config["vectordb"].get("collection_name", "knowledge_base"))
+    ollama_url = config["embeddings"]["api_url"]
+    embedding_model = config["embeddings"]["model_name"]
+    api_key = config["embeddings"]["api_key"]
+
     print(f"Searching for: '{query}'")
     
     # 1. Convert the search query into a vector
-    query_vector = get_embedding(query)
+    query_vector = get_embedding(query, ollama_url, embedding_model, api_key)
     
     # 2. Search Qdrant for the closest matching vectors
-    client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+    client = QdrantClient(host=qdrant_host, port=qdrant_port)
     
     search_result = client.search(
-        collection_name=COLLECTION_NAME,
+        collection_name=collection_name,
         query_vector=query_vector,
         limit=limit
     )
@@ -57,8 +57,11 @@ def search(query: str, limit: int = 3):
         print("\n" + "="*80 + "\n")
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python src/tools/query.py <search_term>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Search the Qdrant knowledge base")
+    parser.add_argument("-c", "--config", type=str, help="Path to the TOML configuration file")
+    parser.add_argument("query", type=str, help="Search query")
+    args = parser.parse_args()
+    if args.config:
+        set_config_path(args.config)
         
-    search(sys.argv[1])
+    search(args.query)

@@ -1,11 +1,13 @@
+#!./venv/bin/python3
+import argparse
 import asyncio
 import sys
 import os
 import aiomqtt
 
 # Add project root to sys.path so we can import src modules
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.utils.config import load_config
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from src.utils.config import load_config, set_config_path
 
 async def chat_loop():
     config = load_config()
@@ -54,6 +56,12 @@ async def chat_loop():
         sys.exit(0)
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Interactive MQTT chat client for Thunk")
+    parser.add_argument("-c", "--config", type=str, help="Path to the TOML configuration file")
+    args = parser.parse_args()
+    if args.config:
+        set_config_path(args.config)
+
     try:
         asyncio.run(chat_loop())
     except KeyboardInterrupt:

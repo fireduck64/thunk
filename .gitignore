@@ -22,16 +22,20 @@ wheels/
 *.egg
 
 # Virtual environments
+venv
 venv/
+.venv
 .venv/
 ENV/
 .env
 
-# Configuration and Secrets
+# Configuration and Agent Data
 config.toml
+data/
 
 # Databases and Data
 *.db
+*.lock
 *.sqlite
 *.sqlite3
 books/

@@ -1,3 +1,4 @@
+import fcntl
 import sqlite3
 import json
 from typing import List, Dict, Callable, Any
@@ -20,6 +21,8 @@ class TieredMemoryComponent(BaseComponent):
             self.db_path = memory_cfg["db_path"]
         else:
             self.db_path = db_path
+
+        self._acquire_lock()
         
         tokenizer_model = self.config.get("tokenizer", {}).get("model_name", "unsloth/gemma-7b")
         self.high_watermark = self.config.get("memory", {}).get("high_watermark", 16000)
@@ -40,6 +43,18 @@ class TieredMemoryComponent(BaseComponent):
             self.tokenizer = AutoTokenizer.from_pretrained("gpt2", model_max_length=100000)
             
         self._init_db()
+
+    def _acquire_lock(self):
+        """Acquires an exclusive non-blocking OS file lock to prevent multiple agents from sharing memory.db."""
+        lock_path = f"{self.db_path}.lock"
+        self._lock_file = open(lock_path, "w")
+        try:
+            fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            self._lock_file.close()
+            raise RuntimeError(
+                f"Database '{self.db_path}' is already locked by another running process (lockfile: '{lock_path}')."
+            )
 
     def _init_db(self):
         conn = sqlite3.connect(self.db_path)

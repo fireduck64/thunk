@@ -17,17 +17,17 @@ This document outlines the deployment architecture, service dependencies, config
 
 ## 2. Storage & State Management
 
-Thunk isolates transient code from persistent runtime state:
+Thunk isolates code from per-agent runtime state (e.g., `data/thunk/`):
 
-| State Store | Purpose | Location |
+| State Store | Purpose | Typical Location |
 | :--- | :--- | :--- |
 | **Qdrant Vector DB** | Knowledge base and long-term semantic memory | Docker named volume (`qdrant_data`) |
-| **`memory.db`** | Archival interaction log, core summary, and compaction state | SQLite in working directory |
-| **`notes.db`** | Structured key-value notes and sticky prompt notes | SQLite in working directory |
-| **`tasks.db`** | Priority task queue backlog | SQLite in working directory |
-| **`reader_state.db`** | Persistent bookmark position for the document reader | SQLite in working directory |
-| **`skills/*.md`** | Agent-authored and operator-authored procedural skills | Markdown files with YAML frontmatter in `skills/` |
-| **`logs/*.jsonl`** | Deterministic session audit logs | JSONL files in `logs/` |
+| **`memory.db`** | Archival interaction log, core summary, and compaction state | `data/<agent>/memory.db` |
+| **`notes.db`** | Structured key-value notes and sticky prompt notes | `data/<agent>/notes.db` |
+| **`tasks.db`** | Priority task queue backlog | `data/<agent>/tasks.db` |
+| **`reader_state.db`** | Persistent bookmark position for the document reader | `data/<agent>/reader_state.db` |
+| **`skills/*.md`** | Agent-authored and operator-authored procedural skills | `data/<agent>/skills/` |
+| **`logs/*.jsonl`** | Deterministic session audit logs | `data/<agent>/logs/` |
 
 ---
 
@@ -49,10 +49,10 @@ Persistent vector data is saved to the `qdrant_data` Docker volume to survive co
 
 ## 4. Virtual Environment Isolation
 
-To keep the git repository clean and avoid polluting local source directories, dependencies are installed into an external virtual environment:
+All scripts reference `./venv` in the project root (which is ignored by git):
 
-* **Default Path:** `/var/nvme/thunk_venv` (ideal for high-speed NVMe storage).
-* **Custom Path:** Set the `THUNK_VENV_DIR` environment variable to point to any custom directory.
+* **Local Default:** Running `./scripts/setup.sh` creates `./venv` directly in the project root.
+* **External / Shared Path:** If `THUNK_VENV_DIR` is set (e.g., `export THUNK_VENV_DIR=/var/nvme/thunk_venv`), `./scripts/setup.sh` provisions the virtual environment at `$THUNK_VENV_DIR` and creates a `./venv` symlink pointing to it.
 
 Run the automated setup script to provision the environment and install all dependencies:
 ```bash
@@ -61,20 +61,22 @@ Run the automated setup script to provision the environment and install all depe
 
 ---
 
-## 5. Configuration (`config.toml`)
+## 5. Configuration (`data/<agent>/config.toml`)
 
-Copy the template configuration file:
+Create an agent directory and copy the template configuration file and starter skills:
 ```bash
-cp config.example.toml config.toml
-chmod 600 config.toml
+mkdir -p data/thunk/logs
+cp -r skills data/thunk/skills
+cp config.example.toml data/thunk/config.toml
+chmod 600 data/thunk/config.toml
 ```
 
-Configure the following sections in `config.toml`:
+Configure the following sections in `data/thunk/config.toml`:
 1. **`[llm]`**: Configure the inference endpoint URL and model name (e.g. `gemma4:31b` or `llama3`).
 2. **`[tokenizer]`**: Set the HuggingFace tokenizer model path (`unsloth/gemma-7b`) used for memory watermark counting.
-3. **`[memory]`**: Set context limits (`high_watermark`, `low_watermark`, `max_summarize_tokens`, `max_summary_tokens`).
+3. **`[memory]` / `[notes]` / `[tasks]` / `[reader]` / `[skills]` / `[logging]`**: Set per-agent database and directory paths.
 4. **`[embeddings]`**: Point to your Ollama embeddings endpoint (`nomic-embed-text`).
-5. **`[vectordb]`**: Configure host and port for Qdrant (`localhost:6333`).
+5. **`[vectordb]`**: Configure host, port, `knowledge_collection`, and per-agent `memory_collection` for Qdrant (`localhost:6333`).
 6. **`[mqtt]`**: Set broker credentials and topics for operator communication.
 7. **`[discord]`**: Add your bot token and optional allowed channel ID.
 8. **`[oracle]`**: Add your Google Gemini API key (`gemini_api_key`) and model (`gemini-3.8-flash`).
@@ -85,9 +87,9 @@ Configure the following sections in `config.toml`:
 ## 6. Running Thunk
 
 ### Interactive / Development Mode
-Launch the agent via the wrapper script:
+Launch the agent directly, specifying the configuration file:
 ```bash
-./scripts/run.sh
+./src/main.py -c data/thunk/config.toml
 ```
 
 ### Systemd Production Service
@@ -104,11 +106,10 @@ Wants=docker.service
 Type=simple
 User=fireduck
 WorkingDirectory=/home/fireduck/projects/thunk
-ExecStart=/home/fireduck/projects/thunk/scripts/run.sh
+ExecStart=/home/fireduck/projects/thunk/src/main.py -c data/thunk/config.toml
 Restart=always
 RestartSec=10
 Environment=PYTHONUNBUFFERED=1
-Environment=THUNK_VENV_DIR=/var/nvme/thunk_venv
 
 [Install]
 WantedBy=multi-user.target
@@ -131,15 +132,15 @@ sudo systemctl start thunk.service
   ```
 * **Format & Inspect Session Logs:**
   ```bash
-  ./scripts/extract-monolog.sh logs/session_YYYYMMDD_HHMMSS.jsonl
+  ./scripts/extract-monolog.py data/thunk/logs/session_YYYYMMDD_HHMMSS.jsonl
   ```
 * **Send Out-of-Band Notification via MQTT:**
   ```bash
-  echo "System alert: Database backup finished." | ./scripts/send-notification.py
+  echo "System alert: Database backup finished." | ./scripts/send-notification.py -c data/thunk/config.toml
   ```
 * **Query the Cloud AI Oracle via CLI:**
   ```bash
-  echo "What is the latest status of project X?" | ./scripts/ask-oracle.py
+  echo "What is the latest status of project X?" | ./scripts/ask-oracle.py -c data/thunk/config.toml
   ```
 
 ---
@@ -148,9 +149,9 @@ sudo systemctl start thunk.service
 
 To take a complete snapshot of the agent's state ("brain" and knowledge):
 
-1. **SQLite Databases & Skills:**
+1. **Agent Data Directory (SQLite Databases, Skills, Config):**
    ```bash
-   tar -czvf thunk_state_backup.tar.gz *.db skills/ config.toml
+   tar -czvf thunk_state_backup.tar.gz data/
    ```
 2. **Qdrant Vector Data:**
    ```bash

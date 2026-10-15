@@ -1,3 +1,4 @@
+import argparse
 import os
 import sys
 import glob
@@ -6,6 +7,7 @@ import subprocess
 
 # Add project root to sys.path so we can import src modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from src.utils.config import load_config, set_config_path
 
 def process_book(book_path: str):
     """Runs the ingest.py script for a single book."""
@@ -47,9 +49,13 @@ def ingest_directory(directory: str, max_workers: int = 3):
     print("\n[IngestDir] All files processed!")
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python src/tools/ingest_dir.py <path_to_directory>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Ingest a directory of EPUB files into Qdrant")
+    parser.add_argument("-c", "--config", type=str, help="Path to the TOML configuration file")
+    parser.add_argument("directory", type=str, nargs="?", default="/vault/ebook", help="Path to directory of EPUBs")
+    args = parser.parse_args()
+    if args.config:
+        set_config_path(args.config)
+    # Validate config upfront before spawning worker processes
+    load_config()
         
-    target_dir = sys.argv[1]
-    ingest_directory(target_dir)
+    ingest_directory(args.directory)

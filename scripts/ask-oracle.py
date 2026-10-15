@@ -1,4 +1,4 @@
-#!/var/nvme/thunk_venv/bin/python
+#!./venv/bin/python3
 import sys
 import os
 import argparse
@@ -6,7 +6,7 @@ import argparse
 # Ensure the script can import src modules when run from the project root
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.utils.config import load_config
+from src.utils.config import load_config, set_config_path
 
 try:
     from google import genai
@@ -17,8 +17,11 @@ except ImportError:
 
 def main():
     parser = argparse.ArgumentParser(description="Send stdin to the Cloud AI Oracle (Google Gemini)")
-    parser.add_argument("-m", "--model", type=str, help="The model to use (overrides config.toml)")
+    parser.add_argument("-c", "--config", type=str, help="Path to the TOML configuration file")
+    parser.add_argument("-m", "--model", type=str, help="The model to use (overrides config)")
     args = parser.parse_args()
+    if args.config:
+        set_config_path(args.config)
 
     # Read stdin
     prompt = sys.stdin.read().strip()
