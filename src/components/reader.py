@@ -6,6 +6,7 @@ from typing import List, Callable, Dict, Any
 from ebooklib import epub
 from bs4 import BeautifulSoup
 from src.components.base import BaseComponent
+from src.utils.config import load_config
 
 class SequentialReaderComponent(BaseComponent):
     """
@@ -13,10 +14,26 @@ class SequentialReaderComponent(BaseComponent):
     This is useful for deep comprehension tasks where semantic search is insufficient.
     Maintains bookmark state across restarts.
     """
-    def __init__(self, library_dir: str = "books", chunk_size: int = 2500, db_path: str = "reader_state.db"):
-        self.library_dir = library_dir
+    def __init__(self, library_dir: str = None, db_path: str = None, chunk_size: int = 2500):
+        self.config = load_config()
+        
+        if library_dir is None:
+            reader_cfg = self.config.get("reader", {})
+            if "library_dir" not in reader_cfg or not reader_cfg["library_dir"]:
+                raise ValueError("SequentialReaderComponent requires 'library_dir' to be explicitly defined in config under [reader].library_dir")
+            self.library_dir = reader_cfg["library_dir"]
+        else:
+            self.library_dir = library_dir
+
+        if db_path is None:
+            reader_cfg = self.config.get("reader", {})
+            if "db_path" not in reader_cfg or not reader_cfg["db_path"]:
+                raise ValueError("SequentialReaderComponent requires 'db_path' to be explicitly defined in config under [reader].db_path")
+            self.db_path = reader_cfg["db_path"]
+        else:
+            self.db_path = db_path
+            
         self.chunk_size = chunk_size
-        self.db_path = db_path
         
         # Ensure library directory exists
         os.makedirs(self.library_dir, exist_ok=True)

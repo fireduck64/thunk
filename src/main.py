@@ -29,22 +29,18 @@ async def main():
     agent.register_component(ClockComponent())
     agent.register_component(DirectivesComponent())
     agent.register_component(SystemComponent())
-    agent.register_component(AuditLogComponent(log_dir="logs", verbose=True))
-    
-    # We manage memory buffers using dynamic token counting limits (watermarks).
-    # Token limits are now configured in config.toml
-    agent.register_component(TieredMemoryComponent(db_path="memory.db"))
-    
+    agent.register_component(AuditLogComponent())
+    agent.register_component(TieredMemoryComponent())
     agent.register_component(CriticComponent(frequency=8))
-    agent.register_component(TaskQueueComponent(db_path="tasks.db"))
-    agent.register_component(StructuredNotesComponent(db_path="notes.db"))
+    agent.register_component(TaskQueueComponent())
+    agent.register_component(StructuredNotesComponent())
     agent.register_component(KnowledgeBaseComponent())
-    agent.register_component(VectorMemoryComponent(collection_name="agent_memory"))
-    agent.register_component(SequentialReaderComponent(library_dir="/vault/ebook"))
+    agent.register_component(VectorMemoryComponent())
+    agent.register_component(SequentialReaderComponent())
     agent.register_component(GlobalSearchComponent())
-    agent.register_component(FileReaderComponent(libraries={"thunk_source": "/home/fireduck/projects/thunk/src"}))
+    agent.register_component(FileReaderComponent())
     agent.register_component(OracleComponent())
-    agent.register_component(SkillComponent(skills_dir="skills"))
+    agent.register_component(SkillComponent())
     
     # Create adapters
     mqtt_adapter = MQTTAdapter(agent)

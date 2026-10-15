@@ -13,11 +13,18 @@ class VectorMemoryComponent(BaseComponent):
     Allows the agent to save unstructured thoughts, lore, and facts, 
     and retrieve them later using semantic search.
     """
-    def __init__(self, collection_name: str = "agent_memory"):
+    def __init__(self, collection_name: str = None):
         self.config = load_config()
         self.host = self.config["vectordb"]["host"]
         self.port = self.config["vectordb"]["port"]
-        self.collection = collection_name
+        
+        if collection_name is None:
+            vectordb_cfg = self.config.get("vectordb", {})
+            if "memory_collection" not in vectordb_cfg or not vectordb_cfg["memory_collection"]:
+                raise ValueError("VectorMemoryComponent requires 'memory_collection' to be explicitly defined in config under [vectordb].memory_collection")
+            self.collection = vectordb_cfg["memory_collection"]
+        else:
+            self.collection = collection_name
         
         self.ollama_url = self.config["embeddings"]["api_url"]
         self.embed_model = self.config["embeddings"]["model_name"]

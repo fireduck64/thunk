@@ -13,8 +13,8 @@ def main():
     host = config.get("vectordb", {}).get("host", "localhost")
     port = config.get("vectordb", {}).get("port", 6333)
     
-    # We use "agent_memory" as defined in main.py, but let the user override it via argv
-    collection_name = sys.argv[1] if len(sys.argv) > 1 else "agent_memory"
+    # Use memory_collection from config if not provided via argv
+    collection_name = sys.argv[1] if len(sys.argv) > 1 else config.get("vectordb", {}).get("memory_collection", "agent_memory")
     
     print(f"Connecting to Qdrant at {host}:{port}...")
     try:

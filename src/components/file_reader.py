@@ -1,6 +1,7 @@
 import os
 from typing import List, Callable, Dict, Optional
 from src.components.base import BaseComponent
+from src.utils.config import load_config
 
 class FileReaderComponent(BaseComponent):
     """
@@ -9,9 +10,15 @@ class FileReaderComponent(BaseComponent):
     """
     def __init__(self, libraries: Dict[str, str] = None):
         self.libraries = {}
-        if libraries:
-            for name, path in libraries.items():
-                self.libraries[name] = os.path.abspath(path)
+        if libraries is None:
+            config = load_config()
+            file_cfg = config.get("file_reader", {})
+            libraries = file_cfg.get("libraries")
+            if not libraries or not isinstance(libraries, dict):
+                raise ValueError("FileReaderComponent requires 'libraries' to be explicitly defined in config under [file_reader.libraries]")
+                
+        for name, path in libraries.items():
+            self.libraries[name] = os.path.abspath(path)
 
     def get_system_prompt_addition(self) -> str:
         return (

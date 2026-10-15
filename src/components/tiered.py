@@ -11,9 +11,15 @@ class TieredMemoryComponent(BaseComponent):
     1. Archival Memory (Logs all messages to SQLite)
     2. Core Summary (Compresses old messages into a sliding summary based on token count)
     """
-    def __init__(self, db_path: str = "memory.db"):
-        self.db_path = db_path
+    def __init__(self, db_path: str = None):
         self.config = load_config()
+        if db_path is None:
+            memory_cfg = self.config.get("memory", {})
+            if "db_path" not in memory_cfg or not memory_cfg["db_path"]:
+                raise ValueError("TieredMemoryComponent requires 'db_path' to be explicitly defined in config under [memory].db_path")
+            self.db_path = memory_cfg["db_path"]
+        else:
+            self.db_path = db_path
         
         tokenizer_model = self.config.get("tokenizer", {}).get("model_name", "unsloth/gemma-7b")
         self.high_watermark = self.config.get("memory", {}).get("high_watermark", 16000)

@@ -10,7 +10,7 @@ config = load_config()
 
 QDRANT_HOST = config["vectordb"]["host"]
 QDRANT_PORT = config["vectordb"]["port"]
-COLLECTION_NAME = config["vectordb"]["collection_name"]
+COLLECTION_NAME = config["vectordb"].get("knowledge_collection", config["vectordb"].get("collection_name", "knowledge_base"))
 OLLAMA_URL = config["embeddings"]["api_url"]
 EMBEDDING_MODEL = config["embeddings"]["model_name"]
 API_KEY = config["embeddings"]["api_key"]

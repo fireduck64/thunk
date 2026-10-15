@@ -14,6 +14,28 @@ high_watermark = 16000        # Trigger memory compression when working memory e
 low_watermark = 8000          # Evict messages until working memory drops below this target
 max_summarize_tokens = 6000   # Maximum token chunk size sent to the summarizer in a single step
 max_summary_tokens = 4000     # Maximum token length permitted for the persistent core summary
+db_path = "memory.db"         # SQLite database file for archival log, core summary, and compaction state (REQUIRED)
+
+[notes]
+db_path = "notes.db"          # SQLite database file for structured scratchpad notes (REQUIRED)
+
+[tasks]
+db_path = "tasks.db"          # SQLite database file for priority task queue (REQUIRED)
+
+[reader]
+library_dir = "/vault/ebook"  # Path to directory containing EPUB documents (REQUIRED)
+db_path = "reader_state.db"   # SQLite database file for reader bookmark state (REQUIRED)
+
+[skills]
+skills_dir = "skills"         # Directory storing agent procedural markdown skills (REQUIRED)
+
+[logging]
+log_dir = "logs"              # Directory storing session JSONL audit logs (REQUIRED)
+verbose = true                # When true, dumps full agent context on turns
+
+[file_reader.libraries]
+# Named libraries mapping alias names to local directories for inspection (REQUIRED)
+thunk_source = "/home/fireduck/projects/thunk/src"
 
 [embeddings]
 # Embedding model for vector database ingestion and semantic search
@@ -25,7 +47,8 @@ model_name = "nomic-embed-text"
 # Qdrant vector database configuration
 host = "localhost"
 port = 6333
-collection_name = "knowledge_base"
+knowledge_collection = "knowledge_base"  # Static external knowledge collection (REQUIRED)
+memory_collection = "agent_memory"       # Agent's personal episodic and semantic memory collection (REQUIRED)
 
 [mqtt]
 # MQTT broker for external event streaming and operator notifications

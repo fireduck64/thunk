@@ -1,13 +1,21 @@
 from typing import List, Callable, Dict, Any
 import sqlite3
 from src.components.base import BaseComponent
+from src.utils.config import load_config
 
 class StructuredNotesComponent(BaseComponent):
     """
     Provides a key-value scratchpad for the agent to deliberately store information.
     """
-    def __init__(self, db_path: str = "notes.db"):
-        self.db_path = db_path
+    def __init__(self, db_path: str = None):
+        if db_path is None:
+            config = load_config()
+            notes_cfg = config.get("notes", {})
+            if "db_path" not in notes_cfg or not notes_cfg["db_path"]:
+                raise ValueError("StructuredNotesComponent requires 'db_path' to be explicitly defined in config under [notes].db_path")
+            self.db_path = notes_cfg["db_path"]
+        else:
+            self.db_path = db_path
         self._init_db()
 
     def _init_db(self):

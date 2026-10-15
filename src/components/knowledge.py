@@ -13,7 +13,11 @@ class KnowledgeBaseComponent(BaseComponent):
         self.config = load_config()
         self.host = self.config["vectordb"]["host"]
         self.port = self.config["vectordb"]["port"]
-        self.collection = self.config["vectordb"]["collection_name"]
+        
+        vectordb_cfg = self.config.get("vectordb", {})
+        if "knowledge_collection" not in vectordb_cfg or not vectordb_cfg["knowledge_collection"]:
+            raise ValueError("KnowledgeBaseComponent requires 'knowledge_collection' to be explicitly defined in config under [vectordb].knowledge_collection")
+        self.collection = vectordb_cfg["knowledge_collection"]
         
         self.ollama_url = self.config["embeddings"]["api_url"]
         self.embed_model = self.config["embeddings"]["model_name"]

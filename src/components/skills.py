@@ -1,15 +1,24 @@
 import os
 from typing import List, Callable, Dict
 from src.components.base import BaseComponent
+from src.utils.config import load_config
 
 class SkillComponent(BaseComponent):
     """
     Allows the agent to create, save, and load its own reusable skills.
     Skills are stored as Markdown files with YAML-style frontmatter for summaries.
     """
-    def __init__(self, skills_dir: str = "skills"):
+    def __init__(self, skills_dir: str = None):
         super().__init__()
-        self.skills_dir = skills_dir
+        if skills_dir is None:
+            config = load_config()
+            skills_cfg = config.get("skills", {})
+            if "skills_dir" not in skills_cfg or not skills_cfg["skills_dir"]:
+                raise ValueError("SkillComponent requires 'skills_dir' to be explicitly defined in config under [skills].skills_dir")
+            self.skills_dir = skills_cfg["skills_dir"]
+        else:
+            self.skills_dir = skills_dir
+
         if not os.path.exists(self.skills_dir):
             os.makedirs(self.skills_dir)
 

@@ -3,15 +3,28 @@ import os
 from datetime import datetime
 from typing import Dict, Any
 from src.components.base import BaseComponent
+from src.utils.config import load_config
 
 class AuditLogComponent(BaseComponent):
     """
     Subscribes to all system events and writes a deterministic, 
     raw JSONL record of exactly what the system executed.
     """
-    def __init__(self, log_dir: str = "logs", verbose: bool = False):
-        self.log_dir = log_dir
-        self.verbose = verbose
+    def __init__(self, log_dir: str = None, verbose: bool = None):
+        if log_dir is None:
+            config = load_config()
+            logging_cfg = config.get("logging", {})
+            if "log_dir" not in logging_cfg or not logging_cfg["log_dir"]:
+                raise ValueError("AuditLogComponent requires 'log_dir' to be explicitly defined in config under [logging].log_dir")
+            self.log_dir = logging_cfg["log_dir"]
+            if verbose is None:
+                self.verbose = logging_cfg.get("verbose", False)
+            else:
+                self.verbose = verbose
+        else:
+            self.log_dir = log_dir
+            self.verbose = verbose if verbose is not None else False
+
         os.makedirs(self.log_dir, exist_ok=True)
         
         # Create a new log file for each session

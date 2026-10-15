@@ -1,14 +1,22 @@
 import sqlite3
 from typing import List, Callable
 from src.components.base import BaseComponent
+from src.utils.config import load_config
 
 class TaskQueueComponent(BaseComponent):
     """
     Provides a priority-based task queue for the agent to manage its own 
     long-term goals and multi-step operations.
     """
-    def __init__(self, db_path: str = "tasks.db"):
-        self.db_path = db_path
+    def __init__(self, db_path: str = None):
+        if db_path is None:
+            config = load_config()
+            tasks_cfg = config.get("tasks", {})
+            if "db_path" not in tasks_cfg or not tasks_cfg["db_path"]:
+                raise ValueError("TaskQueueComponent requires 'db_path' to be explicitly defined in config under [tasks].db_path")
+            self.db_path = tasks_cfg["db_path"]
+        else:
+            self.db_path = db_path
         self._init_db()
 
     def _init_db(self):
