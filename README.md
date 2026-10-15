@@ -118,13 +118,14 @@ Run the setup script to create and populate the virtual environment at `./venv`:
 *(By default, this creates `./venv` in the project root, which is gitignored. To store the virtual environment on another disk or share it across multiple agent directories, set `export THUNK_VENV_DIR=/path/to/venv` beforehand and `setup.sh` will automatically symlink `./venv` to it).*
 
 ### 4. Configure an Agent Instance
-Create an isolated data directory for your agent (e.g., `data/thunk`), copy the starter skills and example configuration:
+Create an isolated data directory for your agent (e.g., `data/thunk`), copy the starter skills, directives, and example configuration:
 ```bash
 mkdir -p data/thunk/logs
 cp -r skills data/thunk/skills
+cp directives.example.md data/thunk/directives.md
 cp config.example.toml data/thunk/config.toml
 ```
-Edit `data/thunk/config.toml` to specify your LLM endpoint, API keys, Discord bot token, and MQTT broker details.
+Edit `data/thunk/config.toml` and `data/thunk/directives.md` to customize your agent's name, directives, LLM endpoint, API keys, Discord bot token, and MQTT broker details.
 
 ### 5. Launch Thunk
 ```bash

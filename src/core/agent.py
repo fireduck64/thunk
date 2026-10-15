@@ -14,6 +14,11 @@ from src.utils.schema import function_to_schema
 class AgentCore:
     def __init__(self):
         self.config = load_config()
+        agent_cfg = self.config.get("agent", {})
+        if "name" not in agent_cfg or not agent_cfg["name"]:
+            raise ValueError("AgentCore requires 'name' to be explicitly defined in config under [agent].name")
+        self.name = agent_cfg["name"]
+
         self.event_bus = EventBus()
         self.components: list[BaseComponent] = []
         
@@ -51,7 +56,7 @@ class AgentCore:
 
     def _build_system_prompt(self) -> str:
         """Aggregates all component system instructions."""
-        prompt = "You are Thunk, an autonomous, long-running AI agent.\n\n"
+        prompt = f"You are {self.name}, an autonomous, long-running AI agent.\n\n"
         for comp in self.components:
             addition = comp.get_system_prompt_addition()
             if addition:

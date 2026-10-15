@@ -63,10 +63,11 @@ Run the automated setup script to provision the environment and install all depe
 
 ## 5. Configuration (`data/<agent>/config.toml`)
 
-Create an agent directory and copy the template configuration file and starter skills:
+Create an agent directory and copy the template configuration, directives, and starter skills:
 ```bash
 mkdir -p data/thunk/logs
 cp -r skills data/thunk/skills
+cp directives.example.md data/thunk/directives.md
 cp config.example.toml data/thunk/config.toml
 chmod 600 data/thunk/config.toml
 ```
