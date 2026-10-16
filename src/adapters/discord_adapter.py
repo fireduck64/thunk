@@ -51,9 +51,18 @@ class DiscordAdapter:
             # Update the last channel so we know where to reply
             self.last_channel_id = message.channel.id
             
-            # Format the payload so the agent knows who is speaking and whether they are a bot/APP or human operator
+            # Expand <@ID> and <@!ID> mentions so the agent sees both the display name and raw Discord tag
+            content = message.content
+            for user in message.mentions:
+                if user == self.client.user:
+                    replacement = f"@{user.display_name} (you, <@{user.id}>)"
+                else:
+                    replacement = f"@{user.display_name} (<@{user.id}>)"
+                content = content.replace(f"<@{user.id}>", replacement).replace(f"<@!{user.id}>", replacement)
+
+            # Format the payload so the agent knows who is speaking, their mention tag, and whether they are a bot/APP or human operator
             role_tag = "[APP/Agent]" if message.author.bot else "[Operator]"
-            payload = f"[Via Discord] {message.author.display_name} {role_tag} says: {message.content}"
+            payload = f"[Via Discord] {message.author.display_name} (<@{message.author.id}>) {role_tag} says: {content}"
             print(f"[Discord Incoming] {payload}")
             
             # Wake the agent up!
