@@ -2,7 +2,9 @@ import os
 import glob
 import json
 import sqlite3
-from typing import List, Callable, Dict, Any
+import zipfile
+import xml.etree.ElementTree as ET
+from typing import List, Callable, Dict, Any, Tuple
 from ebooklib import epub
 from bs4 import BeautifulSoup
 from src.components.base import BaseComponent
@@ -54,11 +56,93 @@ class SequentialReaderComponent(BaseComponent):
                         current_index INTEGER
                     )
                 """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS book_metadata (
+                        rel_path TEXT PRIMARY KEY,
+                        mtime REAL,
+                        title TEXT,
+                        author TEXT,
+                        label TEXT
+                    )
+                """)
                 # Ensure there is always a row to update
                 conn.execute("INSERT OR IGNORE INTO reader_state (id, current_book, current_index) VALUES (1, NULL, 0)")
 
         finally:
             conn.close()
+
+    def _extract_epub_metadata(self, abs_file_path: str) -> Tuple[str, str]:
+        """Fast OPF XML extraction of (title, author) from an EPUB without decompressing chapters."""
+        title, author = "", ""
+        try:
+            with zipfile.ZipFile(abs_file_path, "r") as z:
+                container = ET.fromstring(z.read("META-INF/container.xml"))
+                rf = container.find(".//{urn:oasis:names:tc:opendocument:xmlns:container}rootfile")
+                if rf is not None and "full-path" in rf.attrib:
+                    opf = ET.fromstring(z.read(rf.attrib["full-path"]))
+                    t_el = opf.find(".//{http://purl.org/dc/elements/1.1/}title")
+                    c_el = opf.find(".//{http://purl.org/dc/elements/1.1/}creator")
+                    if t_el is not None and t_el.text:
+                        title = t_el.text.strip()
+                    if c_el is not None and c_el.text:
+                        author = c_el.text.strip()
+        except Exception:
+            pass
+        return title, author
+
+    def _format_book_label(self, abs_file_path: str) -> str:
+        """Returns a descriptive label combining EPUB title, author, and library-relative path."""
+        rel_path = os.path.relpath(abs_file_path, self.library_dir)
+        title, author = self._extract_epub_metadata(abs_file_path)
+        if title and author:
+            return f"{title} by {author} [path: {rel_path}]"
+        elif title:
+            return f"{title} [path: {rel_path}]"
+        return rel_path
+
+    def _get_library_catalog(self) -> List[str]:
+        """Returns cached descriptive labels for all EPUBs in library_dir, updating any new/modified files."""
+        search_pattern = os.path.join(self.library_dir, "**", "*.epub")
+        files = glob.glob(search_pattern, recursive=True)
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                rows = conn.execute("SELECT rel_path, mtime, label FROM book_metadata").fetchall()
+                cache = {r[0]: (r[1], r[2]) for r in rows}
+
+                updates = []
+                catalog = []
+                for f in files:
+                    rel_path = os.path.relpath(f, self.library_dir)
+                    try:
+                        mtime = os.path.getmtime(f)
+                    except OSError:
+                        continue
+
+                    cached = cache.get(rel_path)
+                    if cached and cached[0] == mtime:
+                        catalog.append(cached[1])
+                    else:
+                        title, author = self._extract_epub_metadata(f)
+                        if title and author:
+                            label = f"{title} by {author} [path: {rel_path}]"
+                        elif title:
+                            label = f"{title} [path: {rel_path}]"
+                        else:
+                            label = rel_path
+                        updates.append((rel_path, mtime, title, author, label))
+                        catalog.append(label)
+
+                if updates:
+                    conn.executemany(
+                        "INSERT OR REPLACE INTO book_metadata (rel_path, mtime, title, author, label) VALUES (?, ?, ?, ?, ?)",
+                        updates
+                    )
+        finally:
+            conn.close()
+
+        return sorted(catalog)
     def _save_state(self):
         """Saves the current bookmark to SQLite."""
         conn = sqlite3.connect(self.db_path)
@@ -83,14 +167,17 @@ class SequentialReaderComponent(BaseComponent):
             conn.close()
         self.current_book = row[0]
         self.current_index = row[1]
+        self.current_book_label = None
         self.current_chunks = []
         
         if self.current_book and os.path.exists(self.current_book):
-            print(f"[Reader] Restoring state: Re-parsing '{os.path.basename(self.current_book)}'...")
+            self.current_book_label = self._format_book_label(self.current_book)
+            print(f"[Reader] Restoring state: Re-parsing '{self.current_book_label}'...")
             self._parse_book(self.current_book)
 
     def _parse_book(self, abs_file_path: str):
         """Internal helper to extract text and chunk it without resetting the index."""
+        self.current_book_label = self._format_book_label(abs_file_path)
         book = epub.read_epub(abs_file_path)
         full_text = []
         
@@ -112,12 +199,13 @@ class SequentialReaderComponent(BaseComponent):
             "You have access to a sequential document reader. While your knowledge base search "
             "is good for finding facts, the sequential reader allows you to sit down and read "
             "an entire book from start to finish.\n"
-            "Use `search_library` to find books by title. Use `open_book` to load a book into "
-            "your active reading state. Use `read_next_chunk` and `read_previous_chunk` to navigate "
-            "through the open book."
+            "Use `search_library` to find books by title or author. Use `open_book` (passing the relative path) "
+            "to load a book into your active reading state. Use `read_next_chunk` and `read_previous_chunk` "
+            "to navigate through the open book."
         )
         if self.current_book:
-            prompt += f"\n[Status: You currently have '{os.path.basename(self.current_book)}' open at chunk {self.current_index}/{max(1, len(self.current_chunks))}]."
+            label = self.current_book_label or os.path.basename(self.current_book)
+            prompt += f"\n[Status: You currently have '{label}' open at chunk {self.current_index}/{max(1, len(self.current_chunks))}]."
         else:
             prompt += "\n[Status: You do not have a book open.]"
             
@@ -135,25 +223,22 @@ class SequentialReaderComponent(BaseComponent):
     # --- Tool Implementations ---
 
     def list_library(self) -> List[str]:
-        """Returns a list of all EPUB filenames available to read."""
-        search_pattern = os.path.join(self.library_dir, "**", "*.epub")
-        files = glob.glob(search_pattern, recursive=True)
-        return [os.path.relpath(f, self.library_dir) for f in files]
+        """Returns a list of all EPUB books available to read (with title, author, and relative path)."""
+        return self._get_library_catalog()
 
     def search_library(self, query: str) -> List[str]:
         """
-        Searches for books in the library whose filenames match the query.
-        Returns a list of matching relative file paths that can be passed to open_book.
+        Searches for books in the library whose title, author, or filename match the query.
+        Returns a list of matching entries showing 'Title by Author [path: relative/path.epub]'.
+        Pass the relative path inside [path: ...] to open_book.
         """
-        search_pattern = os.path.join(self.library_dir, "**", "*.epub")
-        files = glob.glob(search_pattern, recursive=True)
+        catalog = self._get_library_catalog()
         
         matches = []
         query_lower = query.lower()
-        for f in files:
-            rel_path = os.path.relpath(f, self.library_dir)
-            if query_lower in rel_path.lower():
-                matches.append(rel_path)
+        for entry in catalog:
+            if query_lower in entry.lower():
+                matches.append(entry)
                 
         if len(matches) > 50:
             return matches[:50] + [f"... and {len(matches) - 50} more. Please refine your search."]
@@ -164,6 +249,10 @@ class SequentialReaderComponent(BaseComponent):
         Opens an EPUB file from the library, extracts its text, and prepares it for reading.
         Resets your reading position to the beginning.
         """
+        # If the agent passed the full formatted catalog entry "... [path: foo/bar.epub]", extract the path
+        if "[path: " in filename and filename.endswith("]"):
+            filename = filename.split("[path: ", 1)[1][:-1].strip()
+
         file_path = os.path.join(self.library_dir, filename)
         
         abs_library_dir = os.path.abspath(self.library_dir)
@@ -186,7 +275,7 @@ class SequentialReaderComponent(BaseComponent):
             if hasattr(self, 'agent') and self.agent:
                 self.agent.rebuild_system_prompt()
             
-            return f"Successfully opened '{filename}'. The book has been split into {len(self.current_chunks)} reading chunks. Use read_next_chunk to begin."
+            return f"Successfully opened '{self.current_book_label}'. The book has been split into {len(self.current_chunks)} reading chunks. Use read_next_chunk to begin."
             
         except Exception as e:
             return f"Error opening book: {str(e)}"
@@ -197,7 +286,7 @@ class SequentialReaderComponent(BaseComponent):
             return "Error: No book is currently open. Use open_book first."
             
         if self.current_index >= len(self.current_chunks):
-            return "You have reached the end of the book."
+            return f"You have reached the end of '{self.current_book_label}'."
             
         chunk = self.current_chunks[self.current_index]
         self.current_index += 1
@@ -206,7 +295,7 @@ class SequentialReaderComponent(BaseComponent):
         if hasattr(self, 'agent') and self.agent:
             self.agent.rebuild_system_prompt()
             
-        return f"--- Chunk {self.current_index}/{len(self.current_chunks)} ---\n{chunk}"
+        return f"--- [Book: {self.current_book_label}] Chunk {self.current_index}/{len(self.current_chunks)} ---\n{chunk}"
 
     def read_previous_chunk(self) -> str:
         """Moves your bookmark back one chunk and returns that text."""
@@ -218,7 +307,7 @@ class SequentialReaderComponent(BaseComponent):
             self._save_state()
             if hasattr(self, 'agent') and self.agent:
                 self.agent.rebuild_system_prompt()
-            return "You are already at the beginning of the book."
+            return f"You are already at the beginning of '{self.current_book_label}'."
             
         self.current_index -= 2 
         if self.current_index < 0:
@@ -231,4 +320,4 @@ class SequentialReaderComponent(BaseComponent):
         if hasattr(self, 'agent') and self.agent:
             self.agent.rebuild_system_prompt()
             
-        return f"--- Chunk {self.current_index}/{len(self.current_chunks)} ---\n{chunk}"
+        return f"--- [Book: {self.current_book_label}] Chunk {self.current_index}/{len(self.current_chunks)} ---\n{chunk}"
