@@ -51,8 +51,9 @@ class DiscordAdapter:
             # Update the last channel so we know where to reply
             self.last_channel_id = message.channel.id
             
-            # Format the payload so the agent knows who is speaking and where it came from
-            payload = f"[Via Discord] {message.author.display_name} says: {message.content}"
+            # Format the payload so the agent knows who is speaking and whether they are a bot/APP or human operator
+            role_tag = "[APP/Agent]" if message.author.bot else "[Operator]"
+            payload = f"[Via Discord] {message.author.display_name} {role_tag} says: {message.content}"
             print(f"[Discord Incoming] {payload}")
             
             # Wake the agent up!

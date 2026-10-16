@@ -36,7 +36,7 @@ Thunk's architecture decouples agent cognition from capabilities through an even
 | **`SubconsciousRecallComponent`** | Automatically performs semantic vector recall on incoming user messages and injects relevant context without polluting persistent transcripts. | Transparent context injection |
 | **`ClockComponent`** | Injects current system time truncated to the hour to maximize `llama.cpp` / Ollama prefix cache hits. | System prompt time injection |
 | **`DirectivesComponent`** | Injects high-level directives (intellectual curiosity, knowledge curation, self-reliance, cross-thread synthesis). | Behavioral guidance prompt |
-| **`SystemComponent`** | Provides operator communication and explicit lifecycle suspension. | `send_message_to_operator`, `suspend_until_next_event` |
+| **`SystemComponent`** | Provides external communication and explicit lifecycle suspension. | `send_message`, `suspend_until_next_event` |
 | **`AuditLogComponent`** | Writes deterministic, structured JSONL logs of all events, tool calls, and LLM completions. | Session logging to `logs/` |
 | **`TieredMemoryComponent`** | Enforces token-based high/low watermarks, compacts older messages into a rolling core summary, archives all messages to SQLite, tracks `last_compacted_id` for crash resilience, and consolidates evicted contexts into vector memory. | Context compaction & archival |
 | **`CriticComponent`** | Subconscious monitor that reviews recent interaction history and injects gentle observations/intuitions to prevent loop stalls. | Progress monitoring & guidance |
@@ -56,7 +56,7 @@ Thunk's architecture decouples agent cognition from capabilities through an even
 
 * **MQTT Adapter (`src/adapters/mqtt.py`):**
   * Subscribes to an incoming MQTT topic (`thunk/agent/inbox`) to wake the agent with external commands or sensor data.
-  * Publishes outbound messages from `send_message_to_operator` to an outbox topic (`thunk/agent/outbox`).
+  * Publishes outbound messages from `send_message` to an outbox topic (`thunk/agent/outbox`).
   * Features an automatic reconnect loop with backoff to recover from broker disconnects.
 
 * **Discord Adapter (`src/adapters/discord_adapter.py`):**

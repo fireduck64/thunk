@@ -53,7 +53,7 @@ def format_log(filepath):
                 args = payload.get("args", {})
                 result = str(payload.get("result", ""))
                 
-                if name == "send_message_to_operator":
+                if name in ("send_message", "send_message_to_operator"):
                     medium = args.get("medium", "all")
                     message = args.get("message", "")
                     print(f"\n📢 [OUTBOUND -> {medium.upper()}]\n{message}")

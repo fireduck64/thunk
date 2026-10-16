@@ -40,6 +40,7 @@ class AgentCore:
         
         # Concurrency / Lifecycle
         self.suspended = asyncio.Event()
+        self.inbox: asyncio.Queue[str] = asyncio.Queue()
 
     def register_component(self, component: BaseComponent):
         """Attaches a component to the agent."""
@@ -196,6 +197,9 @@ class AgentCore:
             print("  Doing things")
                 
             try:
+                # 0. Drain any external messages that arrived while we were mid-turn
+                await self._drain_inbox()
+
                 # 4. Context Window Check
                 # We moved this to the TOP of the loop so it guarantees the context 
                 # is pruned before the LLM is called, preventing timeout death spirals.
@@ -275,14 +279,10 @@ class AgentCore:
                 traceback.print_exc()
                 await asyncio.sleep(5) # Prevent tight error loops
 
-    async def resume(self, user_message: str = None):
-        """Wakes the agent up, optionally with new information."""
-        if user_message:
-            # We intercept User messages here. 
-            # If the user sends a message, we do a subconscious associative search
-            # across internal memory and inject the results transparently.
-            # We don't want to save this injected text to the archival log though!
-            
+    async def _drain_inbox(self):
+        """Drains all queued external messages at a safe boundary between turns."""
+        while not self.inbox.empty():
+            user_message = await self.inbox.get()
             # Fire an event that components can hook into to modify the message BEFORE it gets saved
             # or to append context. We use a dict so it's mutable by reference.
             msg_context = {"content": user_message}
@@ -294,5 +294,9 @@ class AgentCore:
             # If a component added subconscious context, we replace the working memory content
             if msg_context["content"] != user_message:
                 self.messages[-1]["content"] = msg_context["content"]
-            
+
+    async def resume(self, user_message: str = None):
+        """Wakes the agent up, optionally enqueueing new external information for the next turn boundary."""
+        if user_message:
+            await self.inbox.put(user_message)
         self.suspended.set()
