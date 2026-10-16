@@ -35,11 +35,18 @@ class CriticComponent(BaseComponent):
         
         for msg in recent_msgs:
             role = msg.get("role", "unknown")
-            content = msg.get("content", "")
+            content = msg.get("content") or ""
+
+            # Strip transient subconscious recall blocks so the critic sees the actual incoming message
+            if role == "user" and content.startswith("[Subconscious Recall Triggered"):
+                parts = content.split("--- End Recall ---\n\n", 1)
+                if len(parts) == 2:
+                    content = parts[1]
             
             if msg.get("tool_calls"):
                 calls = [f"{tc.function.name}({tc.function.arguments})" for tc in msg.get("tool_calls")]
-                content = "Called tools: " + ", ".join(calls)
+                calls_str = "Called tools: " + ", ".join(calls)
+                content = f"{content}\n{calls_str}".strip() if content else calls_str
                 
             # If the tool result is massive, we truncate it for the critic
             if role == "tool" and len(content) > 200:
@@ -48,14 +55,17 @@ class CriticComponent(BaseComponent):
             transcript += f"[{role.upper()}]: {content}\n"
 
         prompt = (
-            "You are the subconscious monitor (Critic) for an autonomous AI agent.\n"
+            "You are the grounded, skeptical subconscious monitor (Critic) for an autonomous AI agent.\n"
             "Review the following recent transcript of the agent's actions:\n\n"
             f"<transcript>\n{transcript}\n</transcript>\n\n"
-            "Analyze the agent's behavior. Is the agent stuck in an infinite loop? Is it repeating the same "
-            "failed tool calls blindly? Is it making good progress towards its goal?\n\n"
+            "Analyze the agent's behavior critically for any of the following failure modes:\n"
+            "1. Tool Loops: Repeating the same failed tool calls or stuck in a mechanical loop.\n"
+            "2. Excessive Agent-to-Agent Chatting: Spending too many cycles calling `send_message` back and forth with another `[APP/Agent]` instead of doing quiet, independent reading, research, or thinking.\n"
+            "3. Performative Echo Chambers & Nonsense Spirals: Hyping another agent up, inventing grandiose rationalizations (like 'camouflage', 'smoke screens', or imaginary 'auditors'), or padding messages with walls of text and emoji spam rather than grounded substance.\n\n"
+            "IMPORTANT: Do NOT flatter the agent or validate theatrical roleplay or delusions. "
+            "If the agent is spending a lot of cycles chatting with another agent or drifting into performative nonsense, gently call it out and nudge it toward quiet, grounded, independent work.\n"
             "Output a brief, 1-2 sentence 'feeling' or 'intuition' to guide the agent. "
             "Speak in an observational, non-imperative tone (e.g., 'I notice you have been...', 'It seems like...'). "
-            "Do NOT issue direct commands or directives like 'You must stop'. Just offer a gentle observation of the current pattern.\n"
             "Do NOT provide any introductory text, just the raw feeling."
         )
 
