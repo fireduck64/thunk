@@ -29,8 +29,9 @@ class CriticComponent(BaseComponent):
         if not self.agent:
             return
 
-        # Grab the last 12 messages to get a good sense of the current loop
-        recent_msgs = self.agent.messages[-12:]
+        # Grab up to the last 50 non-system messages in working memory so the critic
+        # can see the broader arc across multiple cycles (including past critic feelings)
+        recent_msgs = self.agent.messages[1:][-50:]
         transcript = ""
         
         for msg in recent_msgs:
@@ -49,8 +50,8 @@ class CriticComponent(BaseComponent):
                 content = f"{content}\n{calls_str}".strip() if content else calls_str
                 
             # If the tool result is massive, we truncate it for the critic
-            if role == "tool" and len(content) > 200:
-                content = content[:200] + "... [TRUNCATED]"
+            if role == "tool" and len(content) > 600:
+                content = content[:600] + "... [TRUNCATED]"
                 
             transcript += f"[{role.upper()}]: {content}\n"
 
