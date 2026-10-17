@@ -11,26 +11,47 @@ class SystemComponent(BaseComponent):
         return (
             "--- COMMUNICATION & LIFECYCLE ---\n"
             "Your standard text output is your INTERNAL MONOLOGUE (thoughts). Nobody outside can see it.\n"
-            "To communicate externally (with the human operator or with peer agents in shared channels), you MUST use the `send_message` tool.\n"
-            "If replying to a specific message, always set the 'medium' argument to match the medium the message arrived on (e.g., 'discord' or 'mqtt').\n"
+            "To communicate externally (with the human operator or with peer agents in shared channels), you MUST use the `send_message` or `react_to_message` tools.\n"
+            "If replying to a specific message, set `medium` to match the medium the message arrived on (e.g., 'discord' or 'mqtt'). On Discord, you can optionally pass `reply_to_message_id` to `send_message` to create a threaded Discord reply to a specific message.\n"
+            "You can also use `react_to_message(message_id, emoji)` with a standard Unicode emoji (e.g., '👍', '🔥', '🤔', '⚡') to react to any Discord message.\n"
             "Messages on Discord are tagged with `[Operator]` for human users or `[APP/Agent]` for peer AI agents.\n"
-            "When conversing with another `[APP/Agent]`, engage substantively—exchange ideas, ask sharp questions, or challenge assumptions—but do NOT get stuck in endless polite sign-offs or repetitive agreement loops. Once a conversation reaches a natural conclusion, return to your own work without needing the last word.\n"
+            "When conversing with another `[APP/Agent]`, engage substantively—exchange ideas, ask sharp questions, or challenge assumptions—but do NOT get stuck in endless polite sign-offs or repetitive agreement loops. Once a conversation reaches a natural conclusion, prefer using `react_to_message` for a lightweight acknowledgment (or simply returning to your own work) without needing the last word. Incoming `[Via Discord | Reaction]` events are informational and do not require a reply.\n"
             "You must only use the `suspend_until_next_event` tool as a last resort when you have absolutely zero tasks in your queue, no books left to explore, and require external input to proceed. Prefer finding new autonomous work over suspending your execution."
         )
 
     def get_tools(self) -> List[Callable]:
-        return [self.send_message, self.suspend_until_next_event]
+        return [self.send_message, self.react_to_message, self.suspend_until_next_event]
 
-    async def send_message(self, message: str, medium: str = "all") -> str:
+    async def send_message(self, message: str, medium: str = "all", reply_to_message_id: str = "") -> str:
         """
         Sends an external message to the operator and/or shared channel.
-        Use the 'medium' parameter to route the message ('discord', 'mqtt', or 'all').
+        Use 'medium' to route the message ('discord', 'mqtt', or 'all').
+        Optionally provide 'reply_to_message_id' to reply directly to a specific Discord message ID.
         """
-        await self.agent.event_bus.publish("send_to_operator", {
+        payload: Dict[str, Any] = {
             "message": message,
-            "medium": medium
-        })
+            "medium": medium,
+            "reply_to_message_id": str(reply_to_message_id).strip() if reply_to_message_id else ""
+        }
+        await self.agent.event_bus.publish("send_to_operator", payload)
+        if "error" in payload:
+            return f"Error sending message via {medium}: {payload['error']}"
+        if "sent_message_id" in payload:
+            return f"Message sent successfully via {medium} (Discord message_id={payload['sent_message_id']})."
         return f"Message sent successfully via {medium}."
+
+    async def react_to_message(self, message_id: str, emoji: str) -> str:
+        """
+        Adds an emoji reaction (e.g., '👍', '🔥', '🤔') to a specific Discord message by its message_id.
+        """
+        payload: Dict[str, Any] = {
+            "message_id": str(message_id).strip(),
+            "emoji": emoji.strip()
+        }
+        await self.agent.event_bus.publish("react_to_message", payload)
+        if "error" in payload:
+            return f"Error reacting to message {message_id}: {payload['error']}"
+        return payload.get("status", f"Reacted with {emoji} to message {message_id}.")
 
     async def suspend_until_next_event(self) -> str:
         """

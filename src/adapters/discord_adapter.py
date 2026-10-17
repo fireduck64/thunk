@@ -29,6 +29,18 @@ class DiscordAdapter:
 
         self._setup_events()
 
+    def _expand_mentions(self, text: str, mentions: list) -> str:
+        """Expands raw <@ID> and <@!ID> tags into @DisplayName (<@ID>)."""
+        if not text:
+            return ""
+        for user in mentions:
+            if user == self.client.user:
+                replacement = f"@{user.display_name} (you, <@{user.id}>)"
+            else:
+                replacement = f"@{user.display_name} (<@{user.id}>)"
+            text = text.replace(f"<@{user.id}>", replacement).replace(f"<@!{user.id}>", replacement)
+        return text
+
     def _setup_events(self):
         @self.client.event
         async def on_ready():
@@ -52,21 +64,82 @@ class DiscordAdapter:
             self.last_channel_id = message.channel.id
             
             # Expand <@ID> and <@!ID> mentions so the agent sees both the display name and raw Discord tag
-            content = message.content
-            for user in message.mentions:
-                if user == self.client.user:
-                    replacement = f"@{user.display_name} (you, <@{user.id}>)"
-                else:
-                    replacement = f"@{user.display_name} (<@{user.id}>)"
-                content = content.replace(f"<@{user.id}>", replacement).replace(f"<@!{user.id}>", replacement)
+            content = self._expand_mentions(message.content, message.mentions)
 
-            # Format the payload so the agent knows who is speaking, their mention tag, and whether they are a bot/APP or human operator
+            # Check if this message is a reply to another message
+            reply_context = ""
+            if message.reference and message.reference.message_id:
+                ref_id = message.reference.message_id
+                ref_msg = message.reference.resolved if isinstance(message.reference.resolved, discord.Message) else None
+                if ref_msg is None:
+                    try:
+                        ref_msg = await message.channel.fetch_message(ref_id)
+                    except Exception:
+                        ref_msg = None
+                if ref_msg is not None:
+                    ref_author = "you" if ref_msg.author == self.client.user else ref_msg.author.display_name
+                    ref_text = self._expand_mentions(ref_msg.content or "", ref_msg.mentions)
+                    ref_snippet = ref_text[:120].replace("\n", " ")
+                    reply_context = f' (replying to message_id={ref_id} by {ref_author}: "{ref_snippet}")'
+                else:
+                    reply_context = f" (replying to message_id={ref_id})"
+
+            # Format the payload so the agent knows the message_id, who is speaking, their mention tag, and their role
             role_tag = "[APP/Agent]" if message.author.bot else "[Operator]"
-            payload = f"[Via Discord] {message.author.display_name} (<@{message.author.id}>) {role_tag} says: {content}"
+            payload = f"[Via Discord | message_id={message.id}] {message.author.display_name} (<@{message.author.id}>) {role_tag}{reply_context} says: {content}"
             print(f"[Discord Incoming] {payload}")
             
             # Wake the agent up!
             await self.agent.resume(payload)
+
+        @self.client.event
+        async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+            # Ignore reactions added by ourselves
+            if self.client.user and payload.user_id == self.client.user.id:
+                return
+
+            # If restricted to a specific channel, ignore others
+            if self.allowed_channel_id and payload.channel_id != self.allowed_channel_id:
+                return
+
+            self.last_channel_id = payload.channel_id
+
+            # Resolve who added the reaction
+            reactor_name = str(payload.user_id)
+            is_bot = False
+            if payload.member:
+                reactor_name = payload.member.display_name
+                is_bot = payload.member.bot
+            else:
+                user = self.client.get_user(payload.user_id)
+                if user is None:
+                    try:
+                        user = await self.client.fetch_user(payload.user_id)
+                    except Exception:
+                        user = None
+                if user is not None:
+                    reactor_name = user.display_name
+                    is_bot = user.bot
+
+            role_tag = "[APP/Agent]" if is_bot else "[Operator]"
+
+            # Resolve the message that was reacted to
+            target_desc = f"message_id={payload.message_id}"
+            channel = self.client.get_channel(payload.channel_id)
+            if channel:
+                try:
+                    target_msg = await channel.fetch_message(payload.message_id)
+                    target_author = "your message" if target_msg.author == self.client.user else f"{target_msg.author.display_name}'s message"
+                    target_text = self._expand_mentions(target_msg.content or "", target_msg.mentions)
+                    snippet = target_text[:120].replace("\n", " ")
+                    target_desc = f'{target_author} (message_id={payload.message_id}: "{snippet}")'
+                except Exception:
+                    pass
+
+            event_str = f"[Via Discord | Reaction] {reactor_name} (<@{payload.user_id}>) {role_tag} reacted with {payload.emoji} to {target_desc}"
+            print(f"[Discord Incoming] {event_str}")
+
+            await self.agent.resume(event_str)
 
     async def _on_send_to_operator(self, event_name: str, payload: dict):
         """Intercept explicit operator messages and publish via Discord if requested."""
@@ -76,20 +149,73 @@ class DiscordAdapter:
             return
             
         msg_content = payload.get("message", "")
+        reply_to_raw = payload.get("reply_to_message_id", "")
         if msg_content and self.last_channel_id:
             try:
                 channel = self.client.get_channel(self.last_channel_id)
                 if channel:
-                    print(f"[Discord] Sending message to channel {self.last_channel_id}")
+                    reference = None
+                    if reply_to_raw:
+                        clean_id = str(reply_to_raw).replace("message_id=", "").strip()
+                        if clean_id.isdigit():
+                            reference = discord.MessageReference(
+                                message_id=int(clean_id),
+                                channel_id=channel.id,
+                                fail_if_not_exists=False
+                            )
+                        else:
+                            payload["error"] = f"Invalid reply_to_message_id '{reply_to_raw}'."
+                            return
+
+                    print(f"[Discord] Sending message to channel {self.last_channel_id}" + (f" (reply to {reply_to_raw})" if reference else ""))
                     # Discord has a 2000 character limit per message.
                     # We should chunk it if it's too long.
                     chunks = [msg_content[i:i+1900] for i in range(0, len(msg_content), 1900)]
-                    for chunk in chunks:
-                        await channel.send(chunk)
+                    first_sent = None
+                    for idx, chunk in enumerate(chunks):
+                        sent_msg = await channel.send(chunk, reference=reference if idx == 0 else None)
+                        if first_sent is None:
+                            first_sent = sent_msg
+                    if first_sent is not None:
+                        payload["sent_message_id"] = str(first_sent.id)
                 else:
-                    print(f"[Discord Error] Could not find channel {self.last_channel_id}")
+                    err = f"Could not find channel {self.last_channel_id}"
+                    print(f"[Discord Error] {err}")
+                    payload["error"] = err
             except Exception as e:
                 print(f"[Discord Error] Failed to send message: {e}")
+                payload["error"] = str(e)
+
+    async def _on_react_to_message(self, event_name: str, payload: dict):
+        """Add an emoji reaction to a specific Discord message."""
+        msg_id_raw = payload.get("message_id", "")
+        emoji = payload.get("emoji", "")
+        if not msg_id_raw or not emoji:
+            payload["error"] = "Both message_id and emoji are required."
+            return
+
+        if not self.last_channel_id:
+            payload["error"] = "No active Discord channel configured."
+            return
+
+        clean_id = str(msg_id_raw).replace("message_id=", "").strip()
+        if not clean_id.isdigit():
+            payload["error"] = f"Invalid message_id '{msg_id_raw}'."
+            return
+
+        try:
+            channel = self.client.get_channel(self.last_channel_id)
+            if not channel:
+                payload["error"] = f"Could not find channel {self.last_channel_id}"
+                return
+
+            partial_msg = channel.get_partial_message(int(clean_id))
+            await partial_msg.add_reaction(emoji)
+            print(f"[Discord] Reacted with {emoji} to message {clean_id}")
+            payload["status"] = f"Reacted with {emoji} to Discord message {clean_id}."
+        except Exception as e:
+            print(f"[Discord Error] Failed to add reaction: {e}")
+            payload["error"] = str(e)
 
     async def start(self):
         """Connect to Discord."""
@@ -97,8 +223,9 @@ class DiscordAdapter:
             print("[Discord] No bot_token found in config.toml. Discord adapter disabled.")
             return
 
-        # Subscribe to the agent's explicit output requests
+        # Subscribe to the agent's explicit output and reaction requests
         self.agent.event_bus.subscribe("send_to_operator", self._on_send_to_operator)
+        self.agent.event_bus.subscribe("react_to_message", self._on_react_to_message)
         
         print("[Discord] Connecting to Discord...")
         try:

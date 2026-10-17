@@ -56,6 +56,6 @@ class SubconsciousRecallComponent(BaseComponent):
                     f"[Subconscious Recall Triggered by below message:]\n"
                     f"{subconscious_thoughts.strip()}\n"
                     f"--- End Recall ---\n\n"
-                    f"Operator says: {original_text}"
+                    f"{original_text}"
                 )
                 payload["content"] = new_content
