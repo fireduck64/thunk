@@ -49,6 +49,7 @@ verbose = true                        # When true, dumps full agent context on t
 [file_reader.libraries]
 # Named libraries mapping alias names to local directories for inspection (REQUIRED)
 thunk_source = "/home/fireduck/projects/thunk/src"
+discord_images = "data/thunk/images"
 
 [embeddings]
 # Embedding model for vector database ingestion and semantic search
@@ -75,6 +76,7 @@ outbox_topic = "thunk/agent/outbox"
 # Create an application at https://discord.com/developers/applications
 # Ensure you enable the "Message Content Intent" in the Bot settings.
 bot_token = "YOUR_DISCORD_BOT_TOKEN_HERE"
+images_dir = "data/thunk/images"      # Directory where incoming Discord image attachments are saved
 # Optional: Restrict the bot to only listen and reply in a specific channel ID (integer)
 # allowed_channel_id = 123456789012345678
 

@@ -1,4 +1,5 @@
 import os
+import pytest
 from src.utils.config import load_config
 from src.components.reader import SequentialReaderComponent
 
@@ -48,5 +49,61 @@ def test_sequential_reader_metadata_and_chunks():
     reader_reloaded = SequentialReaderComponent(chunk_size=300)
     assert reader_reloaded.current_index == 1
     assert "Pride and Prejudice: Test Edition" in reader_reloaded.current_book_label
+
+
+@pytest.mark.asyncio
+async def test_image_downsize_save_and_ephemeral_vision():
+    """Tests 1024px image downsizing, atomic disk storage, view_image tool, and ephemeral vision messages."""
+    import io
+    from PIL import Image
+    from src.core.agent import AgentCore
+    from src.components.file_reader import FileReaderComponent
+    from src.utils.image import downsize_image_bytes, encode_jpeg_data_url, save_image_atomic
+
+    cfg = load_config()
+    images_dir = cfg["discord"]["images_dir"]
+    os.makedirs(images_dir, exist_ok=True)
+
+    # 1. Create a 2400x1200 RGBA PNG in memory and verify downsizing to 1024x512 JPEG
+    raw_buf = io.BytesIO()
+    img = Image.new("RGBA", (2400, 1200), (20, 120, 220, 255))
+    img.save(raw_buf, format="PNG")
+    jpeg_bytes, w, h = downsize_image_bytes(raw_buf.getvalue(), max_edge=1024)
+    assert (w, h) == (1024, 512)
+
+    saved_file = os.path.join(images_dir, "test_attachment.jpg")
+    save_image_atomic(jpeg_bytes, saved_file)
+    assert os.path.exists(saved_file)
+
+    try:
+        # 2. Verify AgentCore attaches image on first LLM preparation and strips it after
+        agent = AgentCore()
+        fr = FileReaderComponent()
+        agent.register_component(fr)
+
+        data_url = encode_jpeg_data_url(jpeg_bytes)
+        await agent.resume("Look at this image", images=[data_url])
+        await agent._drain_inbox()
+
+        wire_msgs = agent._prepare_llm_messages()
+        assert isinstance(wire_msgs[-1]["content"], list)
+        assert wire_msgs[-1]["content"][0]["type"] == "text"
+        assert wire_msgs[-1]["content"][1]["type"] == "image_url"
+        assert wire_msgs[-1]["content"][1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+        # After the LLM call, _clear_ephemeral_images strips the base64 payload from working memory
+        agent._clear_ephemeral_images()
+        wire_msgs_after = agent._prepare_llm_messages()
+        assert isinstance(wire_msgs_after[-1]["content"], str)
+
+        # 3. Verify view_image re-loads the saved image into pending_tool_images
+        res = fr.view_image("discord_images", "test_attachment.jpg")
+        assert "1024x512px" in res
+        assert len(agent.pending_tool_images) == 1
+        assert agent.pending_tool_images[0].startswith("data:image/jpeg;base64,")
+    finally:
+        if os.path.exists(saved_file):
+            os.remove(saved_file)
+
 
 

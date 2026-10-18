@@ -2,6 +2,7 @@ import os
 from typing import List, Callable, Dict, Optional
 from src.components.base import BaseComponent
 from src.utils.config import load_config
+from src.utils.image import downsize_image_bytes, encode_jpeg_data_url
 
 class FileReaderComponent(BaseComponent):
     """
@@ -26,11 +27,12 @@ class FileReaderComponent(BaseComponent):
             "Use `list_libraries` to see available directories. "
             "Use `list_files` to explore the contents of a library. "
             "Use `read_file` to read the contents of text or code files. "
-            "You can specify start and end lines to read specific sections."
+            "You can specify start and end lines to read specific sections. "
+            "Use `view_image` to visually inspect an image file (such as saved Discord attachments in `discord_images`)."
         )
 
     def get_tools(self) -> List[Callable]:
-        return [self.list_libraries, self.list_files, self.read_file]
+        return [self.list_libraries, self.list_files, self.read_file, self.view_image]
 
     def _resolve_and_check_path(self, library: str, rel_path: str) -> str:
         """Helper to resolve paths safely within a library's bounds."""
@@ -127,3 +129,31 @@ class FileReaderComponent(BaseComponent):
             
         except Exception as e:
             return f"Error reading file '{filepath}': {str(e)}"
+
+    def view_image(self, library: str, filepath: str) -> str:
+        """
+        Loads an image file from a configured library (such as 'discord_images'),
+        downsizes it to at most 1024px on its longest edge, and attaches it to your
+        visual context for the current turn so you can see and analyze it.
+        """
+        try:
+            abs_path = self._resolve_and_check_path(library, filepath)
+
+            if not os.path.exists(abs_path):
+                return f"Error: Image '{filepath}' does not exist in library '{library}'."
+
+            if not os.path.isfile(abs_path):
+                return f"Error: '{filepath}' is not a file."
+
+            with open(abs_path, "rb") as f:
+                raw_bytes = f.read()
+
+            jpeg_bytes, width, height = downsize_image_bytes(raw_bytes, max_edge=1024)
+            data_url = encode_jpeg_data_url(jpeg_bytes)
+
+            if hasattr(self, "agent") and self.agent is not None:
+                self.agent.pending_tool_images.append(data_url)
+
+            return f"Loaded image '{filepath}' from library '{library}' ({width}x{height}px) into your visual context for this turn."
+        except Exception as e:
+            return f"Error viewing image '{filepath}': {str(e)}"

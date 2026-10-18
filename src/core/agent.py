@@ -40,7 +40,8 @@ class AgentCore:
         
         # Concurrency / Lifecycle
         self.suspended = asyncio.Event()
-        self.inbox: asyncio.Queue[str] = asyncio.Queue()
+        self.inbox: asyncio.Queue = asyncio.Queue()
+        self.pending_tool_images: list[str] = []
 
     def register_component(self, component: BaseComponent):
         """Attaches a component to the agent."""
@@ -74,6 +75,27 @@ class AgentCore:
                 schema = function_to_schema(func)
                 self.tools.append(schema)
                 self.tool_map[func.__name__] = func
+
+    def _prepare_llm_messages(self) -> list[dict]:
+        """Builds the wire-format messages list, expanding any transient `_images` into OpenAI image_url parts."""
+        wire_messages = []
+        for msg in self.messages:
+            images = msg.get("_images")
+            if images:
+                content_parts = [{"type": "text", "text": msg.get("content") or ""}]
+                for img_url in images:
+                    content_parts.append({"type": "image_url", "image_url": {"url": img_url}})
+                wire_msg = {k: v for k, v in msg.items() if not k.startswith("_")}
+                wire_msg["content"] = content_parts
+                wire_messages.append(wire_msg)
+            else:
+                wire_messages.append({k: v for k, v in msg.items() if not k.startswith("_")})
+        return wire_messages
+
+    def _clear_ephemeral_images(self) -> None:
+        """Strips transient base64 `_images` from working memory after they have been sent to the LLM once."""
+        for msg in self.messages:
+            msg.pop("_images", None)
 
     def rebuild_system_prompt(self):
         """Rebuilds the system prompt (Index 0 of messages) using all current component states."""
@@ -208,10 +230,12 @@ class AgentCore:
                 # Tell the logger exactly what we are sending to the LLM
                 await self.event_bus.publish("before_llm_call", {"agent": self, "messages": self.messages})
                 
+                wire_messages = self._prepare_llm_messages()
+
                 # 1. Prompt the LLM using a stream to keep Nginx alive
                 response_stream = await self.client.chat.completions.create(
                     model=self.model,
-                    messages=self.messages,
+                    messages=wire_messages,
                     tools=self.tools if self.tools else None,
                     # Tool choice auto ensures it can choose to use tools or output text
                     tool_choice="auto" if self.tools else "none",
@@ -220,6 +244,9 @@ class AgentCore:
                 
                 # Reconstruct the message object silently
                 message = await self._accumulate_stream(response_stream)
+
+                # Clear transient base64 images now that the LLM has seen them on this call
+                self._clear_ephemeral_images()
                 
                 # Tell the logger exactly what the LLM returned
                 # (We pass the reconstructed message instead of the raw stream)
@@ -253,12 +280,16 @@ class AgentCore:
                         print(f"[Tool Result] -> {result}\n")
                         
                         # Add tool result back to the context
-                        await self._append_message({
+                        tool_msg = {
                             "role": "tool",
                             "tool_call_id": tool_call.id,
                             "name": tool_call.function.name,
                             "content": result
-                        })
+                        }
+                        if self.pending_tool_images:
+                            tool_msg["_images"] = list(self.pending_tool_images)
+                            self.pending_tool_images.clear()
+                        await self._append_message(tool_msg)
                         
                     # Set the flag so it loops immediately to see tool results
                     self.suspended.set()
@@ -282,7 +313,14 @@ class AgentCore:
     async def _drain_inbox(self):
         """Drains all queued external messages at a safe boundary between turns."""
         while not self.inbox.empty():
-            user_message = await self.inbox.get()
+            item = await self.inbox.get()
+            if isinstance(item, dict):
+                user_message = item.get("content", "")
+                images = item.get("images") or []
+            else:
+                user_message = str(item)
+                images = []
+
             # Fire an event that components can hook into to modify the message BEFORE it gets saved
             # or to append context. We use a dict so it's mutable by reference.
             msg_context = {"content": user_message}
@@ -295,8 +333,14 @@ class AgentCore:
             if msg_context["content"] != user_message:
                 self.messages[-1]["content"] = msg_context["content"]
 
-    async def resume(self, user_message: str = None):
-        """Wakes the agent up, optionally enqueueing new external information for the next turn boundary."""
+            if images:
+                self.messages[-1]["_images"] = list(images)
+
+    async def resume(self, user_message: str = None, images: list[str] = None):
+        """Wakes the agent up, optionally enqueueing new external information (and transient images) for the next turn boundary."""
         if user_message:
-            await self.inbox.put(user_message)
+            if images:
+                await self.inbox.put({"content": user_message, "images": list(images)})
+            else:
+                await self.inbox.put(user_message)
         self.suspended.set()

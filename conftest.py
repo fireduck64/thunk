@@ -17,6 +17,7 @@ def _ensure_test_environment(config_path: str) -> None:
     os.makedirs(os.path.join(TEST_DATA_DIR, "library"), exist_ok=True)
     os.makedirs(os.path.join(TEST_DATA_DIR, "skills"), exist_ok=True)
     os.makedirs(os.path.join(TEST_DATA_DIR, "logs"), exist_ok=True)
+    os.makedirs(os.path.join(TEST_DATA_DIR, "images"), exist_ok=True)
 
     directives_path = os.path.join(TEST_DATA_DIR, "directives.md")
     if not os.path.exists(directives_path):
@@ -40,11 +41,11 @@ def _ensure_test_environment(config_path: str) -> None:
                 '[reader]\nlibrary_dir = "data/test/library"\ndb_path = "data/test/reader_state.db"\n\n'
                 '[skills]\nskills_dir = "data/test/skills"\n\n'
                 '[logging]\nlog_dir = "data/test/logs"\nverbose = false\n\n'
-                '[file_reader.libraries]\nthunk_source = "src"\n\n'
+                '[file_reader.libraries]\nthunk_source = "src"\ndiscord_images = "data/test/images"\n\n'
                 '[embeddings]\napi_url = "http://localhost:11434/api/embeddings"\napi_key = ""\nmodel_name = "nomic-embed-text"\n\n'
                 '[vectordb]\nhost = "localhost"\nport = 6333\nknowledge_collection = "test_knowledge_base"\nmemory_collection = "test_agent_memory"\n\n'
                 '[mqtt]\nhost = "localhost"\nport = 1883\ninbox_topic = "test/agent/inbox"\noutbox_topic = "test/agent/outbox"\n\n'
-                '[discord]\nbot_token = ""\n\n'
+                '[discord]\nbot_token = ""\nimages_dir = "data/test/images"\n\n'
                 '[oracle]\ngemini_api_key = ""\ngemini_model = "gemini-3.8-flash"\n\n'
                 '[debug]\nstream_output = false\n'
             )
@@ -89,6 +90,7 @@ def _verify_test_config_isolation(cfg: dict) -> None:
         cfg.get("reader", {}).get("db_path", ""),
         cfg.get("skills", {}).get("skills_dir", ""),
         cfg.get("logging", {}).get("log_dir", ""),
+        cfg.get("discord", {}).get("images_dir", "data/test/images"),
     ]
     for p in paths_to_check:
         abs_p = os.path.abspath(p)

@@ -1,7 +1,12 @@
 import asyncio
+import os
+import re
 import discord
 from src.core.agent import AgentCore
 from src.utils.config import load_config
+from src.utils.image import downsize_image_bytes, encode_jpeg_data_url, save_image_atomic
+
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
 
 class DiscordAdapter:
     """
@@ -16,6 +21,12 @@ class DiscordAdapter:
         discord_cfg = self.config.get("discord", {})
         self.token = discord_cfg.get("bot_token")
         self.allowed_channel_id = discord_cfg.get("allowed_channel_id")
+        self.images_dir = (
+            discord_cfg.get("images_dir")
+            or self.config.get("file_reader", {}).get("libraries", {}).get("discord_images")
+        )
+        if self.images_dir:
+            os.makedirs(self.images_dir, exist_ok=True)
         
         # Need message content intent to read what users say
         intents = discord.Intents.default()
@@ -84,13 +95,47 @@ class DiscordAdapter:
                 else:
                     reply_context = f" (replying to message_id={ref_id})"
 
+            # Process any image attachments on the message
+            attached_images = []
+            attachment_notes = []
+            for idx, attachment in enumerate(getattr(message, "attachments", []) or []):
+                ctype = (attachment.content_type or "").lower()
+                ext = os.path.splitext(attachment.filename.lower())[1]
+                if ctype.startswith("image/") or ext in IMAGE_EXTENSIONS:
+                    try:
+                        raw_bytes = await attachment.read()
+                        jpeg_bytes, width, height = downsize_image_bytes(raw_bytes, max_edge=1024)
+                        data_url = encode_jpeg_data_url(jpeg_bytes)
+                        attached_images.append(data_url)
+
+                        stem = os.path.splitext(os.path.basename(attachment.filename))[0]
+                        safe_stem = re.sub(r"[^A-Za-z0-9_-]+", "_", stem).strip("_") or "image"
+                        saved_name = f"{message.id}_{idx}_{safe_stem}.jpg"
+
+                        if self.images_dir:
+                            dest_path = os.path.join(self.images_dir, saved_name)
+                            save_image_atomic(jpeg_bytes, dest_path)
+                            attachment_notes.append(
+                                f"[Attached Image: '{attachment.filename}' ({width}x{height}px, saved in library 'discord_images' as '{saved_name}')]"
+                            )
+                        else:
+                            attachment_notes.append(
+                                f"[Attached Image: '{attachment.filename}' ({width}x{height}px)]"
+                            )
+                    except Exception as e:
+                        print(f"[Discord Error] Failed to process image attachment '{attachment.filename}': {e}")
+
+            if attachment_notes:
+                notes_str = "\n".join(attachment_notes)
+                content = f"{content}\n{notes_str}".strip() if content else notes_str
+
             # Format the payload so the agent knows the message_id, who is speaking, their mention tag, and their role
             role_tag = "[APP/Agent]" if message.author.bot else "[Operator]"
             payload = f"[Via Discord | message_id={message.id}] {message.author.display_name} (<@{message.author.id}>) {role_tag}{reply_context} says: {content}"
             print(f"[Discord Incoming] {payload}")
             
             # Wake the agent up!
-            await self.agent.resume(payload)
+            await self.agent.resume(payload, images=attached_images)
 
         @self.client.event
         async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
