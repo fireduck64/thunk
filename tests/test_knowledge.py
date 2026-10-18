@@ -1,24 +1,102 @@
-import asyncio
-from src.core.agent import AgentCore
+import uuid
+import pytest
+from qdrant_client import QdrantClient
+from qdrant_client.models import VectorParams, Distance, PointStruct
+from src.utils.config import load_config
+from src.components.vector_memory import VectorMemoryComponent
 from src.components.knowledge import KnowledgeBaseComponent
 
-async def main():
-    agent = AgentCore()
-    
-    # Register only the knowledge component for this test
-    kb_component = KnowledgeBaseComponent()
-    agent.register_component(kb_component)
-    
-    agent_task = asyncio.create_task(agent.start())
-    await asyncio.sleep(1)
-    
-    print("\n--- Sending User Message ---")
-    # We are asking a question that requires it to search the Pride and Prejudice DB we ingested earlier
-    await agent.resume("According to your knowledge base, who is Mr. Bingley?")
-    
-    # Wait to let the agent process, use the tool, and generate a final response
-    await asyncio.sleep(40)
-    
-    agent_task.cancel()
 
-asyncio.run(main())
+def _delete_test_collection(collection_name: str):
+    assert collection_name.startswith("test_"), f"Refusing to delete non-test collection: {collection_name}"
+    cfg = load_config()
+    client = QdrantClient(host=cfg["vectordb"]["host"], port=cfg["vectordb"]["port"])
+    try:
+        client.delete_collection(collection_name=collection_name)
+    except Exception:
+        pass
+
+
+def test_embeddings_and_vector_memory():
+    """Tests the embeddings model endpoint and VectorMemoryComponent against isolated test_agent_memory."""
+    cfg = load_config()
+    collection = cfg["vectordb"]["memory_collection"]
+    assert collection.startswith("test_")
+    _delete_test_collection(collection)
+
+    vm = VectorMemoryComponent()
+    try:
+        # 1. Directly test embedding generation
+        vec = vm._get_embedding("Semantic embedding test vector for rig migration.")
+        assert isinstance(vec, list)
+        assert len(vec) == 768
+        assert all(isinstance(x, float) for x in vec[:10])
+
+        # 2. Test saving semantic memories into Qdrant
+        res1 = vm.save_semantic_memory(
+            "The Copper Key is hidden inside the Tomb of Horrors on the world of Ludus."
+        )
+        assert "successfully" in res1.lower()
+
+        res2 = vm.save_semantic_memory(
+            "Brennen builds deterministic distributed systems with Bazel and SQLite."
+        )
+        assert "successfully" in res2.lower()
+
+        # 3. Test semantic search retrieval via embeddings
+        search_res = vm.search_semantic_memory("Where is the Copper Key located?", num_results=2)
+        assert "Tomb of Horrors" in search_res
+        assert "Ludus" in search_res
+
+        # 4. Test dumping raw records
+        dump_res = vm.dump_semantic_memory(limit=10, offset=0)
+        assert "Tomb of Horrors" in dump_res
+        assert "Bazel" in dump_res
+    finally:
+        _delete_test_collection(collection)
+
+
+def test_knowledge_base_embeddings_and_search():
+    """Tests KnowledgeBaseComponent embedding queries and Qdrant search against isolated test_knowledge_base."""
+    cfg = load_config()
+    collection = cfg["vectordb"]["knowledge_collection"]
+    assert collection.startswith("test_")
+    _delete_test_collection(collection)
+
+    kb = KnowledgeBaseComponent()
+    client = QdrantClient(host=cfg["vectordb"]["host"], port=cfg["vectordb"]["port"])
+    try:
+        client.create_collection(
+            collection_name=collection,
+            vectors_config=VectorParams(size=768, distance=Distance.COSINE),
+        )
+
+        passages = [
+            (
+                "Pride and Prejudice",
+                "Mr. Bingley is a wealthy, amiable young gentleman from the north of England who rents Netherfield Park.",
+            ),
+            (
+                "Dungeon Crawler Carl",
+                "Princess Donut the Queen Anne Chonk is a tortoiseshell Persian cat who gained sapience in the dungeon.",
+            ),
+        ]
+
+        points = []
+        for source, text in passages:
+            vector = kb._get_embedding(text)
+            points.append(
+                PointStruct(
+                    id=str(uuid.uuid4()),
+                    vector=vector,
+                    payload={"source": source, "text": text},
+                )
+            )
+        client.upsert(collection_name=collection, points=points)
+
+        result = kb.search_knowledge_base("Who is Mr. Bingley and what estate did he rent?", num_results=1)
+        assert "Pride and Prejudice" in result
+        assert "Netherfield Park" in result
+    finally:
+        _delete_test_collection(collection)
+

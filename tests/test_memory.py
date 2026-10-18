@@ -1,63 +1,83 @@
-import asyncio
-import pytest
 import os
-from src.core.agent import AgentCore
+import sqlite3
+import pytest
+from transformers import AutoTokenizer
+from src.utils.config import load_config
 from src.components.tiered import TieredMemoryComponent
 
-@pytest.mark.asyncio
-async def test_tiered_memory():
-    # Cleanup old test db if it exists
-    if os.path.exists("test_memory.db"):
-        os.remove("test_memory.db")
-        
-    agent = AgentCore()
-    
-    # We set max_messages to 4 so it compresses very quickly for the test
-    mem_component = TieredMemoryComponent(db_path="test_memory.db", max_messages=4, summarize_chunk=2)
-    agent.register_component(mem_component)
-    
-    # We need a way to know when the agent finishes processing a message
-    agent_finished_event = asyncio.Event()
-    
-    async def on_agent_suspended(*args, **kwargs):
-        agent_finished_event.set()
-        
-    agent.event_bus.subscribe("agent_suspended", on_agent_suspended)
-    
-    agent_task = asyncio.create_task(agent.start())
-    await asyncio.sleep(0.5)
-    
-    print("\n--- Message 1 ---")
-    await agent.resume("My name is John. I like apples.")
-    await agent_finished_event.wait()
-    agent_finished_event.clear()
-    
-    print("\n--- Message 2 ---")
-    await agent.resume("Can you remember my name?")
-    await agent_finished_event.wait()
-    agent_finished_event.clear()
-    
-    print("\n--- Message 3 (Should trigger compression) ---")
-    await agent.resume("My favorite color is blue.")
-    await agent_finished_event.wait()
-    agent_finished_event.clear()
-    
-    # Let the background compression task finish
-    # Since compression involves an LLM call, it might take 10-20 seconds.
-    # In a proper test suite we might mock the LLM call, but for this integration test
-    # we just wait a bit longer or monitor the summary
-    for _ in range(30):
-        if "John" in mem_component._get_core_summary():
-            break
-        await asyncio.sleep(1)
-    
-    print("\n--- Final Context Size ---")
-    print(f"Messages in working memory: {len(agent.messages)}")
-    print(f"Current Core Summary: {mem_component._get_core_summary()}")
-    
-    agent_task.cancel()
-    
-    # Basic assertions to ensure the memory component actually compressed
-    assert len(agent.messages) <= 6 # It shouldn't grow boundlessly
-    assert "John" in mem_component._get_core_summary()
+
+def _cleanup_test_memory_db(db_path: str):
+    for p in (db_path, f"{db_path}.lock"):
+        if os.path.exists(p):
+            os.remove(p)
+
+
+def test_tokenizer_loads_and_encodes():
+    """Verifies that the configured HuggingFace tokenizer loads directly without falling back to gpt2."""
+    cfg = load_config()
+    model_name = cfg["tokenizer"]["model_name"]
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, model_max_length=100000)
+    sample_text = "Thunk and Wisp are testing the tokenizer before migrating to a new rig."
+    encoded = tokenizer.encode(sample_text)
+    decoded = tokenizer.decode(encoded)
+
+    assert isinstance(encoded, list)
+    assert len(encoded) > 5
+    assert "Thunk" in decoded
+
+
+def test_tiered_memory_tokenizer_and_compaction_state():
+    """Tests TieredMemoryComponent token counting, summary truncation, history table, and file locking."""
+    cfg = load_config()
+    db_path = cfg["memory"]["db_path"]
+    _cleanup_test_memory_db(db_path)
+
+    mem = TieredMemoryComponent()
+    try:
+        # Ensure the primary configured tokenizer was loaded (not the gpt2 fallback)
+        assert cfg["tokenizer"]["model_name"] in mem.tokenizer.name_or_path
+
+        # Verify exclusive OS lockfile prevents a second instance from opening the same DB
+        with pytest.raises(RuntimeError, match="already locked"):
+            TieredMemoryComponent(db_path=db_path)
+
+        # Verify token counting
+        msgs = [
+            {"role": "system", "content": "You are TestAgent."},
+            {"role": "user", "content": "My name is John and I like apples."},
+            {"role": "assistant", "content": "Hello John! I will remember that you like apples."},
+        ]
+        token_count = mem._count_tokens(msgs)
+        assert token_count > 15
+
+        # Verify empty summary guard
+        with pytest.raises(ValueError, match="Refusing to overwrite core_summary"):
+            mem._update_core_summary("   ", max_evicted_id=5)
+
+        # Verify atomic core_summary + core_summary_history + last_compacted_id update
+        mem._update_core_summary("User's name is John and he likes apples.", max_evicted_id=12)
+        assert "John" in mem._get_core_summary()
+        assert mem._get_last_compacted_id() == 12
+
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT summary, compacted_up_to_id FROM core_summary_history ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            assert row is not None
+            assert "John" in row[0]
+            assert row[1] == 12
+        finally:
+            conn.close()
+
+        # Verify summary truncation when exceeding max_summary_tokens
+        huge_summary = "word " * (mem.max_summary_tokens + 100)
+        mem._update_core_summary(huge_summary, max_evicted_id=20)
+        truncated = mem._get_core_summary()
+        assert truncated.endswith("... [TRUNCATED]")
+    finally:
+        mem._lock_file.close()
+        _cleanup_test_memory_db(db_path)
+
 

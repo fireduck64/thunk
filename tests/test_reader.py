@@ -1,37 +1,52 @@
-import asyncio
-import pytest
-from src.core.agent import AgentCore
+import os
+from src.utils.config import load_config
 from src.components.reader import SequentialReaderComponent
 
-@pytest.mark.asyncio
-async def test_sequential_reader():
-    agent = AgentCore()
-    
-    reader_component = SequentialReaderComponent()
-    agent.register_component(reader_component)
-    
-    agent_finished_event = asyncio.Event()
-    async def on_agent_suspended(*args, **kwargs):
-        agent_finished_event.set()
-    agent.event_bus.subscribe("agent_suspended", on_agent_suspended)
-    
-    agent_task = asyncio.create_task(agent.start())
-    await asyncio.sleep(0.5)
-    
-    print("\n--- Sending User Message 1 ---")
-    await agent.resume("What books are available in your library?")
-    await agent_finished_event.wait()
-    agent_finished_event.clear()
-    
-    print("\n--- Sending User Message 2 ---")
-    await agent.resume("Please open MrDarcy.epub and read the first two chunks. Summarize the beginning for me.")
-    await agent_finished_event.wait()
-    agent_finished_event.clear()
-    
-    agent_task.cancel()
-    
-    # Verify the component state
-    assert reader_component.current_book is not None
-    assert "MrDarcy.epub" in reader_component.current_book
-    assert reader_component.current_index == 2
+
+def test_sequential_reader_metadata_and_chunks():
+    """Tests EPUB metadata extraction, caching, opening, and chunk headers in isolated data/test."""
+    cfg = load_config()
+    db_path = cfg["reader"]["db_path"]
+    if os.path.exists(db_path):
+        os.remove(db_path)
+
+    reader = SequentialReaderComponent(chunk_size=300)
+
+    # 1. Verify library catalog includes title, author, and relative path
+    catalog = reader.list_library()
+    assert len(catalog) >= 1
+    assert any("Pride and Prejudice: Test Edition by Jane Austen [path: MrDarcy.epub]" in item for item in catalog)
+
+    # 2. Verify search_library matches against title/author metadata as well as path
+    matches = reader.search_library("Jane Austen")
+    assert len(matches) == 1
+    assert matches[0] == "Pride and Prejudice: Test Edition by Jane Austen [path: MrDarcy.epub]"
+
+    # 3. Verify open_book accepts the full catalog entry and sets the book label
+    open_msg = reader.open_book(matches[0])
+    assert "Successfully opened" in open_msg
+    assert "Pride and Prejudice: Test Edition by Jane Austen" in open_msg
+    assert len(reader.current_chunks) >= 2
+
+    # 4. Verify read_next_chunk and read_previous_chunk include the book label in the header
+    chunk1 = reader.read_next_chunk()
+    assert chunk1.startswith(
+        "--- [Book: Pride and Prejudice: Test Edition by Jane Austen [path: MrDarcy.epub]] Chunk 1/"
+    )
+    assert "universally acknowledged" in chunk1
+    assert reader.current_index == 1
+
+    chunk2 = reader.read_next_chunk()
+    assert "Chunk 2/" in chunk2
+    assert reader.current_index == 2
+
+    prev_chunk = reader.read_previous_chunk()
+    assert "Chunk 1/" in prev_chunk
+    assert reader.current_index == 1
+
+    # 5. Verify bookmark persistence across component re-instantiation
+    reader_reloaded = SequentialReaderComponent(chunk_size=300)
+    assert reader_reloaded.current_index == 1
+    assert "Pride and Prejudice: Test Edition" in reader_reloaded.current_book_label
+
 
