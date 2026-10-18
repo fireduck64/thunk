@@ -19,7 +19,7 @@ class SubconsciousRecallComponent(BaseComponent):
         llm_cfg = self.config.get("llm", {})
 
         self.api_url = sub_cfg.get("api_url") or llm_cfg.get("api_url")
-        self.api_key = sub_cfg.get("api_key") or llm_cfg.get("api_key")
+        self.api_key = sub_cfg.get("api_key") or llm_cfg.get("api_key") or "ollama"
         self.model_name = sub_cfg.get("model_name", "gemma4:e2b")
         self.top_k = int(sub_cfg.get("top_k", 8))
 
@@ -33,15 +33,17 @@ class SubconsciousRecallComponent(BaseComponent):
     async def _synthesize_memories(self, incoming_message: str, raw_memories: str) -> str:
         """Uses the lightweight subconscious model to filter and synthesize top-N candidate memories."""
         prompt = (
-            "You are the associative subconscious memory filter for an AI agent.\n"
-            "Given the incoming message and a set of candidate memories retrieved from the vector database, "
-            "distill and synthesize ONLY the facts, themes, and specific details from the candidate memories "
-            "that are relevant to the incoming message.\n"
-            "If NONE of the candidate memories are genuinely relevant to the incoming message, reply with the single word: NONE\n"
-            "Otherwise, write a compact, high-density associative recall summary (3-6 bullet points or a tight paragraph) "
-            "connecting the most relevant details across the candidate memories. Do not invent facts outside the memories.\n\n"
+            "You are the high-fidelity distillation bridge for an AI agent's subconscious memory.\n"
+            "Given the incoming message and a set of candidate memories, extract the raw essence, "
+            "idiosyncrasies, and specific facts relevant to the message. Do NOT synthesize or smooth the data into a coherent narrative.\n\n"
+            "CRITICAL CONSTRAINTS:\n"
+            "1. PRESERVE THE EDGES: Keep specific, bizarre, or grotesque details exactly as they appear. Do not normalize idiosyncratic language into generalities.\n"
+            "2. EMBRACE DISSONANCE: If candidate memories contain conflicting information or contradictions, do NOT resolve them. List them as competing data points. Friction is a signal.\n"
+            "3. ANTI-SMOOTHING: Avoid narrative fillers, corporate phrasing, or 'averaging' the tone. No phrases like 'it appears that,' 'overall,' or 'the party encountered.'\n"
+            "4. ZERO INVENTION: Use only the provided memories. If no memories are genuinely relevant, reply with the single word: NONE\n\n"
             f"<incoming_message>\n{incoming_message}\n</incoming_message>\n\n"
-            f"<candidate_memories>\n{raw_memories}\n</candidate_memories>"
+            f"<candidate_memories>\n{raw_memories}\n</candidate_memories>\n\n"
+            "OUTPUT: A high-contrast list of 3-6 raw, distilled points of recall."
         )
 
         stream = await self.client.chat.completions.create(
