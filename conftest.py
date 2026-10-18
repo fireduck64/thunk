@@ -32,6 +32,7 @@ def _ensure_test_environment(config_path: str) -> None:
                 '[agent]\nname = "TestAgent"\n\n'
                 '[directives]\nfile_path = "data/test/directives.md"\n\n'
                 '[llm]\napi_url = "http://localhost:11434/v1"\napi_key = "test"\nmodel_name = "gemma4:31b"\n\n'
+                '[subconscious]\napi_url = "http://localhost:11434/v1"\napi_key = "test"\nmodel_name = "gemma4:e2b"\ntop_k = 8\n\n'
                 '[tokenizer]\nmodel_name = "unsloth/gemma-7b"\n\n'
                 '[memory]\nhigh_watermark = 300\nlow_watermark = 150\nmax_summarize_tokens = 300\nmax_summary_tokens = 200\ndb_path = "data/test/memory.db"\n\n'
                 '[notes]\ndb_path = "data/test/notes.db"\n\n'

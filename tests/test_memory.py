@@ -81,3 +81,49 @@ def test_tiered_memory_tokenizer_and_compaction_state():
         _cleanup_test_memory_db(db_path)
 
 
+@pytest.mark.asyncio
+async def test_subconscious_recall_synthesis_and_filtering():
+    """Verifies SubconsciousRecallComponent queries top_k, synthesizes relevant memories, and skips NONE / clock messages."""
+    from src.components.subconscious import SubconsciousRecallComponent
+
+    class DummyVectorMemory:
+        def __init__(self):
+            self.last_num_results = None
+
+        def search_semantic_memory(self, query: str, num_results: int = 3) -> str:
+            self.last_num_results = num_results
+            return "--- Memory 1 ---\nCarl and Donut formed the Princess Posse on Floor 9."
+
+    sub = SubconsciousRecallComponent()
+    dummy_vm = DummyVectorMemory()
+    sub.internal_memory_components = [dummy_vm]
+
+    # 1. Verify [System Clock] messages are skipped without searching
+    clock_payload = {"content": "[System Clock] The current time is 12:00."}
+    await sub.on_event("before_user_message_added", clock_payload)
+    assert dummy_vm.last_num_results is None
+    assert clock_payload["content"] == "[System Clock] The current time is 12:00."
+
+    # 2. Verify relevant synthesis is injected and top_k is passed
+    async def mock_synthesize_relevant(msg: str, raw: str) -> str:
+        return "* Carl and Donut lead the Princess Posse on Floor 9."
+
+    sub._synthesize_memories = mock_synthesize_relevant
+    msg_payload = {"content": "What faction did Carl and Donut form?"}
+    await sub.on_event("before_user_message_added", msg_payload)
+    assert dummy_vm.last_num_results == sub.top_k
+    assert msg_payload["content"].startswith("[Subconscious Recall Triggered by below message:]")
+    assert "Princess Posse" in msg_payload["content"]
+    assert msg_payload["content"].endswith("What faction did Carl and Donut form?")
+
+    # 3. Verify NONE filtering leaves the payload untouched
+    async def mock_synthesize_none(msg: str, raw: str) -> str:
+        return ""
+
+    sub._synthesize_memories = mock_synthesize_none
+    unrelated_payload = {"content": "Hello there!"}
+    await sub.on_event("before_user_message_added", unrelated_payload)
+    assert unrelated_payload["content"] == "Hello there!"
+
+
+

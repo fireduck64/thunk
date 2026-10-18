@@ -10,6 +10,13 @@ api_url = "https://ollama-api.example.com/v1"
 api_key = "YOUR_API_KEY_HERE"
 model_name = "llama3"
 
+[subconscious]
+# Lightweight model used to filter and synthesize top-N associative memories
+api_url = "https://ollama-api.example.com/v1"
+api_key = "YOUR_API_KEY_HERE"
+model_name = "gemma4:e2b"
+top_k = 8
+
 [tokenizer]
 # HuggingFace model path used strictly for token counting in tiered memory
 model_name = "unsloth/gemma-7b"
