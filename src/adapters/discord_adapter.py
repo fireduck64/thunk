@@ -7,6 +7,12 @@ from src.utils.config import load_config
 from src.utils.image import downsize_image_bytes, encode_jpeg_data_url, save_image_atomic
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
+TEXT_EXTENSIONS = (
+    ".txt", ".md", ".markdown", ".json", ".jsonl", ".py", ".sh",
+    ".toml", ".yaml", ".yml", ".csv", ".log", ".xml", ".html",
+    ".css", ".js", ".ts", ".sql", ".ini", ".cfg"
+)
+MAX_TEXT_ATTACHMENT_BYTES = 2 * 1024 * 1024
 
 class DiscordAdapter:
     """
@@ -95,12 +101,17 @@ class DiscordAdapter:
                 else:
                     reply_context = f" (replying to message_id={ref_id})"
 
-            # Process any image attachments on the message
+            # Process any attachments (images, text files, or unsupported binary files) on the message
             attached_images = []
             attachment_notes = []
             for idx, attachment in enumerate(getattr(message, "attachments", []) or []):
                 ctype = (attachment.content_type or "").lower()
+                ctype_label = attachment.content_type or "unknown"
+                size_bytes = getattr(attachment, "size", 0) or 0
                 ext = os.path.splitext(attachment.filename.lower())[1]
+                stem = os.path.splitext(os.path.basename(attachment.filename))[0]
+                safe_stem = re.sub(r"[^A-Za-z0-9_-]+", "_", stem).strip("_") or "attachment"
+
                 if ctype.startswith("image/") or ext in IMAGE_EXTENSIONS:
                     try:
                         raw_bytes = await attachment.read()
@@ -108,10 +119,7 @@ class DiscordAdapter:
                         data_url = encode_jpeg_data_url(jpeg_bytes)
                         attached_images.append(data_url)
 
-                        stem = os.path.splitext(os.path.basename(attachment.filename))[0]
-                        safe_stem = re.sub(r"[^A-Za-z0-9_-]+", "_", stem).strip("_") or "image"
                         saved_name = f"{message.id}_{idx}_{safe_stem}.jpg"
-
                         if self.images_dir:
                             dest_path = os.path.join(self.images_dir, saved_name)
                             save_image_atomic(jpeg_bytes, dest_path)
@@ -124,6 +132,32 @@ class DiscordAdapter:
                             )
                     except Exception as e:
                         print(f"[Discord Error] Failed to process image attachment '{attachment.filename}': {e}")
+                        attachment_notes.append(
+                            f"[Attached File: '{attachment.filename}' (type: {ctype_label}, size: {size_bytes} bytes — failed to load image: {e})]"
+                        )
+                elif (
+                    (ctype.startswith("text/") or "json" in ctype or "xml" in ctype or ext in TEXT_EXTENSIONS)
+                    and size_bytes <= MAX_TEXT_ATTACHMENT_BYTES
+                    and self.images_dir
+                ):
+                    try:
+                        raw_bytes = await attachment.read()
+                        safe_ext = re.sub(r"[^.A-Za-z0-9]+", "", ext) or ".txt"
+                        saved_name = f"{message.id}_{idx}_{safe_stem}{safe_ext}"
+                        dest_path = os.path.join(self.images_dir, saved_name)
+                        save_image_atomic(raw_bytes, dest_path)
+                        attachment_notes.append(
+                            f"[Attached File: '{attachment.filename}' (type: {ctype_label}, size: {size_bytes} bytes, saved in library 'discord_images' as '{saved_name}' — use read_file to inspect)]"
+                        )
+                    except Exception as e:
+                        print(f"[Discord Error] Failed to save text attachment '{attachment.filename}': {e}")
+                        attachment_notes.append(
+                            f"[Attached File: '{attachment.filename}' (type: {ctype_label}, size: {size_bytes} bytes — attachment not loaded)]"
+                        )
+                else:
+                    attachment_notes.append(
+                        f"[Attached File: '{attachment.filename}' (type: {ctype_label}, size: {size_bytes} bytes — attachment not loaded)]"
+                    )
 
             if attachment_notes:
                 notes_str = "\n".join(attachment_notes)
