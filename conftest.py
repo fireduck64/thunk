@@ -15,6 +15,7 @@ DEFAULT_TEST_CONFIG = os.path.join(TEST_DATA_DIR, "config.toml")
 def _ensure_test_environment(config_path: str) -> None:
     """Ensures data/test directories, default test config, and sample EPUB exist."""
     os.makedirs(os.path.join(TEST_DATA_DIR, "library"), exist_ok=True)
+    os.makedirs(os.path.join(TEST_DATA_DIR, "pdf_library"), exist_ok=True)
     os.makedirs(os.path.join(TEST_DATA_DIR, "skills"), exist_ok=True)
     os.makedirs(os.path.join(TEST_DATA_DIR, "logs"), exist_ok=True)
     os.makedirs(os.path.join(TEST_DATA_DIR, "images"), exist_ok=True)
@@ -39,6 +40,7 @@ def _ensure_test_environment(config_path: str) -> None:
                 '[notes]\ndb_path = "data/test/notes.db"\n\n'
                 '[tasks]\ndb_path = "data/test/tasks.db"\n\n'
                 '[reader]\nlibrary_dir = "data/test/library"\ndb_path = "data/test/reader_state.db"\n\n'
+                '[pdf_viewer]\nlibrary_dir = "data/test/pdf_library"\ndb_path = "data/test/pdf_state.db"\n\n'
                 '[skills]\nskills_dir = "data/test/skills"\n\n'
                 '[logging]\nlog_dir = "data/test/logs"\nverbose = false\n\n'
                 '[file_reader.libraries]\nthunk_source = "src"\ndiscord_images = "data/test/images"\n\n'
@@ -88,6 +90,8 @@ def _verify_test_config_isolation(cfg: dict) -> None:
         cfg.get("tasks", {}).get("db_path", ""),
         cfg.get("reader", {}).get("library_dir", ""),
         cfg.get("reader", {}).get("db_path", ""),
+        cfg.get("pdf_viewer", {}).get("library_dir", "data/test/pdf_library"),
+        cfg.get("pdf_viewer", {}).get("db_path", "data/test/pdf_state.db"),
         cfg.get("skills", {}).get("skills_dir", ""),
         cfg.get("logging", {}).get("log_dir", ""),
         cfg.get("discord", {}).get("images_dir", "data/test/images"),

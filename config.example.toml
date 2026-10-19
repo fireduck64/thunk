@@ -45,6 +45,10 @@ db_path = "data/thunk/tasks.db"       # SQLite database file for priority task q
 library_dir = "/vault/ebook"          # Path to directory containing EPUB documents (REQUIRED)
 db_path = "data/thunk/reader_state.db"# SQLite database file for reader bookmark state (REQUIRED)
 
+[pdf_viewer]
+library_dir = "/vault/pdf"            # Path to directory containing PDF documents (REQUIRED)
+db_path = "data/thunk/pdf_state.db"   # SQLite database file for PDF viewer state and metadata cache (REQUIRED)
+
 [skills]
 skills_dir = "data/thunk/skills"      # Directory storing agent procedural markdown skills (REQUIRED)
 

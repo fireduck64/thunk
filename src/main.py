@@ -15,6 +15,7 @@ from src.components.logger import AuditLogComponent
 from src.components.tiered import TieredMemoryComponent
 from src.components.critic import CriticComponent
 from src.components.reader import SequentialReaderComponent
+from src.components.pdf_viewer import PdfViewerComponent
 from src.components.system import SystemComponent
 from src.components.tasks import TaskQueueComponent
 from src.components.clock import ClockComponent
@@ -45,6 +46,7 @@ async def main():
     agent.register_component(KnowledgeBaseComponent())
     agent.register_component(VectorMemoryComponent())
     agent.register_component(SequentialReaderComponent())
+    agent.register_component(PdfViewerComponent())
     agent.register_component(GlobalSearchComponent())
     agent.register_component(FileReaderComponent())
     agent.register_component(OracleComponent())

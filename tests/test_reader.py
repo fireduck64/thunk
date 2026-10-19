@@ -106,4 +106,78 @@ async def test_image_downsize_save_and_ephemeral_vision():
             os.remove(saved_file)
 
 
+def test_pdf_viewer_read_and_view_pages():
+    """Tests PdfViewerComponent catalog, JSON page extraction, visual detection, and page rendering."""
+    import io
+    import json
+    import fitz
+    from PIL import Image
+    from src.core.agent import AgentCore
+    from src.components.pdf_viewer import PdfViewerComponent
+
+    cfg = load_config()
+    pdf_lib = cfg["pdf_viewer"]["library_dir"]
+    pdf_db = cfg["pdf_viewer"]["db_path"]
+    os.makedirs(pdf_lib, exist_ok=True)
+    if os.path.exists(pdf_db):
+        os.remove(pdf_db)
+
+    pdf_path = os.path.join(pdf_lib, "DungeonMap.pdf")
+    try:
+        # Build a 2-page test PDF: Page 1 text-only, Page 2 with text + embedded image
+        doc = fitz.open()
+        doc.set_metadata({"title": "Larracos Tactical Atlas", "author": "Mordecai"})
+
+        p1 = doc.new_page(width=612, height=792)
+        p1.insert_text((72, 72), "Page 1: Overview of the Larracos Saferoom Network.")
+
+        p2 = doc.new_page(width=612, height=792)
+        p2.insert_text((72, 72), "Page 2: Floor 9 Diagram and Bait Shop Entrance.")
+        img_buf = io.BytesIO()
+        Image.new("RGB", (200, 150), (180, 40, 40)).save(img_buf, format="PNG")
+        p2.insert_image(fitz.Rect(72, 120, 272, 270), stream=img_buf.getvalue())
+
+        tmp_pdf = f"{pdf_path}.tmp"
+        doc.save(tmp_pdf)
+        doc.close()
+        os.replace(tmp_pdf, pdf_path)
+
+        agent = AgentCore()
+        viewer = PdfViewerComponent()
+        agent.register_component(viewer)
+
+        # 1. Verify list_pdfs and search_pdfs
+        catalog = viewer.list_pdfs()
+        assert any("Larracos Tactical Atlas by Mordecai (2 pages) [path: DungeonMap.pdf]" in c for c in catalog)
+        matches = viewer.search_pdfs("Mordecai")
+        assert len(matches) == 1
+
+        # 2. Read Page 1 (pure text, no unrenderable visuals)
+        p1_json = json.loads(viewer.read_pdf_page(page_number=1, filename=matches[0]))
+        assert p1_json["page_number"] == 1
+        assert p1_json["total_pages"] == 2
+        assert "Larracos Saferoom Network" in p1_json["text"]
+        assert p1_json["has_unrenderable_visuals"] is False
+        assert p1_json["image_count"] == 0
+
+        # 3. Read Page 2 with filename omitted (uses active PDF) and verify image detection
+        p2_json = json.loads(viewer.read_pdf_page(page_number=2))
+        assert p2_json["page_number"] == 2
+        assert "Bait Shop Entrance" in p2_json["text"]
+        assert p2_json["has_unrenderable_visuals"] is True
+        assert p2_json["image_count"] == 1
+        assert p2_json["images"] == [{"width": 200, "height": 150}]
+        assert "view_pdf_page" in p2_json["notice"]
+
+        # 4. View Page 2 (renders page to <=1024px JPEG and attaches to agent.pending_tool_images)
+        view_res = viewer.view_pdf_page(page_number=2)
+        assert "Rendered page 2/2" in view_res
+        assert len(agent.pending_tool_images) == 1
+        assert agent.pending_tool_images[0].startswith("data:image/jpeg;base64,")
+    finally:
+        if os.path.exists(pdf_path):
+            os.remove(pdf_path)
+
+
+
 
