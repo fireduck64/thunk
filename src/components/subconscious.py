@@ -22,6 +22,7 @@ class SubconsciousRecallComponent(BaseComponent):
         self.api_key = sub_cfg.get("api_key") or llm_cfg.get("api_key") or "ollama"
         self.model_name = sub_cfg.get("model_name", "gemma4:e2b")
         self.top_k = int(sub_cfg.get("top_k", 8))
+        self.max_output_tokens = int(sub_cfg.get("max_output_tokens", 2048))
 
         self.client = AsyncOpenAI(
             base_url=self.api_url,
@@ -50,6 +51,7 @@ class SubconsciousRecallComponent(BaseComponent):
             model=self.model_name,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
+            max_tokens=self.max_output_tokens,
             stream=True
         )
 

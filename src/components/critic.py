@@ -1,5 +1,6 @@
 from typing import Dict, Any
 from src.components.base import BaseComponent
+from src.utils.config import load_config
 
 class CriticComponent(BaseComponent):
     """
@@ -7,9 +8,15 @@ class CriticComponent(BaseComponent):
     Periodically reviews recent actions to determine if the agent is stuck in a loop.
     Injects feelings/intuitions directly into working memory to course-correct.
     """
-    def __init__(self, frequency: int = 8):
+    def __init__(self, frequency: int = None):
         # How many tools must be executed before the critic wakes up
-        self.frequency = frequency
+        self.config = load_config()
+        critic_cfg = self.config.get("critic", {})
+        if frequency is not None:
+            self.frequency = int(frequency)
+        else:
+            self.frequency = int(critic_cfg.get("frequency", 8))
+        self.max_output_tokens = int(critic_cfg.get("max_output_tokens", 1024))
         self.action_count = 0
         self.needs_evaluation = False
 
@@ -77,6 +84,7 @@ class CriticComponent(BaseComponent):
                 model=self.agent.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7, # Add a bit of creativity so feelings aren't always identical
+                max_tokens=self.max_output_tokens,
                 stream=True
             )
             message = await self.agent._accumulate_stream(response_stream)

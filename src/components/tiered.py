@@ -30,7 +30,7 @@ class TieredMemoryComponent(BaseComponent):
         self.high_watermark = self.config.get("memory", {}).get("high_watermark", 16000)
         self.low_watermark = self.config.get("memory", {}).get("low_watermark", 8000)
         self.max_summarize_tokens = self.config.get("memory", {}).get("max_summarize_tokens", 6000)
-        self.max_summary_tokens = self.config.get("memory", {}).get("max_summary_tokens", 4000)
+        self.max_summary_tokens = self.config.get("memory", {}).get("max_summary_tokens", 8192)
         
         try:
             # We set a large model_max_length to prevent warnings when counting tokens 
@@ -372,6 +372,7 @@ class TieredMemoryComponent(BaseComponent):
                 response_stream = await agent.client.chat.completions.create(
                     model=agent.model,
                     messages=[{"role": "user", "content": prompt}],
+                    max_tokens=self.max_summary_tokens,
                     stream=True
                 )
                 message = await agent._accumulate_stream(response_stream)

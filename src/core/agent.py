@@ -31,7 +31,9 @@ class AgentCore:
             timeout=httpx.Timeout(None)
         )
         self.model = self.config["llm"]["model_name"]
+        self.max_output_tokens = int(self.config.get("llm", {}).get("max_output_tokens", 16384))
         self.debug_stream = self.config.get("debug", {}).get("stream_output", False)
+        self.last_finish_reason = None
         
         # State
         self.messages = []
@@ -145,11 +147,15 @@ class AgentCore:
         """
         content = ""
         tool_calls_dict = {}
+        finish_reason = None
         
         async for chunk in stream:
             if not chunk.choices:
                 continue
                 
+            if chunk.choices[0].finish_reason:
+                finish_reason = chunk.choices[0].finish_reason
+
             delta = chunk.choices[0].delta
             
             if delta.content:
@@ -169,11 +175,22 @@ class AgentCore:
                     if tc.function.arguments:
                         tool_calls_dict[idx]["function"]["arguments"] += tc.function.arguments
 
+        self.last_finish_reason = finish_reason
+
         tool_calls = []
         if tool_calls_dict:
             # Sort by index to ensure order is preserved
             for idx in sorted(tool_calls_dict.keys()):
                 tc_data = tool_calls_dict[idx]
+                if finish_reason == "length":
+                    # Discard truncated tool calls with incomplete JSON arguments
+                    try:
+                        if not tc_data["function"]["name"]:
+                            continue
+                        json.loads(tc_data["function"]["arguments"] or "{}")
+                    except Exception:
+                        print(f"\n[Core Warning] Dropping truncated tool call '{tc_data['function']['name']}' due to max_output_tokens limit.")
+                        continue
                 tool_calls.append(
                     ChatCompletionMessageToolCall(
                         id=tc_data["id"],
@@ -239,6 +256,7 @@ class AgentCore:
                     tools=self.tools if self.tools else None,
                     # Tool choice auto ensures it can choose to use tools or output text
                     tool_choice="auto" if self.tools else "none",
+                    max_tokens=self.max_output_tokens,
                     stream=True
                 )
                 
@@ -299,6 +317,15 @@ class AgentCore:
                 # 3. Check for standard text output
                 if message.content:
                     print(f"[Agent Monologue]: {message.content}")
+
+                if self.last_finish_reason == "length":
+                    print(f"[Core Warning] Generation hit max_output_tokens ({self.max_output_tokens}) and was truncated.")
+                    await self.add_message(
+                        "system",
+                        f"[System Notice: Your previous generation hit the {self.max_output_tokens}-token output limit and was cut off. "
+                        "Keep your internal reasoning concise and execute one small step at a time.]"
+                    )
+                    self.suspended.set()
 
                 # Note: We removed the auto-suspension logic here. 
                 # The agent is now expected to explicitly use the `suspend_until_next_event` tool

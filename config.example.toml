@@ -9,6 +9,7 @@ file_path = "data/thunk/directives.md"# Path to markdown/text file containing co
 api_url = "https://ollama-api.example.com/v1"
 api_key = "YOUR_API_KEY_HERE"
 model_name = "llama3"
+max_output_tokens = 16384             # Hard token ceiling per LLM completion to prevent runaway loops
 
 [subconscious]
 # Lightweight model used to filter and synthesize top-N associative memories
@@ -16,6 +17,11 @@ api_url = "https://ollama-api.example.com/v1"
 api_key = "YOUR_API_KEY_HERE"
 model_name = "gemma4:e2b"
 top_k = 8
+max_output_tokens = 2048
+
+[critic]
+frequency = 8
+max_output_tokens = 1024
 
 [tokenizer]
 # HuggingFace model path used strictly for token counting in tiered memory
@@ -26,7 +32,7 @@ model_name = "unsloth/gemma-7b"
 high_watermark = 16000                # Trigger memory compression when working memory exceeds this token count
 low_watermark = 8000                  # Evict messages until working memory drops below this target
 max_summarize_tokens = 6000           # Maximum token chunk size sent to the summarizer in a single step
-max_summary_tokens = 4000             # Maximum token length permitted for the persistent core summary
+max_summary_tokens = 8192             # Maximum token length permitted for the persistent core summary
 db_path = "data/thunk/memory.db"      # SQLite database file for archival log, core summary, and compaction state (REQUIRED)
 
 [notes]
