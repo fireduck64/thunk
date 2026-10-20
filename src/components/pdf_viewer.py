@@ -1,6 +1,7 @@
 import glob
 import json
 import os
+import re
 import sqlite3
 from typing import Any, Callable, Dict, List, Tuple
 import fitz
@@ -218,12 +219,14 @@ class PdfViewerComponent(BaseComponent):
 
     def search_pdfs(self, query: str) -> List[str]:
         """
-        Searches for PDF documents whose title, author, or filename match the query.
+        Searches for PDF documents whose title, author, or filename match all words in the query.
         Returns matching entries showing 'Title by Author (N pages) [path: relative/path.pdf]'.
         """
         catalog = self._get_pdf_catalog()
-        query_lower = query.lower()
-        matches = [entry for entry in catalog if query_lower in entry.lower()]
+        terms = [t for t in re.split(r"[\s,]+", query.lower()) if t]
+        if not terms:
+            return []
+        matches = [entry for entry in catalog if all(term in entry.lower() for term in terms)]
         if len(matches) > 50:
             return matches[:50] + [f"... and {len(matches) - 50} more. Please refine your search."]
         return matches

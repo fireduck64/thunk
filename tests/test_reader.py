@@ -18,8 +18,8 @@ def test_sequential_reader_metadata_and_chunks():
     assert len(catalog) >= 1
     assert any("Pride and Prejudice: Test Edition by Jane Austen [path: MrDarcy.epub]" in item for item in catalog)
 
-    # 2. Verify search_library matches against title/author metadata as well as path
-    matches = reader.search_library("Jane Austen")
+    # 2. Verify search_library matches against title/author metadata as well as path (regardless of word order)
+    matches = reader.search_library("Austen, Jane")
     assert len(matches) == 1
     assert matches[0] == "Pride and Prejudice: Test Edition by Jane Austen [path: MrDarcy.epub]"
 

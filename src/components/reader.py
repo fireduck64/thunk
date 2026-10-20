@@ -1,4 +1,5 @@
 import os
+import re
 import glob
 import json
 import sqlite3
@@ -228,16 +229,19 @@ class SequentialReaderComponent(BaseComponent):
 
     def search_library(self, query: str) -> List[str]:
         """
-        Searches for books in the library whose title, author, or filename match the query.
+        Searches for books in the library whose title, author, or filename match all words in the query.
         Returns a list of matching entries showing 'Title by Author [path: relative/path.epub]'.
         Pass the relative path inside [path: ...] to open_book.
         """
         catalog = self._get_library_catalog()
-        
+        terms = [t for t in re.split(r"[\s,]+", query.lower()) if t]
+        if not terms:
+            return []
+
         matches = []
-        query_lower = query.lower()
         for entry in catalog:
-            if query_lower in entry.lower():
+            entry_lower = entry.lower()
+            if all(term in entry_lower for term in terms):
                 matches.append(entry)
                 
         if len(matches) > 50:
