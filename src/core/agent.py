@@ -47,6 +47,16 @@ class AgentCore:
 
     def register_component(self, component: BaseComponent):
         """Attaches a component to the agent."""
+        subconscious_types = {"SubconsciousRecallComponent", "SpreadingActivationComponent"}
+        comp_name = component.__class__.__name__
+        if comp_name in subconscious_types:
+            for existing in self.components:
+                if existing.__class__.__name__ in subconscious_types:
+                    raise ValueError(
+                        f"Cannot register {comp_name}: {existing.__class__.__name__} is already registered. "
+                        "SubconsciousRecallComponent and SpreadingActivationComponent are mutually exclusive."
+                    )
+
         component.agent = self
         self.components.append(component)
         # Bind the component to the event bus

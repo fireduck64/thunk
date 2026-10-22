@@ -110,6 +110,36 @@ class VectorMemoryComponent(BaseComponent):
         except Exception as e:
             return f"Error saving memory: {str(e)}"
 
+    def search_semantic_memory_raw(self, query: str, num_results: int = 8) -> List[Dict[str, Any]]:
+        """
+        Searches personal semantic memory and returns raw structured hits:
+        [{"id": str, "content": str, "metadata": dict, "score": float}, ...]
+        """
+        print(f"[VectorMemory] Searching raw hits (limit={num_results}) for: '{query[:80]}'")
+        if not self._client:
+            self._client = QdrantClient(host=self.host, port=self.port)
+
+        query_vector = self._get_embedding(query)
+
+        search_result = self._client.search(
+            collection_name=self.collection,
+            query_vector=query_vector,
+            limit=num_results,
+        )
+
+        hits = []
+        for hit in search_result:
+            payload = dict(hit.payload or {})
+            hits.append(
+                {
+                    "id": str(hit.id),
+                    "content": payload.get("text", ""),
+                    "metadata": payload,
+                    "score": float(hit.score),
+                }
+            )
+        return hits
+
     def search_semantic_memory(self, query: str, num_results: int = 3) -> str:
         """
         Searches your personal semantic memory for saved facts related to the query.

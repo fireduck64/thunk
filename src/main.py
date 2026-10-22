@@ -7,7 +7,7 @@ import sys
 # Ensure the project root is on sys.path when invoked directly as ./src/main.py
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.utils.config import set_config_path
+from src.utils.config import set_config_path, load_config
 from src.core.agent import AgentCore
 from src.components.notes import StructuredNotesComponent
 from src.components.knowledge import KnowledgeBaseComponent
@@ -23,6 +23,7 @@ from src.components.directives import DirectivesComponent
 from src.components.vector_memory import VectorMemoryComponent
 from src.components.global_search import GlobalSearchComponent
 from src.components.subconscious import SubconsciousRecallComponent
+from src.components.spreading_activation import SpreadingActivationComponent
 from src.components.file_reader import FileReaderComponent
 from src.components.oracle import OracleComponent
 from src.components.skills import SkillComponent
@@ -31,10 +32,18 @@ from src.adapters.discord_adapter import DiscordAdapter
 
 async def main():
     print("Initializing Thunk Agent...")
+    config = load_config()
     agent = AgentCore()
-    
-    # Register all components to create a fully capable agent
-    agent.register_component(SubconsciousRecallComponent())
+
+    # Select mutually exclusive subconscious recall strategy
+    sub_mode = config.get("subconscious", {}).get("mode", "standard")
+    sa_enabled = config.get("spreading_activation", {}).get("enabled", False)
+    if sub_mode == "spreading_activation" or sa_enabled:
+        agent.register_component(SpreadingActivationComponent())
+    else:
+        agent.register_component(SubconsciousRecallComponent())
+
+    # Register remaining components to create a fully capable agent
     agent.register_component(ClockComponent())
     agent.register_component(DirectivesComponent())
     agent.register_component(SystemComponent())

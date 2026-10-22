@@ -12,12 +12,16 @@ model_name = "llama3"
 max_output_tokens = 16384             # Hard token ceiling per LLM completion to prevent runaway loops
 
 [subconscious]
-# Lightweight model used to filter and synthesize top-N associative memories
+# Mode: "standard" (stateless top-k SubconsciousRecallComponent) or "spreading_activation" (stateful Layer-1 Mind Gardener)
+mode = "spreading_activation"
+# Lightweight model used to filter and synthesize associative memories
 api_url = "https://ollama-api.example.com/v1"
 api_key = "YOUR_API_KEY_HERE"
 model_name = "gemma4:e2b"
 top_k = 8
 max_output_tokens = 2048
+layer_1_pool_size = 32                # Maximum number of memories held in the stateful Layer-1 working pool
+layer_0_promotion_count = 8           # Number of candidates promoted from Layer-1 to synthesis on each turn
 
 [critic]
 frequency = 8
