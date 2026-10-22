@@ -1,7 +1,30 @@
+import os
+import sqlite3
 import pytest
+from src.utils.config import load_config
 from src.core.agent import AgentCore
 from src.components.subconscious import SubconsciousRecallComponent
 from src.components.spreading_activation import SpreadingActivationComponent, Layer1Item
+
+
+@pytest.fixture(autouse=True)
+def cleanup_layer_1_pool_table():
+    db_path = load_config()["memory"]["db_path"]
+    if os.path.exists(db_path):
+        conn = sqlite3.connect(db_path)
+        try:
+            with conn:
+                conn.execute("DROP TABLE IF EXISTS layer_1_pool")
+        finally:
+            conn.close()
+    yield
+    if os.path.exists(db_path):
+        conn = sqlite3.connect(db_path)
+        try:
+            with conn:
+                conn.execute("DROP TABLE IF EXISTS layer_1_pool")
+        finally:
+            conn.close()
 
 
 class DummyVectorMemory:
@@ -187,3 +210,39 @@ def test_mutual_exclusion_between_subconscious_and_spreading_activation():
     agent.register_component(SpreadingActivationComponent())
     with pytest.raises(ValueError, match="mutually exclusive"):
         agent.register_component(SubconsciousRecallComponent())
+
+
+@pytest.mark.asyncio
+async def test_layer_1_pool_sqlite_persistence_and_reload():
+    """Verifies layer_1_pool is saved to SQLite after turns and restored on component initialization."""
+    sa1 = SpreadingActivationComponent(layer_1_pool_size=8, layer_0_promotion_count=2)
+    batch = [
+        {"id": "sql-1", "content": "Persisted memory alpha", "metadata": {"timestamp": "2026-10-20T00:00:00Z"}, "score": 0.91},
+        {"id": "sql-2", "content": "Persisted memory beta", "metadata": {"timestamp": "2026-10-20T00:00:00Z"}, "score": 0.82},
+        {"id": "sql-3", "content": "Persisted memory gamma", "metadata": {"timestamp": "2026-10-20T00:00:00Z"}, "score": 0.73},
+    ]
+    sa1.internal_memory_components = [DummyVectorMemory(batches=[batch])]
+
+    async def mock_synthesize(msg: str, raw: str) -> str:
+        return "* Alpha and Beta recalled."
+
+    sa1._synthesize_memories = mock_synthesize
+    await sa1.on_event("before_user_message_added", {"content": "Check SQLite persistence"})
+
+    # Query SQLite directly
+    conn = sqlite3.connect(sa1.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT id, hits, age, round(last_similarity, 2), content FROM layer_1_pool ORDER BY last_similarity DESC"
+        ).fetchall()
+        assert len(rows) == 3
+        assert rows[0][0] == "sql-1"
+        assert rows[0][4] == "Persisted memory alpha"
+    finally:
+        conn.close()
+
+    # Re-instantiate component and verify it restores all 3 items from SQLite
+    sa2 = SpreadingActivationComponent(layer_1_pool_size=8, layer_0_promotion_count=2)
+    assert set(sa2.layer_1_pool.keys()) == {"sql-1", "sql-2", "sql-3"}
+    assert sa2.layer_1_pool["sql-1"].content == "Persisted memory alpha"
+

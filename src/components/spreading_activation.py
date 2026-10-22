@@ -1,6 +1,9 @@
 import asyncio
 import hashlib
 import inspect
+import json
+import os
+import sqlite3
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Tuple, Set
 import httpx
@@ -30,7 +33,13 @@ class SpreadingActivationComponent(BaseComponent):
     Maintains an in-memory Layer-1 Working Pool of candidate memories that warm up when
     repeatedly hit across turns and naturally drift out via competitive eviction when cold.
     """
-    def __init__(self, layer_1_pool_size: int = None, layer_0_promotion_count: int = None):
+    def __init__(
+        self,
+        layer_1_pool_size: int = None,
+        layer_0_promotion_count: int = None,
+        db_path: str = None,
+        persist: bool = True,
+    ):
         self.config = load_config()
         sub_cfg = self.config.get("subconscious", {})
         sa_cfg = self.config.get("spreading_activation", {})
@@ -57,6 +66,15 @@ class SpreadingActivationComponent(BaseComponent):
                 sa_cfg.get("layer_0_promotion_count", sub_cfg.get("layer_0_promotion_count", 8))
             )
 
+        self.db_path = (
+            db_path
+            if db_path is not None
+            else sa_cfg.get("db_path")
+            or sub_cfg.get("db_path")
+            or self.config.get("memory", {}).get("db_path")
+        )
+        self.persist = bool(persist and self.db_path)
+
         self.client = AsyncOpenAI(
             base_url=self.api_url,
             api_key=self.api_key,
@@ -64,6 +82,85 @@ class SpreadingActivationComponent(BaseComponent):
         )
         self.internal_memory_components: List[Any] = []
         self.layer_1_pool: Dict[str, Layer1Item] = {}
+
+        if self.persist:
+            os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
+            self._init_db()
+            self._load_pool_from_db()
+
+    def _init_db(self) -> None:
+        if not self.persist:
+            return
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS layer_1_pool (
+                        id TEXT PRIMARY KEY,
+                        content TEXT,
+                        metadata TEXT,
+                        hits INTEGER,
+                        age INTEGER,
+                        last_similarity REAL,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+        finally:
+            conn.close()
+
+    def _load_pool_from_db(self) -> None:
+        if not self.persist:
+            return
+        conn = sqlite3.connect(self.db_path)
+        try:
+            rows = conn.execute(
+                "SELECT id, content, metadata, hits, age, last_similarity FROM layer_1_pool"
+            ).fetchall()
+            for row_id, content, meta_json, hits, age, last_sim in rows:
+                try:
+                    metadata = json.loads(meta_json) if meta_json else {}
+                except Exception:
+                    metadata = {}
+                self.layer_1_pool[str(row_id)] = Layer1Item(
+                    id=str(row_id),
+                    content=str(content or ""),
+                    metadata=metadata,
+                    hits=int(hits or 1),
+                    age=int(age or 0),
+                    last_similarity=float(last_sim or 0.0),
+                )
+            self._evict_pool()
+        finally:
+            conn.close()
+
+    def _save_pool_to_db(self) -> None:
+        if not self.persist:
+            return
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                conn.execute("DELETE FROM layer_1_pool")
+                conn.executemany(
+                    """
+                    INSERT INTO layer_1_pool (id, content, metadata, hits, age, last_similarity)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            item.id,
+                            item.content,
+                            json.dumps(item.metadata),
+                            item.hits,
+                            item.age,
+                            item.last_similarity,
+                        )
+                        for item in self.layer_1_pool.values()
+                    ],
+                )
+        finally:
+            conn.close()
 
     def compute_fetch_count(self) -> int:
         """
@@ -338,12 +435,14 @@ class SpreadingActivationComponent(BaseComponent):
             # 5. Split-Slate Selection for Layer-0 Promotion
             promoted_items, recurring_ids = self._select_promotion_slate()
             if not promoted_items:
+                self._save_pool_to_db()
                 return
 
             formatted_candidates = self._format_promoted_candidates(promoted_items, recurring_ids)
 
             # 6. Refractory Cooldown (Prevent Echo Loops)
             self._apply_refractory_cooldown(promoted_items)
+            self._save_pool_to_db()
 
             try:
                 print(
