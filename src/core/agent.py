@@ -348,27 +348,52 @@ class AgentCore:
                 await asyncio.sleep(5) # Prevent tight error loops
 
     async def _drain_inbox(self):
-        """Drains all queued external messages at a safe boundary between turns."""
+        """Drains all queued external messages at a safe boundary between turns, batching subconscious recall."""
+        if self.inbox.empty():
+            return
+
+        batch = []
         while not self.inbox.empty():
             item = await self.inbox.get()
             if isinstance(item, dict):
-                user_message = item.get("content", "")
-                images = item.get("images") or []
+                batch.append((item.get("content", ""), list(item.get("images") or [])))
             else:
-                user_message = str(item)
-                images = []
+                batch.append((str(item), []))
 
-            # Fire an event that components can hook into to modify the message BEFORE it gets saved
-            # or to append context. We use a dict so it's mutable by reference.
-            msg_context = {"content": user_message}
+        non_clock_messages = [
+            msg for msg, _ in batch if msg and not msg.startswith("[System Clock]")
+        ]
+
+        recall_prefix = ""
+        if non_clock_messages:
+            combined_text = "\n".join(non_clock_messages)
+            msg_context = {"content": combined_text}
             await self.event_bus.publish("before_user_message_added", msg_context)
-            
+
+            modified = msg_context["content"]
+            if modified != combined_text:
+                if "--- End Recall ---\n\n" in modified:
+                    recall_prefix = modified.split("--- End Recall ---\n\n", 1)[0] + "--- End Recall ---\n\n"
+                elif modified.endswith(combined_text):
+                    recall_prefix = modified[: -len(combined_text)]
+
+        # Drain any straggler messages that arrived while subconscious recall was running
+        # without triggering a second synthesis cycle.
+        while not self.inbox.empty():
+            item = await self.inbox.get()
+            if isinstance(item, dict):
+                batch.append((item.get("content", ""), list(item.get("images") or [])))
+            else:
+                batch.append((str(item), []))
+
+        for user_message, images in batch:
             # Save the clean message to the archival log
             await self.add_message("user", user_message, publish_event=True)
-            
-            # If a component added subconscious context, we replace the working memory content
-            if msg_context["content"] != user_message:
-                self.messages[-1]["content"] = msg_context["content"]
+
+            # Attach the batched subconscious recall prefix once to the first non-clock message in working memory
+            if recall_prefix and user_message and not user_message.startswith("[System Clock]"):
+                self.messages[-1]["content"] = f"{recall_prefix}{user_message}"
+                recall_prefix = ""
 
             if images:
                 self.messages[-1]["_images"] = list(images)

@@ -293,5 +293,60 @@ async def test_tiered_memory_transactional_compaction_and_fatal_exit():
         _cleanup_test_memory_db(db_path)
 
 
+@pytest.mark.asyncio
+async def test_drain_inbox_batches_subconscious_recall():
+    """Verifies AgentCore._drain_inbox fires before_user_message_added once per batch and catches stragglers without re-synthesizing."""
+    from src.core.agent import AgentCore
+
+    agent = AgentCore()
+    before_calls = []
+    added_archival_messages = []
+
+    async def on_before_user_message(event_name, payload):
+        before_calls.append(payload["content"])
+        # Simulate a straggler message arriving in inbox while synthesis is running
+        await agent.inbox.put("Msg 3 (arrived during synthesis)")
+        payload["content"] = (
+            "[Subconscious Recall Triggered by below message:]\n"
+            "* Batched memory point\n"
+            "--- End Recall ---\n\n"
+            + payload["content"]
+        )
+
+    async def on_message_added(event_name, payload):
+        added_archival_messages.append(dict(payload["message"]))
+
+    agent.event_bus.subscribe("before_user_message_added", on_before_user_message)
+    agent.event_bus.subscribe("message_added", on_message_added)
+
+    await agent.resume("[System Clock] Tick")
+    await agent.resume("Msg 1 from Sombus")
+    await agent.resume("Msg 2 from Stuffleupagus", images=["data:image/jpeg;base64,abc"])
+
+    await agent._drain_inbox()
+
+    # before_user_message_added should have been called exactly once with the 2 non-clock messages
+    assert len(before_calls) == 1
+    assert before_calls[0] == "Msg 1 from Sombus\nMsg 2 from Stuffleupagus"
+
+    # All 4 messages (clock, Msg 1, Msg 2, straggler Msg 3) should be logged cleanly to message_added
+    assert [m["content"] for m in added_archival_messages] == [
+        "[System Clock] Tick",
+        "Msg 1 from Sombus",
+        "Msg 2 from Stuffleupagus",
+        "Msg 3 (arrived during synthesis)",
+    ]
+
+    # Working memory should have the recall prefix attached once on Msg 1, and clean content on the rest
+    assert len(agent.messages) == 4
+    assert agent.messages[0]["content"] == "[System Clock] Tick"
+    assert agent.messages[1]["content"].startswith("[Subconscious Recall Triggered by below message:]")
+    assert agent.messages[1]["content"].endswith("Msg 1 from Sombus")
+    assert agent.messages[2]["content"] == "Msg 2 from Stuffleupagus"
+    assert agent.messages[2]["_images"] == ["data:image/jpeg;base64,abc"]
+    assert agent.messages[3]["content"] == "Msg 3 (arrived during synthesis)"
+
+
+
 
 

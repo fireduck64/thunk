@@ -31,6 +31,11 @@ This document tracks upcoming concepts, architectural plans, and completed miles
 ### 3. Proactive Skill Execution
 * **Concept:** Expand `SkillComponent` so the agent can autonomously trigger specialized skills based on pattern matches in its task queue or incoming user intents, rather than requiring explicit manual tool lookups.
 
+### 4. Background Subconscious Memory Thread / Process
+* **Concept:** Offload subconscious associative recall, Layer-1 spreading activation pool maintenance, and memory synthesis (`gemma4:e2b`) to a dedicated background thread or worker process that runs out-of-band from the main agent turn loop.
+* **Notes to Ponder:**
+  * Rather than blocking `_drain_inbox()` on vector searches and lightweight LLM distillation before the main model can respond, a background memory gardener could continuously watch incoming events and conversation state, asynchronously warming/updating the Layer-0/Layer-1 associative buffer so the main agent always reads the latest pre-computed subconscious state with zero turn latency.
+
 ---
 
 ## Completed Architecture Milestones
