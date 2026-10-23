@@ -225,3 +225,53 @@ async def test_workspace_command_execution_timeout_and_truncation(tmp_path, monk
     assert timeout_data["exit_code"] == 124
     assert "timed out" in timeout_data["stderr"]
     assert hanging_proc.killed is True
+
+
+@pytest.mark.asyncio
+async def test_workspace_filepath_alias_and_error_reporting(tmp_path):
+    """Verifies AgentCore.execute_tool aliases filepath <-> path <-> subdir and reports received vs expected params on TypeError."""
+    from src.core.agent import AgentCore
+
+    ws_dir = tmp_path / "workspace"
+    mind_dir = tmp_path / "mind_ro"
+    live_db = tmp_path / "memory.db"
+
+    comp = WorkspaceComponent(
+        workspace_dir=str(ws_dir),
+        mind_ro_dir=str(mind_dir),
+        live_db_path=str(live_db),
+    )
+
+    agent = AgentCore()
+    agent.register_component(comp)
+    agent._build_tools()
+
+    # 1. write_workspace_file called with 'filepath' instead of 'path'
+    write_res = await agent.execute_tool(
+        "write_workspace_file",
+        json.dumps({"filepath": "museum/crab_union_manifesto.md", "content": "Crab Union Rules"}),
+    )
+    assert "Success" in write_res
+
+    # 2. read_workspace_file called with 'filepath' and extra 'library' arg (exact Wisp tool call)
+    read_res = await agent.execute_tool(
+        "read_workspace_file",
+        json.dumps({"filepath": "museum/crab_union_manifesto.md", "library": "workspace"}),
+    )
+    assert read_res == "Crab Union Rules"
+
+    # 3. list_workspace_files called with 'path' instead of 'subdir'
+    list_res = await agent.execute_tool(
+        "list_workspace_files",
+        json.dumps({"path": "museum"}),
+    )
+    assert "crab_union_manifesto.md" in list_res
+
+    # 4. Missing required argument reports received args and expected params
+    err_res = await agent.execute_tool(
+        "read_workspace_file",
+        json.dumps({"wrong_arg": "museum/crab_union_manifesto.md"}),
+    )
+    assert "received args: ['wrong_arg']" in err_res
+    assert "expected params: ['path']" in err_res
+

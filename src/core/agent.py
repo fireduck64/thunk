@@ -130,13 +130,32 @@ class AgentCore:
         if name not in self.tool_map:
             return f"Error: Tool '{name}' not found."
             
+        args = {}
+        valid_params = []
         try:
-            args = json.loads(args_str)
+            args = json.loads(args_str) if args_str else {}
+            if not isinstance(args, dict):
+                args = {}
             func = self.tool_map[name]
             
+            valid_params = [p for p in inspect.signature(func).parameters.keys() if p != "self"]
+            normalized_args = dict(args)
+
+            # Normalize common path parameter aliases across FileReaderComponent and WorkspaceComponent
+            alias_map = {
+                "path": ("filepath", "file_path", "subdir"),
+                "filepath": ("path", "file_path"),
+                "subdir": ("path", "filepath", "file_path"),
+            }
+            for target_param, aliases in alias_map.items():
+                if target_param in valid_params and target_param not in normalized_args:
+                    for alias in aliases:
+                        if alias in normalized_args:
+                            normalized_args[target_param] = normalized_args[alias]
+                            break
+
             # Filter out any hallucinated arguments not in the function signature
-            valid_params = inspect.signature(func).parameters.keys()
-            safe_args = {k: v for k, v in args.items() if k in valid_params}
+            safe_args = {k: v for k, v in normalized_args.items() if k in valid_params}
             
             # If the tool is an async function, await it, otherwise just call it.
             if asyncio.iscoroutinefunction(func):
@@ -147,6 +166,11 @@ class AgentCore:
             await self.event_bus.publish("tool_executed", {"name": name, "args": safe_args, "result": result})
             return str(result)
             
+        except TypeError as e:
+            return (
+                f"Error executing tool '{name}': {str(e)} "
+                f"(received args: {list(args.keys())}, expected params: {valid_params})"
+            )
         except Exception as e:
             return f"Error executing tool '{name}': {str(e)}"
 
