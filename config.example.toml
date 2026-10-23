@@ -99,6 +99,18 @@ images_dir = "data/thunk/images"      # Directory where incoming Discord image a
 gemini_api_key = "YOUR_GEMINI_API_KEY_HERE"
 gemini_model = "gemini-3.8-flash"
 
+[workspace]
+# Air-gapped Linux container workspace and read-only mind mirror
+enabled = false
+container_name = "thunk-workspace"
+container_user = "agent"
+container_workdir = "/home/agent/workspace"
+workspace_dir = "data/thunk/workspace"
+mind_ro_dir = "data/thunk/mind_ro"
+live_db_path = "data/thunk/memory.db"
+default_timeout_sec = 30
+max_output_chars = 6000
+
 [debug]
 # Set to true to print LLM output chunks to the console in real-time as they generate
 stream_output = true

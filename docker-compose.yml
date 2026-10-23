@@ -8,9 +8,52 @@ services:
     # Optional: if you don't want it backed up, you can ensure it restarts cleanly
     restart: unless-stopped
 
+  thunk-workspace:
+    build:
+      context: .
+      dockerfile: Dockerfile.jail
+    container_name: thunk-workspace
+    command: ["sleep", "infinity"]
+    restart: unless-stopped
+    network_mode: "none"
+    tmpfs:
+      - "/tmp:size=512m"
+    mem_limit: 4g
+    cpus: 2.0
+    pids_limit: 128
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
+    volumes:
+      - ./data/thunk/workspace:/home/agent/workspace:rw
+      - ./data/thunk/mind_ro:/home/agent/mind:ro
+
+  wisp-workspace:
+    build:
+      context: .
+      dockerfile: Dockerfile.jail
+    container_name: wisp-workspace
+    command: ["sleep", "infinity"]
+    restart: unless-stopped
+    network_mode: "none"
+    tmpfs:
+      - "/tmp:size=512m"
+    mem_limit: 4g
+    cpus: 2.0
+    pids_limit: 128
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
+    volumes:
+      - ./data/wisp/workspace:/home/agent/workspace:rw
+      - ./data/wisp/mind_ro:/home/agent/mind:ro
+
   # We can add Ollama here later if needed, though running it natively on the host 
   # is usually easier for GPU access.
 
 volumes:
   qdrant_data:
     # This creates a named docker volume, keeping data out of your project directory
+

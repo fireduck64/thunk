@@ -27,6 +27,7 @@ from src.components.spreading_activation import SpreadingActivationComponent
 from src.components.file_reader import FileReaderComponent
 from src.components.oracle import OracleComponent
 from src.components.skills import SkillComponent
+from src.components.workspace import WorkspaceComponent
 from src.adapters.mqtt import MQTTAdapter
 from src.adapters.discord_adapter import DiscordAdapter
 
@@ -60,6 +61,8 @@ async def main():
     agent.register_component(FileReaderComponent())
     agent.register_component(OracleComponent())
     agent.register_component(SkillComponent())
+    if config.get("workspace", {}).get("enabled", False):
+        agent.register_component(WorkspaceComponent())
     
     # Create adapters
     mqtt_adapter = MQTTAdapter(agent)

@@ -19,6 +19,8 @@ def _ensure_test_environment(config_path: str) -> None:
     os.makedirs(os.path.join(TEST_DATA_DIR, "skills"), exist_ok=True)
     os.makedirs(os.path.join(TEST_DATA_DIR, "logs"), exist_ok=True)
     os.makedirs(os.path.join(TEST_DATA_DIR, "images"), exist_ok=True)
+    os.makedirs(os.path.join(TEST_DATA_DIR, "workspace"), exist_ok=True)
+    os.makedirs(os.path.join(TEST_DATA_DIR, "mind_ro"), exist_ok=True)
 
     directives_path = os.path.join(TEST_DATA_DIR, "directives.md")
     if not os.path.exists(directives_path):
@@ -95,6 +97,9 @@ def _verify_test_config_isolation(cfg: dict) -> None:
         cfg.get("skills", {}).get("skills_dir", ""),
         cfg.get("logging", {}).get("log_dir", ""),
         cfg.get("discord", {}).get("images_dir", "data/test/images"),
+        cfg.get("workspace", {}).get("workspace_dir", "data/test/workspace"),
+        cfg.get("workspace", {}).get("mind_ro_dir", "data/test/mind_ro"),
+        cfg.get("workspace", {}).get("live_db_path", "data/test/memory.db"),
     ]
     for p in paths_to_check:
         abs_p = os.path.abspath(p)

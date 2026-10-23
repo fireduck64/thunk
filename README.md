@@ -49,6 +49,7 @@ Thunk's architecture decouples agent cognition from capabilities through an even
 | **`FileReaderComponent`** | Multi-library local file reader with strict path traversal protections for inspecting project source code and local text files. | `list_libraries`, `list_files`, `read_file` |
 | **`OracleComponent`** | Direct integration with Google Gemini via `google-genai` for querying current events, facts, or advanced reasoning beyond local context. | `ask_oracle` |
 | **`SkillComponent`** | Procedural memory engine where the agent writes, reads, and manages reusable markdown workflows with YAML frontmatter in `skills/`, capped at 10 active skills. | `list_skills`, `load_skill`, `save_skill`, `delete_skill` |
+| **`WorkspaceComponent`** | Air-gapped Linux container workspace (`/home/agent/workspace` RW) with a live-mirrored read-only snapshot of the agent's SQLite state databases and skills (`/home/agent/mind` RO). | `run_workspace_command`, `write_workspace_file`, `read_workspace_file`, `list_workspace_files` |
 
 ---
 
