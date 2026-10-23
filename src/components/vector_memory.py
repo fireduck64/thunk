@@ -1,3 +1,5 @@
+import sys
+import time
 import uuid
 import requests
 from datetime import datetime
@@ -29,24 +31,69 @@ class VectorMemoryComponent(BaseComponent):
         self.ollama_url = self.config["embeddings"]["api_url"]
         self.embed_model = self.config["embeddings"]["model_name"]
         self.api_key = self.config["embeddings"]["api_key"]
+
+        self.chunk_size = int(self.config.get("vectordb", {}).get("chunk_size", 4000))
+        self.chunk_overlap = int(self.config.get("vectordb", {}).get("chunk_overlap", 400))
+        self.max_retries = 5
+        self.retry_base_delay = 2.0
         
         self._client = None
         self._ensure_collection()
 
     def _ensure_collection(self):
-        """Creates the collection in Qdrant if it doesn't exist."""
-        try:
-            client = QdrantClient(host=self.host, port=self.port)
+        """Creates the collection in Qdrant if it doesn't exist. Retries loudly and exits on failure."""
+        for attempt in range(self.max_retries):
             try:
-                client.get_collection(self.collection)
-            except Exception:
-                print(f"[VectorMemory] Creating collection '{self.collection}'...")
-                client.create_collection(
-                    collection_name=self.collection,
-                    vectors_config=VectorParams(size=768, distance=Distance.COSINE),
+                client = QdrantClient(host=self.host, port=self.port)
+                try:
+                    client.get_collection(self.collection)
+                except Exception:
+                    print(f"[VectorMemory] Creating collection '{self.collection}'...")
+                    client.create_collection(
+                        collection_name=self.collection,
+                        vectors_config=VectorParams(size=768, distance=Distance.COSINE),
+                    )
+                self._client = client
+                return
+            except Exception as e:
+                print(
+                    f"[VectorMemory ERROR] Collection initialization attempt {attempt + 1}/{self.max_retries} failed: {e}",
+                    flush=True,
                 )
-        except Exception as e:
-            print(f"[VectorMemory Error] Failed to initialize Qdrant: {e}")
+                if attempt + 1 < self.max_retries:
+                    delay = self.retry_base_delay * (2 ** attempt)
+                    if delay > 0:
+                        time.sleep(delay)
+
+        print(
+            f"[VectorMemory FATAL] Failed to initialize Qdrant collection '{self.collection}' after {self.max_retries} attempts. Exiting process.",
+            flush=True,
+        )
+        sys.exit(1)
+
+    def _chunk_text(self, text: str) -> List[str]:
+        """Splits text exceeding chunk_size into overlapping chunks that fit the embedding context window."""
+        if len(text) <= self.chunk_size:
+            return [text]
+
+        raw_chunks = []
+        start = 0
+        step = max(1, self.chunk_size - self.chunk_overlap)
+        while start < len(text):
+            end = start + self.chunk_size
+            raw_chunks.append(text[start:end])
+            if end >= len(text):
+                break
+            start += step
+
+        if text.startswith("Consolidated Memory Block:") and len(raw_chunks) > 1:
+            total = len(raw_chunks)
+            formatted = [raw_chunks[0]]
+            for idx in range(1, total):
+                formatted.append(f"Consolidated Memory Block (Part {idx + 1}/{total}):\n{raw_chunks[idx]}")
+            return formatted
+
+        return raw_chunks
 
     def get_system_prompt_addition(self) -> str:
         return (
@@ -79,7 +126,30 @@ class VectorMemoryComponent(BaseComponent):
             headers=headers
         )
         response.raise_for_status()
-        return response.json()["embedding"]
+        data = response.json()
+        embedding = data.get("embedding")
+        if not embedding:
+            raise ValueError(f"Embeddings API returned empty embedding: {data}")
+        return embedding
+
+    def _embed_with_auto_split(self, text: str) -> List[tuple[str, list[float]]]:
+        """
+        Embeds a text chunk. If the embedding endpoint rejects the chunk for exceeding
+        the model's token context window (e.g. dense punctuation or code), recursively
+        splits the chunk in half so no content is lost or rejected.
+        """
+        try:
+            return [(text, self._get_embedding(text))]
+        except requests.exceptions.HTTPError as e:
+            resp_text = e.response.text if e.response is not None else ""
+            if "exceeds the context length" in resp_text and len(text) > 200:
+                mid = len(text) // 2
+                print(
+                    f"[VectorMemory] Chunk of {len(text)} chars exceeded embedding token context; splitting in half...",
+                    flush=True,
+                )
+                return self._embed_with_auto_split(text[:mid]) + self._embed_with_auto_split(text[mid:])
+            raise
 
     def save_semantic_memory(self, content: str) -> str:
         """
@@ -87,28 +157,46 @@ class VectorMemoryComponent(BaseComponent):
         You can search for this later using meaning/concepts.
         """
         print(f"[VectorMemory] Saving memory: {content[:50]}...")
-        try:
-            if not self._client:
-                self._client = QdrantClient(host=self.host, port=self.port)
-                
-            vector = self._get_embedding(content)
-            
-            payload = {
-                "text": content,
-                "timestamp": datetime.utcnow().isoformat() + "Z"
-            }
-            
-            # Using UUID4 since agent memories don't need deterministic overwrites like RAG ingestion
-            point_id = str(uuid.uuid4())
-            
-            self._client.upsert(
-                collection_name=self.collection,
-                points=[PointStruct(id=point_id, vector=vector, payload=payload)]
-            )
-            return "Memory saved successfully."
-            
-        except Exception as e:
-            return f"Error saving memory: {str(e)}"
+        chunks = self._chunk_text(content)
+        timestamp = datetime.utcnow().isoformat() + "Z"
+
+        for attempt in range(self.max_retries):
+            try:
+                if not self._client:
+                    self._client = QdrantClient(host=self.host, port=self.port)
+
+                points = []
+                for chunk in chunks:
+                    for sub_chunk, vector in self._embed_with_auto_split(chunk):
+                        payload = {
+                            "text": sub_chunk,
+                            "timestamp": timestamp,
+                        }
+                        # Using UUID4 since agent memories don't need deterministic overwrites like RAG ingestion
+                        point_id = str(uuid.uuid4())
+                        points.append(PointStruct(id=point_id, vector=vector, payload=payload))
+
+                self._client.upsert(
+                    collection_name=self.collection,
+                    points=points,
+                )
+                return "Memory saved successfully."
+
+            except Exception as e:
+                print(
+                    f"[VectorMemory ERROR] Save memory attempt {attempt + 1}/{self.max_retries} failed: {e}",
+                    flush=True,
+                )
+                if attempt + 1 < self.max_retries:
+                    delay = self.retry_base_delay * (2 ** attempt)
+                    if delay > 0:
+                        time.sleep(delay)
+
+        print(
+            f"[VectorMemory FATAL] Failed to save semantic memory after {self.max_retries} attempts. Exiting process.",
+            flush=True,
+        )
+        sys.exit(1)
 
     def search_semantic_memory_raw(self, query: str, num_results: int = 8) -> List[Dict[str, Any]]:
         """

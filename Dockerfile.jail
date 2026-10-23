@@ -1,0 +1,42 @@
+FROM debian
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update
+RUN apt-get install -y python3-pip python3-dev python3-venv
+
+COPY requirements.txt .
+
+RUN pip3 install --no-cache-dir --break-system-packages \
+    --extra-index-url https://download.pytorch.org/whl/cpu \
+    -r requirements.txt \
+    numpy pandas networkx sympy matplotlib
+
+RUN apt-get install -y dc jq curl wget sqlite3 imagemagick ffmpeg xxd util-linux default-jdk-headless 
+RUN apt-get install -y golang build-essential pkg-config libsqlite3-dev ripgrep git tree bc file procps ca-certificates
+
+RUN wget https://github.com/bazelbuild/bazelisk/releases/download/v1.29.0/bazelisk-amd64.deb
+RUN dpkg -i bazelisk-amd64.deb
+
+RUN useradd -m -u 1000 -s /bin/bash agent
+
+USER agent
+ENV GOPATH=/home/agent/go
+ENV PATH="/home/agent/go/bin:${PATH}"
+
+RUN mkdir -p /home/agent/go-preload && cd /home/agent/go-preload \
+    && go mod init preload \
+    && go get github.com/mattn/go-sqlite3 \
+    && go get modernc.org/sqlite \
+    && go get gopkg.in/yaml.v3 \
+    && go get golang.org/x/exp/slices \
+    && go build github.com/mattn/go-sqlite3 \
+    && rm -rf /home/agent/go-preload
+
+# Create mount target directories
+RUN mkdir -p /home/agent/workspace /home/agent/mind
+WORKDIR /home/agent/workspace
+
+ENV GOPROXY=file:///home/agent/go/pkg/mod/cache/download
+ENV GOSUMDB=off
+

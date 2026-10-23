@@ -5,4 +5,5 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 (echo "clock notification"; ddate; date) | ./scripts/send-notification.py -c data/thunk/config.toml
+(echo "clock notification"; ddate; date) | ./scripts/send-notification.py -c data/wisp/config.toml
 

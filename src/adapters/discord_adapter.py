@@ -46,16 +46,78 @@ class DiscordAdapter:
 
         self._setup_events()
 
-    def _expand_mentions(self, text: str, mentions: list) -> str:
-        """Expands raw <@ID> and <@!ID> tags into @DisplayName (<@ID>)."""
+    def _is_self_role(self, role) -> bool:
+        """Returns True if the Discord role represents this bot/agent."""
+        tags = getattr(role, "tags", None)
+        if tags is not None and self.client.user and getattr(tags, "bot_id", None) == self.client.user.id:
+            return True
+        role_name = (getattr(role, "name", "") or "").strip().lower()
+        if not role_name:
+            return False
+        if self.client.user and getattr(self.client.user, "display_name", "").strip().lower() == role_name:
+            return True
+        if self.agent and getattr(self.agent, "name", "").strip().lower() == role_name:
+            return True
+        return False
+
+    def _expand_mentions(self, text: str, mentions: list = None, role_mentions: list = None, guild=None) -> str:
+        """Expands raw <@ID>, <@!ID>, and <@&ROLE_ID> tags into @DisplayName (<@ID>)."""
         if not text:
             return ""
-        for user in mentions:
-            if user == self.client.user:
+
+        expanded_user_ids = set()
+        for user in mentions or []:
+            if user.id in expanded_user_ids:
+                continue
+            expanded_user_ids.add(user.id)
+            if self.client.user and user == self.client.user:
                 replacement = f"@{user.display_name} (you, <@{user.id}>)"
             else:
                 replacement = f"@{user.display_name} (<@{user.id}>)"
             text = text.replace(f"<@{user.id}>", replacement).replace(f"<@!{user.id}>", replacement)
+
+        for raw_uid in set(re.findall(r"<@!?(\d+)>", text)):
+            uid = int(raw_uid)
+            if uid in expanded_user_ids:
+                continue
+            user = None
+            if guild is not None and hasattr(guild, "get_member"):
+                user = guild.get_member(uid)
+            if user is None and hasattr(self.client, "get_user"):
+                user = self.client.get_user(uid)
+            if user is not None:
+                expanded_user_ids.add(uid)
+                if self.client.user and user == self.client.user:
+                    replacement = f"@{user.display_name} (you, <@{uid}>)"
+                else:
+                    replacement = f"@{user.display_name} (<@{uid}>)"
+                text = text.replace(f"<@{uid}>", replacement).replace(f"<@!{uid}>", replacement)
+
+        expanded_role_ids = set()
+        for role in role_mentions or []:
+            if role.id in expanded_role_ids:
+                continue
+            expanded_role_ids.add(role.id)
+            if self._is_self_role(role):
+                replacement = f"@{role.name} (you, <@&{role.id}>)"
+            else:
+                replacement = f"@{role.name} (<@&{role.id}>)"
+            text = text.replace(f"<@&{role.id}>", replacement)
+
+        if guild is not None and hasattr(guild, "get_role"):
+            for raw_rid in set(re.findall(r"<@&(\d+)>", text)):
+                rid = int(raw_rid)
+                if rid in expanded_role_ids:
+                    continue
+                role = guild.get_role(rid)
+                if role is not None:
+                    expanded_role_ids.add(rid)
+                    if self._is_self_role(role):
+                        replacement = f"@{role.name} (you, <@&{rid}>)"
+                    else:
+                        replacement = f"@{role.name} (<@&{rid}>)"
+                    text = text.replace(f"<@&{rid}>", replacement)
+
         return text
 
     def _setup_events(self):
@@ -80,8 +142,13 @@ class DiscordAdapter:
             # Update the last channel so we know where to reply
             self.last_channel_id = message.channel.id
             
-            # Expand <@ID> and <@!ID> mentions so the agent sees both the display name and raw Discord tag
-            content = self._expand_mentions(message.content, message.mentions)
+            # Expand <@ID>, <@!ID>, and <@&ROLE_ID> mentions so the agent sees both the display name and raw Discord tag
+            content = self._expand_mentions(
+                message.content,
+                getattr(message, "mentions", None),
+                getattr(message, "role_mentions", None),
+                getattr(message, "guild", None),
+            )
 
             # Check if this message is a reply to another message
             reply_context = ""
@@ -95,7 +162,12 @@ class DiscordAdapter:
                         ref_msg = None
                 if ref_msg is not None:
                     ref_author = "you" if ref_msg.author == self.client.user else ref_msg.author.display_name
-                    ref_text = self._expand_mentions(ref_msg.content or "", ref_msg.mentions)
+                    ref_text = self._expand_mentions(
+                        ref_msg.content or "",
+                        getattr(ref_msg, "mentions", None),
+                        getattr(ref_msg, "role_mentions", None),
+                        getattr(ref_msg, "guild", None) or getattr(message, "guild", None),
+                    )
                     ref_snippet = ref_text[:120].replace("\n", " ")
                     reply_context = f' (replying to message_id={ref_id} by {ref_author}: "{ref_snippet}")'
                 else:
@@ -209,7 +281,12 @@ class DiscordAdapter:
                 try:
                     target_msg = await channel.fetch_message(payload.message_id)
                     target_author = "your message" if target_msg.author == self.client.user else f"{target_msg.author.display_name}'s message"
-                    target_text = self._expand_mentions(target_msg.content or "", target_msg.mentions)
+                    target_text = self._expand_mentions(
+                        target_msg.content or "",
+                        getattr(target_msg, "mentions", None),
+                        getattr(target_msg, "role_mentions", None),
+                        getattr(target_msg, "guild", None) or getattr(channel, "guild", None),
+                    )
                     snippet = target_text[:120].replace("\n", " ")
                     target_desc = f'{target_author} (message_id={payload.message_id}: "{snippet}")'
                 except Exception:

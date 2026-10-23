@@ -1,6 +1,9 @@
+import asyncio
 import fcntl
 import os
 import sqlite3
+import sys
+import time
 import json
 from typing import List, Dict, Callable, Any
 from transformers import AutoTokenizer
@@ -31,6 +34,8 @@ class TieredMemoryComponent(BaseComponent):
         self.low_watermark = self.config.get("memory", {}).get("low_watermark", 8000)
         self.max_summarize_tokens = self.config.get("memory", {}).get("max_summarize_tokens", 6000)
         self.max_summary_tokens = self.config.get("memory", {}).get("max_summary_tokens", 8192)
+        self.max_retries = 5
+        self.retry_base_delay = 2.0
         
         try:
             # We set a large model_max_length to prevent warnings when counting tokens 
@@ -140,22 +145,40 @@ class TieredMemoryComponent(BaseComponent):
             truncated_tokens = tokens[:self.max_summary_tokens]
             new_summary = self.tokenizer.decode(truncated_tokens) + "... [TRUNCATED]"
             
-        conn = sqlite3.connect(self.db_path)
-        try:
-            with conn:
-                conn.execute("UPDATE core_summary SET summary = ? WHERE id = 1", (new_summary,))
-                conn.execute(
-                    "INSERT INTO core_summary_history (summary, compacted_up_to_id) VALUES (?, ?)",
-                    (new_summary, max_evicted_id)
-                )
-                if max_evicted_id > 0:
+        for attempt in range(self.max_retries):
+            conn = None
+            try:
+                conn = sqlite3.connect(self.db_path)
+                with conn:
+                    conn.execute("UPDATE core_summary SET summary = ? WHERE id = 1", (new_summary,))
                     conn.execute(
-                        "INSERT OR REPLACE INTO memory_settings (key, value) VALUES ('last_compacted_id', ?)",
-                        (str(max_evicted_id),)
+                        "INSERT INTO core_summary_history (summary, compacted_up_to_id) VALUES (?, ?)",
+                        (new_summary, max_evicted_id)
                     )
+                    if max_evicted_id > 0:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO memory_settings (key, value) VALUES ('last_compacted_id', ?)",
+                            (str(max_evicted_id),)
+                        )
+                return
+            except Exception as e:
+                print(
+                    f"[Memory ERROR] Core summary SQLite write attempt {attempt + 1}/{self.max_retries} failed: {e}",
+                    flush=True,
+                )
+                if attempt + 1 < self.max_retries:
+                    delay = self.retry_base_delay * (2 ** attempt)
+                    if delay > 0:
+                        time.sleep(delay)
+            finally:
+                if conn is not None:
+                    conn.close()
 
-        finally:
-            conn.close()
+        print(
+            f"[Memory FATAL] Failed to update core_summary in SQLite after {self.max_retries} attempts. Exiting process.",
+            flush=True,
+        )
+        sys.exit(1)
 
     def get_system_prompt_addition(self) -> str:
         summary = self._get_core_summary()
@@ -194,17 +217,38 @@ class TieredMemoryComponent(BaseComponent):
                 # Need to handle pydantic/OpenAI objects safely for logging
                 content = f"[Tool Calls Requested]"
                 
-            conn = sqlite3.connect(self.db_path)
-            try:
-                with conn:
-                    cursor = conn.execute(
-                        "INSERT INTO archival_log (role, content) VALUES (?, ?)", 
-                        (role, str(content))
+            saved = False
+            for attempt in range(self.max_retries):
+                conn = None
+                try:
+                    conn = sqlite3.connect(self.db_path)
+                    with conn:
+                        cursor = conn.execute(
+                            "INSERT INTO archival_log (role, content) VALUES (?, ?)", 
+                            (role, str(content))
+                        )
+                        msg["_db_id"] = cursor.lastrowid
+                    saved = True
+                    break
+                except Exception as e:
+                    print(
+                        f"[Memory ERROR] Archival log write attempt {attempt + 1}/{self.max_retries} failed: {e}",
+                        flush=True,
                     )
-                    msg["_db_id"] = cursor.lastrowid
+                    if attempt + 1 < self.max_retries:
+                        delay = self.retry_base_delay * (2 ** attempt)
+                        if delay > 0:
+                            await asyncio.sleep(delay)
+                finally:
+                    if conn is not None:
+                        conn.close()
 
-            finally:
-                conn.close()
+            if not saved:
+                print(
+                    f"[Memory FATAL] Failed to write message to archival_log after {self.max_retries} attempts. Exiting process.",
+                    flush=True,
+                )
+                sys.exit(1)
         elif event_name == "context_window_check":
             agent = payload["agent"]
             
@@ -343,11 +387,6 @@ class TieredMemoryComponent(BaseComponent):
                     
             transcript += f"[{role.upper()}]: {content}\n"
 
-        # IMPORTANT FIX: We aggressively evict the messages from the agent's context 
-        # BEFORE making the LLM call. This guarantees the context window shrinks 
-        # even if the summarization LLM call times out or crashes.
-        del agent.messages[1 : 1 + num_to_evict]
-
         current_summary = self._get_core_summary()
         
         prompt = (
@@ -365,8 +404,8 @@ class TieredMemoryComponent(BaseComponent):
             "Return ONLY the raw text of the new summary. Do not include introductory text."
         )
 
-        max_retries = 3
-        for attempt in range(max_retries):
+        new_summary = None
+        for attempt in range(self.max_retries):
             try:
                 # We make a direct LLM call using the agent's client with a stream
                 response_stream = await agent.client.chat.completions.create(
@@ -376,32 +415,48 @@ class TieredMemoryComponent(BaseComponent):
                     stream=True
                 )
                 message = await agent._accumulate_stream(response_stream)
-                new_summary = (message.content or "").strip()
-                
-                # Atomically save the new summary, append to history, and advance last_compacted_id
-                self._update_core_summary(new_summary, max_evicted_id=max_evicted_id)
-                print(f"[Memory] New Core Summary Generated: {new_summary[:50]}...")
-                
-                # --- MEMORY CONSOLIDATION (Subconscious Integration) ---
-                for comp in agent.components:
-                    if comp.__class__.__name__ == "VectorMemoryComponent":
-                        try:
-                            # Save the transcript + summary as a consolidated block
-                            consolidation = f"Consolidated Memory Block:\nSummary: {new_summary}\nRaw Events:\n{transcript}"
-                            comp.save_semantic_memory(consolidation)
-                            print("[Memory] Sent consolidated block to long-term Vector Memory.")
-                        except Exception as e:
-                            print(f"[Memory] Failed to consolidate to Vector Memory: {e}")
-                
-                # Ask the agent to rebuild its system prompt so the new summary is injected immediately
-                agent.rebuild_system_prompt()
-                return # Success, exit the compression function
-                
+                candidate_summary = (message.content or "").strip()
+                if not candidate_summary:
+                    raise ValueError("Refusing to overwrite core_summary with an empty summary.")
+                new_summary = candidate_summary
+                break
             except Exception as e:
-                print(f"[Memory Error] Compression attempt {attempt + 1}/{max_retries} failed: {e}")
-                import asyncio
-                await asyncio.sleep(5) # Wait before retrying
-                
-        # --- Emergency Eviction (Circuit Breaker) ---
-        print("[Memory CRITICAL] All compression retries failed. The messages were evicted, but the summary was lost.")
+                print(
+                    f"[Memory ERROR] Compression attempt {attempt + 1}/{self.max_retries} failed: {e}",
+                    flush=True,
+                )
+                if attempt + 1 < self.max_retries:
+                    delay = self.retry_base_delay * (2 ** attempt)
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+
+        if not new_summary:
+            print(
+                f"[Memory FATAL] All {self.max_retries} compression attempts failed. Refusing to evict memory without summary. Exiting process.",
+                flush=True,
+            )
+            sys.exit(1)
+
+        # --- MEMORY CONSOLIDATION (Subconscious Integration) ---
+        for comp in agent.components:
+            if comp.__class__.__name__ == "VectorMemoryComponent":
+                try:
+                    consolidation = f"Consolidated Memory Block:\nSummary: {new_summary}\nRaw Events:\n{transcript}"
+                    result = comp.save_semantic_memory(consolidation)
+                    if isinstance(result, str) and result.startswith("Error"):
+                        raise RuntimeError(result)
+                    print("[Memory] Sent consolidated block to long-term Vector Memory.")
+                except Exception as e:
+                    print(
+                        f"[Memory FATAL] Failed to consolidate to Vector Memory: {e}. Exiting process.",
+                        flush=True,
+                    )
+                    sys.exit(1)
+
+        # Atomically save the new summary, append to history, and advance last_compacted_id
+        self._update_core_summary(new_summary, max_evicted_id=max_evicted_id)
+        print(f"[Memory] New Core Summary Generated: {new_summary[:50]}...")
+
+        # Evict compacted messages only after Vector Memory and SQLite commits have succeeded
+        del agent.messages[1 : 1 + num_to_evict]
         agent.rebuild_system_prompt()

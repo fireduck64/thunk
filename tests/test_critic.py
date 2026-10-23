@@ -57,3 +57,63 @@ def test_task_queue_ids_and_delete():
             os.remove(db_path)
 
 
+def test_discord_expand_user_and_role_mentions():
+    """Verifies DiscordAdapter._expand_mentions expands user mentions (<@ID>, <@!ID>) and role mentions (<@&ID>)."""
+    from src.adapters.discord_adapter import DiscordAdapter
+
+    class DummyUser:
+        def __init__(self, uid: int, display_name: str):
+            self.id = uid
+            self.display_name = display_name
+
+    class DummyRoleTags:
+        def __init__(self, bot_id: int = None):
+            self.bot_id = bot_id
+
+    class DummyRole:
+        def __init__(self, rid: int, name: str, bot_id: int = None):
+            self.id = rid
+            self.name = name
+            self.tags = DummyRoleTags(bot_id=bot_id)
+
+    class DummyGuild:
+        def __init__(self, roles_by_id: dict):
+            self._roles = roles_by_id
+
+        def get_role(self, rid: int):
+            return self._roles.get(rid)
+
+        def get_member(self, uid: int):
+            return None
+
+    class DummyAgent:
+        name = "Thunk"
+
+    adapter = DiscordAdapter(DummyAgent())
+    self_user = DummyUser(1551318628543234190, "Thunk")
+    wisp_user = DummyUser(1560498996789645402, "Wisp")
+    adapter.client._connection.user = self_user
+
+    thunk_role = DummyRole(1551396165621387286, "Thunk", bot_id=1551318628543234190)
+    wisp_role = DummyRole(1560504734715088969, "Wisp", bot_id=1560498996789645402)
+    stuffle_role = DummyRole(1560665089407979572, "Stuffleupagus")
+    guild = DummyGuild({stuffle_role.id: stuffle_role})
+
+    raw = (
+        "Ok <@&1560504734715088969> and <@&1551396165621387286>, "
+        "plus <@!1560498996789645402> and <@&1560665089407979572> April wants to know if you could see her artwork."
+    )
+    expanded = adapter._expand_mentions(
+        raw,
+        mentions=[wisp_user],
+        role_mentions=[wisp_role, thunk_role],
+        guild=guild,
+    )
+
+    assert "@Wisp (<@&1560504734715088969>)" in expanded
+    assert "@Thunk (you, <@&1551396165621387286>)" in expanded
+    assert "@Wisp (<@1560498996789645402>)" in expanded
+    assert "@Stuffleupagus (<@&1560665089407979572>)" in expanded
+
+
+
