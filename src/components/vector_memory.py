@@ -17,6 +17,7 @@ class VectorMemoryComponent(BaseComponent):
     """
     def __init__(self, collection_name: str = None):
         self.config = load_config()
+        self.agent_name = self.config.get("agent", {}).get("name", "Thunk")
         self.host = self.config["vectordb"]["host"]
         self.port = self.config["vectordb"]["port"]
         
@@ -113,7 +114,8 @@ class VectorMemoryComponent(BaseComponent):
 
     def _get_embedding(self, text: str) -> list[float]:
         """Helper to call the embeddings API."""
-        headers = {}
+        agent_name = getattr(getattr(self, "agent", None), "name", None) or getattr(self, "agent_name", "Thunk")
+        headers = {"X-Agent-ID": f"{agent_name}-vector_memory"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
             

@@ -7,8 +7,8 @@ from qdrant_client import QdrantClient
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from src.utils.config import load_config, set_config_path
 
-def get_embedding(text: str, ollama_url: str, embedding_model: str, api_key: str) -> list[float]:
-    headers = {}
+def get_embedding(text: str, ollama_url: str, embedding_model: str, api_key: str, agent_name: str = "Thunk") -> list[float]:
+    headers = {"X-Agent-ID": f"{agent_name}-query"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
         
@@ -31,11 +31,12 @@ def search(query: str, limit: int = 3):
     ollama_url = config["embeddings"]["api_url"]
     embedding_model = config["embeddings"]["model_name"]
     api_key = config["embeddings"]["api_key"]
+    agent_name = config.get("agent", {}).get("name", "Thunk")
 
     print(f"Searching for: '{query}'")
     
     # 1. Convert the search query into a vector
-    query_vector = get_embedding(query, ollama_url, embedding_model, api_key)
+    query_vector = get_embedding(query, ollama_url, embedding_model, api_key, agent_name=agent_name)
     
     # 2. Search Qdrant for the closest matching vectors
     client = QdrantClient(host=qdrant_host, port=qdrant_port)

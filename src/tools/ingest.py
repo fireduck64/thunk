@@ -13,9 +13,9 @@ from qdrant_client.models import VectorParams, Distance, PointStruct
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from src.utils.config import load_config, set_config_path
 
-def get_embedding(text: str, ollama_url: str, embedding_model: str, api_key: str) -> list[float]:
+def get_embedding(text: str, ollama_url: str, embedding_model: str, api_key: str, agent_name: str = "Thunk") -> list[float]:
     """Calls Ollama to convert text into a vector (list of floats)."""
-    headers = {}
+    headers = {"X-Agent-ID": f"{agent_name}-ingest"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
         
@@ -65,6 +65,7 @@ def ingest_file(epub_path: str):
     ollama_url = config["embeddings"]["api_url"]
     embedding_model = config["embeddings"]["model_name"]
     api_key = config["embeddings"]["api_key"]
+    agent_name = config.get("agent", {}).get("name", "Thunk")
 
     # 1. Connect to Qdrant Vector DB
     client = QdrantClient(host=qdrant_host, port=qdrant_port)
@@ -94,7 +95,7 @@ def ingest_file(epub_path: str):
         if i % 10 == 0:
             print(f"Embedding chunk {i}/{len(chunks)}...")
         
-        vector = get_embedding(chunk, ollama_url, embedding_model, api_key)
+        vector = get_embedding(chunk, ollama_url, embedding_model, api_key, agent_name=agent_name)
         
         # We store the original text in the payload so we can read it later
         payload = {

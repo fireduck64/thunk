@@ -116,4 +116,74 @@ def test_discord_expand_user_and_role_mentions():
     assert "@Stuffleupagus (<@&1560665089407979572>)" in expanded
 
 
+@pytest.mark.asyncio
+async def test_x_agent_id_headers(monkeypatch):
+    """Verifies X-Agent-ID: <agent_name>-<component> headers are attached on all LLM and embedding clients/requests."""
+    import requests
+    from src.core.agent import AgentCore
+    from src.components.subconscious import SubconsciousRecallComponent
+    from src.components.spreading_activation import SpreadingActivationComponent
+    from src.components.vector_memory import VectorMemoryComponent
+    from src.components.knowledge import KnowledgeBaseComponent
+
+    agent = AgentCore()
+    assert agent.client.default_headers.get("X-Agent-ID") == f"{agent.name}-core"
+
+    sub = SubconsciousRecallComponent()
+    assert sub.client.default_headers.get("X-Agent-ID") == f"{agent.name}-subconscious"
+
+    sa = SpreadingActivationComponent(persist=False)
+    assert sa.client.default_headers.get("X-Agent-ID") == f"{agent.name}-spreading_activation"
+
+    # Critic extra_headers check
+    captured_critic_kwargs = {}
+
+    class DummyMsg:
+        content = "I notice steady progress."
+
+    class DummyCompletions:
+        async def create(self, **kwargs):
+            captured_critic_kwargs.update(kwargs)
+            return "stream"
+
+    critic = CriticComponent(frequency=1)
+    agent.register_component(critic)
+    agent.messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": "hello"}]
+    monkeypatch.setattr(agent.client.chat, "completions", DummyCompletions())
+    monkeypatch.setattr(agent, "_accumulate_stream", lambda s: DummyMsg())
+
+    async def mock_acc(s):
+        return DummyMsg()
+
+    agent._accumulate_stream = mock_acc
+    await critic._evaluate_progress()
+    assert captured_critic_kwargs.get("extra_headers") == {"X-Agent-ID": f"{agent.name}-critic"}
+
+    # Embeddings requests.post headers check
+    captured_headers = []
+
+    class DummyResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"embedding": [0.1] * 768}
+
+    def fake_post(url, json=None, headers=None, **kwargs):
+        captured_headers.append(dict(headers or {}))
+        return DummyResp()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    monkeypatch.setattr(VectorMemoryComponent, "_ensure_collection", lambda self: None)
+
+    vm = VectorMemoryComponent(collection_name="test_agent_memory")
+    vm._get_embedding("hello")
+    assert captured_headers[-1].get("X-Agent-ID") == f"{agent.name}-vector_memory"
+
+    kb = KnowledgeBaseComponent()
+    kb._get_embedding("world")
+    assert captured_headers[-1].get("X-Agent-ID") == f"{agent.name}-knowledge"
+
+
+
 

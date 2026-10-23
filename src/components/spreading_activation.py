@@ -41,6 +41,7 @@ class SpreadingActivationComponent(BaseComponent):
         persist: bool = True,
     ):
         self.config = load_config()
+        self.agent_name = self.config.get("agent", {}).get("name", "Thunk")
         sub_cfg = self.config.get("subconscious", {})
         sa_cfg = self.config.get("spreading_activation", {})
         llm_cfg = self.config.get("llm", {})
@@ -78,6 +79,7 @@ class SpreadingActivationComponent(BaseComponent):
         self.client = AsyncOpenAI(
             base_url=self.api_url,
             api_key=self.api_key,
+            default_headers={"X-Agent-ID": f"{self.agent_name}-spreading_activation"},
             timeout=httpx.Timeout(None),
         )
         self.internal_memory_components: List[Any] = []

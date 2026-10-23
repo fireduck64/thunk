@@ -15,6 +15,7 @@ class SubconsciousRecallComponent(BaseComponent):
     """
     def __init__(self):
         self.config = load_config()
+        self.agent_name = self.config.get("agent", {}).get("name", "Thunk")
         sub_cfg = self.config.get("subconscious", {})
         llm_cfg = self.config.get("llm", {})
 
@@ -27,6 +28,7 @@ class SubconsciousRecallComponent(BaseComponent):
         self.client = AsyncOpenAI(
             base_url=self.api_url,
             api_key=self.api_key,
+            default_headers={"X-Agent-ID": f"{self.agent_name}-subconscious"},
             timeout=httpx.Timeout(None)
         )
         self.internal_memory_components = []

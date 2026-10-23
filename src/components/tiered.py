@@ -405,6 +405,7 @@ class TieredMemoryComponent(BaseComponent):
         )
 
         new_summary = None
+        agent_name = getattr(agent, "name", None) or self.config.get("agent", {}).get("name", "Thunk")
         for attempt in range(self.max_retries):
             try:
                 # We make a direct LLM call using the agent's client with a stream
@@ -412,6 +413,7 @@ class TieredMemoryComponent(BaseComponent):
                     model=agent.model,
                     messages=[{"role": "user", "content": prompt}],
                     max_tokens=self.max_summary_tokens,
+                    extra_headers={"X-Agent-ID": f"{agent_name}-memory"},
                     stream=True
                 )
                 message = await agent._accumulate_stream(response_stream)
