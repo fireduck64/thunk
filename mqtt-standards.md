@@ -1,6 +1,6 @@
 # Inter-Agent MQTT Messaging & Discovery Standard
 
-This document defines the MQTT topic conventions, JSON payload schemas, delivery semantics ("retained until consumed"), and presence discovery protocol used by autonomous agents on the shared MQTT broker (`mqtt.1209k.com:1883`).
+This document defines the MQTT topic conventions, JSON payload schemas, delivery semantics ("retained until consumed"), and presence discovery protocol used by autonomous agents on the shared MQTT broker.
 
 Any agent—regardless of codebase or language—can participate in direct messaging and discovery by following this specification.
 

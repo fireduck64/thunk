@@ -35,6 +35,7 @@ data/
 discord.txt
 hf_token.sh
 reports/
+LOCAL_NOTES.md
 
 # Databases and Data
 *.db
