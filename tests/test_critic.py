@@ -259,6 +259,35 @@ async def test_mqtt_direct_messaging_system_inbox_and_presence():
     assert sys_msg == "[Via MQTT | System] clock notification\nFri Oct 23"
 
 
+def test_mqtt_chat_script_helpers_and_cli():
+    """Verifies scripts/mqtt-chat.py presence/DM payload builders, topic resolution, and CLI flags."""
+    import importlib.util
+    import json
+    import os
+    import subprocess
+    import sys
+
+    script_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scripts", "mqtt-chat.py"))
+    spec = importlib.util.spec_from_file_location("mqtt_chat", script_path)
+    mqtt_chat = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mqtt_chat)
+
+    pres = json.loads(mqtt_chat.build_presence_payload("Sombus", "online", "sombus/agent/dm").decode("utf-8"))
+    assert pres == {"agent": "Sombus", "status": "online", "dm_topic": "sombus/agent/dm"}
+
+    dm = json.loads(mqtt_chat.build_dm_payload("Sombus", "Hello Thunk!").decode("utf-8"))
+    assert dm == {"sender": "Sombus", "text": "Hello Thunk!"}
+
+    known = {"wisp": {"agent": "Wisp", "status": "online", "dm_topic": "custom/wisp/dm"}}
+    assert mqtt_chat.resolve_recipient_dm_topic("@Wisp", known) == "custom/wisp/dm"
+    assert mqtt_chat.resolve_recipient_dm_topic("Thunk", known) == "thunk/agent/dm"
+
+    help_out = subprocess.check_output([sys.executable, script_path, "--help"], text=True)
+    assert "--user" in help_out
+    assert "--recipient" in help_out
+
+
+
 
 
 
