@@ -29,7 +29,10 @@ def function_to_schema(func: Callable) -> dict:
     required = []
 
     for name, param in sig.parameters.items():
-        if name == "self":
+        if name == "self" or param.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
             continue
             
         param_type = param.annotation if param.annotation != inspect.Parameter.empty else str

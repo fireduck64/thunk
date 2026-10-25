@@ -1,5 +1,6 @@
 import asyncio
 import fcntl
+import inspect
 import os
 import sqlite3
 import sys
@@ -13,11 +14,12 @@ from src.utils.config import load_config
 class TieredMemoryComponent(BaseComponent):
     """
     Manages the agent's memory tiers:
-    1. Archival Memory (Logs all messages to SQLite)
-    2. Core Summary (Compresses old messages into a sliding summary based on token count)
+    1. Archival Memory (Logs all messages to SQLite, scoped by thread_id)
+    2. Core Summary (Compresses old messages into a sliding summary based on token count, scoped by thread_id)
     """
-    def __init__(self, db_path: str = None):
+    def __init__(self, db_path: str = None, thread_id: str = "main", tokenizer: Any = None):
         self.config = load_config()
+        self.thread_id = (thread_id or "main").strip() or "main"
         if db_path is None:
             memory_cfg = self.config.get("memory", {})
             if "db_path" not in memory_cfg or not memory_cfg["db_path"]:
@@ -37,34 +39,56 @@ class TieredMemoryComponent(BaseComponent):
         self.max_retries = 5
         self.retry_base_delay = 2.0
         
-        try:
-            # We set a large model_max_length to prevent warnings when counting tokens 
-            # for sequences larger than the tokenizer's default limit (e.g. 8192 for Gemma 7B)
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                tokenizer_model, 
-                model_max_length=100000
-            )
-        except Exception as e:
-            print(f"[Memory Warning] Could not load tokenizer '{tokenizer_model}': {e}")
-            print("[Memory Warning] Falling back to 'gpt2' tokenizer for approximate token counting.")
-            self.tokenizer = AutoTokenizer.from_pretrained("gpt2", model_max_length=100000)
+        if tokenizer is not None:
+            self.tokenizer = tokenizer
+        else:
+            try:
+                # We set a large model_max_length to prevent warnings when counting tokens 
+                # for sequences larger than the tokenizer's default limit (e.g. 8192 for Gemma 7B)
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    tokenizer_model, 
+                    model_max_length=100000
+                )
+            except Exception as e:
+                print(f"[Memory Warning] Could not load tokenizer '{tokenizer_model}': {e}")
+                print("[Memory Warning] Falling back to 'gpt2' tokenizer for approximate token counting.")
+                self.tokenizer = AutoTokenizer.from_pretrained("gpt2", model_max_length=100000)
             
         self._init_db()
 
+    def _connect_db(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=5.0)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
+        return conn
+
+    def _settings_key(self, base_key: str) -> str:
+        return base_key if self.thread_id == "main" else f"{self.thread_id}:{base_key}"
+
     def _acquire_lock(self):
-        """Acquires an exclusive non-blocking OS file lock to prevent multiple agents from sharing memory.db."""
-        lock_path = f"{self.db_path}.lock"
+        """Acquires an exclusive non-blocking OS file lock per (db_path, thread_id)."""
+        lock_path = (
+            f"{self.db_path}.lock"
+            if self.thread_id == "main"
+            else f"{self.db_path}.{self.thread_id}.lock"
+        )
+        self._lock_path = lock_path
         self._lock_file = open(lock_path, "w")
         try:
             fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             self._lock_file.close()
             raise RuntimeError(
-                f"Database '{self.db_path}' is already locked by another running process (lockfile: '{lock_path}')."
+                f"Database '{self.db_path}' (thread '{self.thread_id}') is already locked by another running process (lockfile: '{lock_path}')."
             )
 
+    def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+        cols = [row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
     def _init_db(self):
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
                 conn.execute("""
@@ -72,63 +96,91 @@ class TieredMemoryComponent(BaseComponent):
                         id INTEGER PRIMARY KEY AUTOINCREMENT, 
                         role TEXT, 
                         content TEXT, 
-                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        thread_id TEXT NOT NULL DEFAULT 'main'
                     )
                 """)
+                self._ensure_column(conn, "archival_log", "thread_id", "TEXT NOT NULL DEFAULT 'main'")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_archival_log_thread_id ON archival_log(thread_id, id)")
+
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS core_summary (
-                        id INTEGER PRIMARY KEY, 
-                        summary TEXT
+                        id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                        summary TEXT,
+                        thread_id TEXT NOT NULL DEFAULT 'main'
                     )
                 """)
+                self._ensure_column(conn, "core_summary", "thread_id", "TEXT NOT NULL DEFAULT 'main'")
+                conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_core_summary_thread_id ON core_summary(thread_id)")
+
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS core_summary_history (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         summary TEXT,
                         compacted_up_to_id INTEGER,
-                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        thread_id TEXT NOT NULL DEFAULT 'main'
                     )
                 """)
+                self._ensure_column(conn, "core_summary_history", "thread_id", "TEXT NOT NULL DEFAULT 'main'")
+
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS memory_settings (
                         key TEXT PRIMARY KEY, 
                         value TEXT
                     )
                 """)
-                # Ensure there is always a row 1 for the summary
-                conn.execute("INSERT OR IGNORE INTO core_summary (id, summary) VALUES (1, 'No summary yet.')")
-                conn.execute("INSERT OR IGNORE INTO memory_settings (key, value) VALUES ('last_compacted_id', '0')")
+                if self.thread_id == "main":
+                    conn.execute(
+                        "INSERT OR IGNORE INTO core_summary (id, summary, thread_id) VALUES (1, 'No summary yet.', 'main')"
+                    )
+                else:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO core_summary (summary, thread_id) VALUES ('No summary yet.', ?)",
+                        (self.thread_id,),
+                    )
+                conn.execute(
+                    "INSERT OR IGNORE INTO memory_settings (key, value) VALUES (?, '0')",
+                    (self._settings_key("last_compacted_id"),),
+                )
 
         finally:
             conn.close()
 
     def _get_core_summary(self) -> str:
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
-                cursor = conn.execute("SELECT summary FROM core_summary WHERE id = 1")
-                return cursor.fetchone()[0]
+                cursor = conn.execute(
+                    "SELECT summary FROM core_summary WHERE thread_id = ?",
+                    (self.thread_id,),
+                )
+                row = cursor.fetchone()
+                return row[0] if row else "No summary yet."
 
         finally:
             conn.close()
 
     def _get_last_compacted_id(self) -> int:
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
-                cursor = conn.execute("SELECT value FROM memory_settings WHERE key = 'last_compacted_id'")
+                cursor = conn.execute(
+                    "SELECT value FROM memory_settings WHERE key = ?",
+                    (self._settings_key("last_compacted_id"),),
+                )
                 row = cursor.fetchone()
                 return int(row[0]) if row else 0
         finally:
             conn.close()
 
     def _set_last_compacted_id(self, last_id: int):
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
                 conn.execute(
-                    "INSERT OR REPLACE INTO memory_settings (key, value) VALUES ('last_compacted_id', ?)",
-                    (str(last_id),)
+                    "INSERT OR REPLACE INTO memory_settings (key, value) VALUES (?, ?)",
+                    (self._settings_key("last_compacted_id"), str(last_id))
                 )
         finally:
             conn.close()
@@ -148,17 +200,20 @@ class TieredMemoryComponent(BaseComponent):
         for attempt in range(self.max_retries):
             conn = None
             try:
-                conn = sqlite3.connect(self.db_path)
+                conn = self._connect_db()
                 with conn:
-                    conn.execute("UPDATE core_summary SET summary = ? WHERE id = 1", (new_summary,))
                     conn.execute(
-                        "INSERT INTO core_summary_history (summary, compacted_up_to_id) VALUES (?, ?)",
-                        (new_summary, max_evicted_id)
+                        "UPDATE core_summary SET summary = ? WHERE thread_id = ?",
+                        (new_summary, self.thread_id),
+                    )
+                    conn.execute(
+                        "INSERT INTO core_summary_history (summary, compacted_up_to_id, thread_id) VALUES (?, ?, ?)",
+                        (new_summary, max_evicted_id, self.thread_id)
                     )
                     if max_evicted_id > 0:
                         conn.execute(
-                            "INSERT OR REPLACE INTO memory_settings (key, value) VALUES ('last_compacted_id', ?)",
-                            (str(max_evicted_id),)
+                            "INSERT OR REPLACE INTO memory_settings (key, value) VALUES (?, ?)",
+                            (self._settings_key("last_compacted_id"), str(max_evicted_id))
                         )
                 return
             except Exception as e:
@@ -221,11 +276,11 @@ class TieredMemoryComponent(BaseComponent):
             for attempt in range(self.max_retries):
                 conn = None
                 try:
-                    conn = sqlite3.connect(self.db_path)
+                    conn = self._connect_db()
                     with conn:
                         cursor = conn.execute(
-                            "INSERT INTO archival_log (role, content) VALUES (?, ?)", 
-                            (role, str(content))
+                            "INSERT INTO archival_log (role, content, thread_id) VALUES (?, ?, ?)", 
+                            (role, str(content), self.thread_id)
                         )
                         msg["_db_id"] = cursor.lastrowid
                     saved = True
@@ -277,20 +332,21 @@ class TieredMemoryComponent(BaseComponent):
         
         last_compacted_id = self._get_last_compacted_id()
         
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
                 if last_compacted_id == 0:
-                    # Legacy fallback: fetch a chunk of recent messages
+                    # Legacy fallback: fetch a chunk of recent messages for this thread
                     cursor = conn.execute(
-                        "SELECT id, role, content FROM archival_log ORDER BY id DESC LIMIT 500"
+                        "SELECT id, role, content FROM archival_log WHERE thread_id = ? ORDER BY id DESC LIMIT 500",
+                        (self.thread_id,),
                     )
                     rows = cursor.fetchall()
                 else:
-                    # Modern restore: load everything since the last successful compaction
+                    # Modern restore: load everything for this thread since the last successful compaction
                     cursor = conn.execute(
-                        "SELECT id, role, content FROM archival_log WHERE id > ? ORDER BY id ASC",
-                        (last_compacted_id,)
+                        "SELECT id, role, content FROM archival_log WHERE thread_id = ? AND id > ? ORDER BY id ASC",
+                        (self.thread_id, last_compacted_id)
                     )
                     rows = cursor.fetchall()
         finally:
@@ -444,7 +500,18 @@ class TieredMemoryComponent(BaseComponent):
             if comp.__class__.__name__ == "VectorMemoryComponent":
                 try:
                     consolidation = f"Consolidated Memory Block:\nSummary: {new_summary}\nRaw Events:\n{transcript}"
-                    result = comp.save_semantic_memory(consolidation)
+                    sig_params = inspect.signature(comp.save_semantic_memory).parameters
+                    supports_kwargs = any(
+                        p.kind == inspect.Parameter.VAR_KEYWORD or p.name == "metadata"
+                        for p in sig_params.values()
+                    )
+                    if supports_kwargs:
+                        result = comp.save_semantic_memory(
+                            consolidation,
+                            metadata={"thread_id": self.thread_id},
+                        )
+                    else:
+                        result = comp.save_semantic_memory(consolidation)
                     if isinstance(result, str) and result.startswith("Error"):
                         raise RuntimeError(result)
                     print("[Memory] Sent consolidated block to long-term Vector Memory.")

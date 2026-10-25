@@ -20,8 +20,14 @@ class StructuredNotesComponent(BaseComponent):
         os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
         self._init_db()
 
+    def _connect_db(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=5.0)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
+        return conn
+
     def _init_db(self):
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
                 conn.execute(
@@ -42,7 +48,7 @@ class StructuredNotesComponent(BaseComponent):
             "A note named 'sticky' is always included in your system prompt if it exists."
         )
 
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
                 cursor = conn.execute("SELECT value FROM notes WHERE key = ?", ("sticky",))
@@ -70,7 +76,7 @@ class StructuredNotesComponent(BaseComponent):
         # Simple string matching across all note keys and values
         query_lower = query.lower()
         results = []
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
                 cursor = conn.execute("SELECT key, value FROM notes")
@@ -91,7 +97,7 @@ class StructuredNotesComponent(BaseComponent):
         Returns a structured list of note keys and pseudo-directories under the specified path.
         Leave path empty to list the root level.
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
                 cursor = conn.execute("SELECT key, LENGTH(value) FROM notes")
@@ -127,7 +133,7 @@ class StructuredNotesComponent(BaseComponent):
 
     def get_note(self, key: str) -> str:
         """Retrieves the contents of a specific note."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
                 cursor = conn.execute("SELECT value FROM notes WHERE key = ?", (key,))
@@ -141,7 +147,7 @@ class StructuredNotesComponent(BaseComponent):
             
     def put_note(self, key: str, value: str) -> str:
         """Creates or overwrites a note with the given key and value."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
                 conn.execute(
@@ -155,7 +161,7 @@ class StructuredNotesComponent(BaseComponent):
 
     def delete_note(self, key: str) -> str:
         """Deletes a note."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
                 conn.execute("DELETE FROM notes WHERE key = ?", (key,))
@@ -165,7 +171,7 @@ class StructuredNotesComponent(BaseComponent):
         
     def rename_note(self, old_key: str, new_key: str) -> str:
         """Renames or moves a note from old_key to new_key."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
                 # Check if old_key exists

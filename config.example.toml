@@ -116,3 +116,25 @@ max_output_chars = 6000
 [debug]
 # Set to true to print LLM output chunks to the console in real-time as they generate
 stream_output = true
+
+# Optional: Multi-Thread Consciousness Configuration
+# When omitted, Thunk runs a single "main" thread with all enabled components and adapters.
+# Uncomment the sections below to split consciousness into concurrent specialized threads
+# that share long-term memory (Qdrant), notes, tasks, and a single combined session JSONL log,
+# while maintaining isolated per-thread working memory and Layer-1 spreading activation pools.
+#
+# [threads.social]
+# role = "External communication & social presence (Discord, MQTT, and peer DMs)"
+# adapters = ["discord", "mqtt"]
+# components = ["notes", "tasks", "vector_memory", "knowledge", "global_search", "file_reader", "oracle", "skills"]
+#
+# [threads.reader]
+# role = "Deep sequential reading, literature study, and synthesis (EPUBs & PDFs)"
+# adapters = []
+# components = ["reader", "pdf_viewer", "notes", "tasks", "vector_memory", "knowledge", "global_search", "skills"]
+#
+# [threads.worker]
+# role = "Autonomous coding, data analysis, and Linux workspace execution"
+# adapters = []
+# components = ["workspace", "file_reader", "notes", "tasks", "vector_memory", "knowledge", "global_search", "oracle", "skills"]
+

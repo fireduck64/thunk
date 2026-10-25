@@ -12,8 +12,9 @@ from src.components.base import BaseComponent
 from src.utils.schema import function_to_schema
 
 class AgentCore:
-    def __init__(self):
+    def __init__(self, thread_id: str = "main"):
         self.config = load_config()
+        self.thread_id = (thread_id or "main").strip() or "main"
         agent_cfg = self.config.get("agent", {})
         if "name" not in agent_cfg or not agent_cfg["name"]:
             raise ValueError("AgentCore requires 'name' to be explicitly defined in config under [agent].name")
@@ -68,6 +69,7 @@ class AgentCore:
         self.event_bus.subscribe("context_window_check", component.on_event)
         self.event_bus.subscribe("before_llm_call", component.on_event)
         self.event_bus.subscribe("after_llm_call", component.on_event)
+        self.event_bus.subscribe("agent_suspended", component.on_event)
 
     def _build_system_prompt(self) -> str:
         """Aggregates all component system instructions."""
@@ -106,9 +108,12 @@ class AgentCore:
         return wire_messages
 
     def _clear_ephemeral_images(self) -> None:
-        """Strips transient base64 `_images` from working memory after they have been sent to the LLM once."""
-        for msg in self.messages:
-            msg.pop("_images", None)
+        """Strips transient base64 `_images` and transient presence footers from working memory after they have been sent to the LLM once."""
+        for idx in range(len(self.messages) - 1, -1, -1):
+            if self.messages[idx].get("_transient_presence"):
+                del self.messages[idx]
+            else:
+                self.messages[idx].pop("_images", None)
 
     def rebuild_system_prompt(self):
         """Rebuilds the system prompt (Index 0 of messages) using all current component states."""

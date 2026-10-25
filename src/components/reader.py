@@ -45,9 +45,15 @@ class SequentialReaderComponent(BaseComponent):
         self._init_db()
         self._load_state()
 
+    def _connect_db(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=5.0)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
+        return conn
+
     def _init_db(self):
         """Initializes the SQLite DB used to store the reader's state."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
                 conn.execute("""
@@ -106,7 +112,7 @@ class SequentialReaderComponent(BaseComponent):
         search_pattern = os.path.join(self.library_dir, "**", "*.epub")
         files = glob.glob(search_pattern, recursive=True)
 
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
                 rows = conn.execute("SELECT rel_path, mtime, label FROM book_metadata").fetchall()
@@ -146,7 +152,7 @@ class SequentialReaderComponent(BaseComponent):
         return sorted(catalog)
     def _save_state(self):
         """Saves the current bookmark to SQLite."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
                 conn.execute(
@@ -158,7 +164,7 @@ class SequentialReaderComponent(BaseComponent):
             conn.close()
     def _load_state(self):
         """Loads the bookmark from SQLite and rebuilds the text chunks if a book was open."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
                 cursor = conn.execute("SELECT current_book, current_index FROM reader_state WHERE id = 1")

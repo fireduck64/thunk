@@ -153,7 +153,7 @@ class VectorMemoryComponent(BaseComponent):
                 return self._embed_with_auto_split(text[:mid]) + self._embed_with_auto_split(text[mid:])
             raise
 
-    def save_semantic_memory(self, content: str) -> str:
+    def save_semantic_memory(self, content: str, **kwargs) -> str:
         """
         Saves a block of text into your personal semantic memory. 
         You can search for this later using meaning/concepts.
@@ -161,6 +161,10 @@ class VectorMemoryComponent(BaseComponent):
         print(f"[VectorMemory] Saving memory: {content[:50]}...")
         chunks = self._chunk_text(content)
         timestamp = datetime.utcnow().isoformat() + "Z"
+        extra_metadata = dict(kwargs.get("metadata") or {})
+        agent_thread_id = getattr(getattr(self, "agent", None), "thread_id", None)
+        if agent_thread_id and "thread_id" not in extra_metadata:
+            extra_metadata["thread_id"] = agent_thread_id
 
         for attempt in range(self.max_retries):
             try:
@@ -173,6 +177,7 @@ class VectorMemoryComponent(BaseComponent):
                         payload = {
                             "text": sub_chunk,
                             "timestamp": timestamp,
+                            **extra_metadata,
                         }
                         # Using UUID4 since agent memories don't need deterministic overwrites like RAG ingestion
                         point_id = str(uuid.uuid4())

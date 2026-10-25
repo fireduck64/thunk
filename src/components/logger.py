@@ -10,13 +10,20 @@ class AuditLogComponent(BaseComponent):
     Subscribes to all system events and writes a deterministic, 
     raw JSONL record of exactly what the system executed.
     """
-    def __init__(self, log_dir: str = None, verbose: bool = None):
+    def __init__(
+        self,
+        log_dir: str = None,
+        verbose: bool = None,
+        thread_id: str = "main",
+        log_file: str = None,
+    ):
+        self.thread_id = (thread_id or "main").strip() or "main"
         if log_dir is None:
             config = load_config()
             logging_cfg = config.get("logging", {})
-            if "log_dir" not in logging_cfg or not logging_cfg["log_dir"]:
+            if not log_file and ("log_dir" not in logging_cfg or not logging_cfg["log_dir"]):
                 raise ValueError("AuditLogComponent requires 'log_dir' to be explicitly defined in config under [logging].log_dir")
-            self.log_dir = logging_cfg["log_dir"]
+            self.log_dir = logging_cfg.get("log_dir") or (os.path.dirname(os.path.abspath(log_file)) if log_file else ".")
             if verbose is None:
                 self.verbose = logging_cfg.get("verbose", False)
             else:
@@ -25,12 +32,14 @@ class AuditLogComponent(BaseComponent):
             self.log_dir = log_dir
             self.verbose = verbose if verbose is not None else False
 
-        os.makedirs(self.log_dir, exist_ok=True)
-        
-        # Create a new log file for each session
-        session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.log_file = os.path.join(self.log_dir, f"session_{session_id}.jsonl")
-        print(f"[AuditLogger] Writing session log to {self.log_file}")
+        if log_file:
+            self.log_file = log_file
+            os.makedirs(os.path.dirname(os.path.abspath(self.log_file)), exist_ok=True)
+        else:
+            os.makedirs(self.log_dir, exist_ok=True)
+            session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.log_file = os.path.join(self.log_dir, f"session_{session_id}.jsonl")
+        print(f"[AuditLogger:{self.thread_id}] Writing session log to {self.log_file}")
 
     def _write_log(self, event_name: str, payload: Dict[str, Any]):
         """Helper to serialize and write an event to the JSONL file."""
@@ -91,8 +100,16 @@ class AuditLogComponent(BaseComponent):
                 else:
                     serializable_payload[k] = v
 
+            agent_obj = payload.get("agent") or getattr(self, "agent", None)
+            resolved_thread_id = (
+                payload.get("thread_id")
+                or getattr(agent_obj, "thread_id", None)
+                or self.thread_id
+                or "main"
+            )
             log_entry = {
                 "timestamp": datetime.utcnow().isoformat() + "Z",
+                "thread_id": resolved_thread_id,
                 "event": event_name,
                 "payload": serializable_payload
             }

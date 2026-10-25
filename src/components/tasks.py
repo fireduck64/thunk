@@ -21,8 +21,14 @@ class TaskQueueComponent(BaseComponent):
         os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
         self._init_db()
 
+    def _connect_db(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=5.0)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
+        return conn
+
     def _init_db(self):
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
                 conn.execute('''CREATE TABLE IF NOT EXISTS task_queue (
@@ -48,7 +54,7 @@ class TaskQueueComponent(BaseComponent):
 
     def add_task(self, description: str, priority: int) -> str:
         """Adds a task to your queue. Higher priority numbers are executed first."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
                 cursor = conn.execute(
@@ -66,7 +72,7 @@ class TaskQueueComponent(BaseComponent):
 
     def pop_highest_priority_task(self) -> str:
         """Removes and returns the highest priority task from the queue so you can work on it."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
                 cursor = conn.execute("SELECT id, priority, description FROM task_queue ORDER BY priority DESC, id ASC LIMIT 1")
@@ -85,7 +91,7 @@ class TaskQueueComponent(BaseComponent):
 
     def delete_task(self, task_id: int) -> str:
         """Deletes a specific task from the queue by its ID number."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
                 cursor = conn.execute(
@@ -106,7 +112,7 @@ class TaskQueueComponent(BaseComponent):
 
     def list_tasks(self) -> str:
         """Returns the top 10 highest priority tasks currently in the queue, including each task's ID."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
                 cursor = conn.execute("SELECT id, priority, description FROM task_queue ORDER BY priority DESC, id ASC LIMIT 10")

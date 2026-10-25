@@ -50,8 +50,14 @@ class PdfViewerComponent(BaseComponent):
         self._init_db()
         self._load_state()
 
+    def _connect_db(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=5.0)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
+        return conn
+
     def _init_db(self):
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
                 conn.execute("""
@@ -78,7 +84,7 @@ class PdfViewerComponent(BaseComponent):
             conn.close()
 
     def _save_state(self):
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
                 conn.execute(
@@ -89,7 +95,7 @@ class PdfViewerComponent(BaseComponent):
             conn.close()
 
     def _load_state(self):
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
                 row = conn.execute(
@@ -132,7 +138,7 @@ class PdfViewerComponent(BaseComponent):
         search_pattern = os.path.join(self.library_dir, "**", "*.pdf")
         files = glob.glob(search_pattern, recursive=True)
 
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
                 rows = conn.execute("SELECT rel_path, mtime, label FROM pdf_metadata").fetchall()

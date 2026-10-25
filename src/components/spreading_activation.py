@@ -39,9 +39,11 @@ class SpreadingActivationComponent(BaseComponent):
         layer_0_promotion_count: int = None,
         db_path: str = None,
         persist: bool = True,
+        thread_id: str = "main",
     ):
         self.config = load_config()
         self.agent_name = self.config.get("agent", {}).get("name", "Thunk")
+        self.thread_id = (thread_id or "main").strip() or "main"
         sub_cfg = self.config.get("subconscious", {})
         sa_cfg = self.config.get("spreading_activation", {})
         llm_cfg = self.config.get("llm", {})
@@ -90,35 +92,75 @@ class SpreadingActivationComponent(BaseComponent):
             self._init_db()
             self._load_pool_from_db()
 
+    def _connect_db(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=5.0)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
+        return conn
+
     def _init_db(self) -> None:
         if not self.persist:
             return
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS layer_1_pool (
-                        id TEXT PRIMARY KEY,
-                        content TEXT,
-                        metadata TEXT,
-                        hits INTEGER,
-                        age INTEGER,
-                        last_similarity REAL,
-                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                table_exists = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='layer_1_pool'"
+                ).fetchone()
+                if table_exists:
+                    cols = [row[1] for row in conn.execute("PRAGMA table_info(layer_1_pool)").fetchall()]
+                    if "thread_id" not in cols:
+                        conn.execute("ALTER TABLE layer_1_pool RENAME TO layer_1_pool_legacy")
+                        conn.execute(
+                            """
+                            CREATE TABLE layer_1_pool (
+                                thread_id TEXT NOT NULL DEFAULT 'main',
+                                id TEXT NOT NULL,
+                                content TEXT,
+                                metadata TEXT,
+                                hits INTEGER,
+                                age INTEGER,
+                                last_similarity REAL,
+                                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                                PRIMARY KEY (thread_id, id)
+                            )
+                            """
+                        )
+                        conn.execute(
+                            """
+                            INSERT OR IGNORE INTO layer_1_pool (thread_id, id, content, metadata, hits, age, last_similarity, updated_at)
+                            SELECT 'main', id, content, metadata, hits, age, last_similarity, updated_at
+                            FROM layer_1_pool_legacy
+                            """
+                        )
+                        conn.execute("DROP TABLE layer_1_pool_legacy")
+                else:
+                    conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS layer_1_pool (
+                            thread_id TEXT NOT NULL DEFAULT 'main',
+                            id TEXT NOT NULL,
+                            content TEXT,
+                            metadata TEXT,
+                            hits INTEGER,
+                            age INTEGER,
+                            last_similarity REAL,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            PRIMARY KEY (thread_id, id)
+                        )
+                        """
                     )
-                    """
-                )
         finally:
             conn.close()
 
     def _load_pool_from_db(self) -> None:
         if not self.persist:
             return
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             rows = conn.execute(
-                "SELECT id, content, metadata, hits, age, last_similarity FROM layer_1_pool"
+                "SELECT id, content, metadata, hits, age, last_similarity FROM layer_1_pool WHERE thread_id = ?",
+                (self.thread_id,),
             ).fetchall()
             for row_id, content, meta_json, hits, age, last_sim in rows:
                 try:
@@ -140,17 +182,18 @@ class SpreadingActivationComponent(BaseComponent):
     def _save_pool_to_db(self) -> None:
         if not self.persist:
             return
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect_db()
         try:
             with conn:
-                conn.execute("DELETE FROM layer_1_pool")
+                conn.execute("DELETE FROM layer_1_pool WHERE thread_id = ?", (self.thread_id,))
                 conn.executemany(
                     """
-                    INSERT INTO layer_1_pool (id, content, metadata, hits, age, last_similarity)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO layer_1_pool (thread_id, id, content, metadata, hits, age, last_similarity)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
+                            self.thread_id,
                             item.id,
                             item.content,
                             json.dumps(item.metadata),
