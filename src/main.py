@@ -67,7 +67,7 @@ def _register_thread_components(
     if sub_mode == "spreading_activation" or sa_enabled:
         agent.register_component(SpreadingActivationComponent(thread_id=thread_id))
     else:
-        agent.register_component(SubconsciousRecallComponent())
+        agent.register_component(SubconsciousRecallComponent(thread_id=thread_id))
 
     agent.register_component(ClockComponent())
     agent.register_component(DirectivesComponent())
@@ -97,9 +97,9 @@ def _register_thread_components(
     if _wants("notes", "structured_notes", "structurednotescomponent"):
         agent.register_component(StructuredNotesComponent())
     if _wants("knowledge", "knowledge_base", "knowledgebasecomponent"):
-        agent.register_component(KnowledgeBaseComponent())
+        agent.register_component(KnowledgeBaseComponent(thread_id=thread_id))
     if _wants("vector_memory", "vectormemorycomponent"):
-        agent.register_component(VectorMemoryComponent())
+        agent.register_component(VectorMemoryComponent(thread_id=thread_id))
     if _wants("reader", "sequential_reader", "sequentialreadercomponent"):
         agent.register_component(SequentialReaderComponent())
     if _wants("pdf_viewer", "pdf", "pdfviewercomponent"):

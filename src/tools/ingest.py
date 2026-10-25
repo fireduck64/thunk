@@ -13,9 +13,9 @@ from qdrant_client.models import VectorParams, Distance, PointStruct
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from src.utils.config import load_config, set_config_path
 
-def get_embedding(text: str, ollama_url: str, embedding_model: str, api_key: str, agent_name: str = "Thunk") -> list[float]:
+def get_embedding(text: str, ollama_url: str, embedding_model: str, api_key: str, agent_name: str = "Thunk", thread_id: str = "main") -> list[float]:
     """Calls Ollama to convert text into a vector (list of floats)."""
-    headers = {"X-Agent-ID": f"{agent_name}-ingest"}
+    headers = {"X-Agent-ID": f"{agent_name}-{thread_id}-ingest"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
         

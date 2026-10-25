@@ -81,12 +81,13 @@ class CriticComponent(BaseComponent):
             # We use the main agent's client, but we don't give the critic access to tools
             # or the full context window. It just acts as a pure text-in text-out evaluator.
             agent_name = getattr(self.agent, "name", None) or self.config.get("agent", {}).get("name", "Thunk")
+            thread_id = getattr(self.agent, "thread_id", None) or "main"
             response_stream = await self.agent.client.chat.completions.create(
                 model=self.agent.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7, # Add a bit of creativity so feelings aren't always identical
                 max_tokens=self.max_output_tokens,
-                extra_headers={"X-Agent-ID": f"{agent_name}-critic"},
+                extra_headers={"X-Agent-ID": f"{agent_name}-{thread_id}-critic"},
                 stream=True
             )
             message = await self.agent._accumulate_stream(response_stream)

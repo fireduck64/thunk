@@ -29,7 +29,7 @@ class AgentCore:
         self.client = AsyncOpenAI(
             base_url=self.config["llm"]["api_url"],
             api_key=self.config["llm"]["api_key"],
-            default_headers={"X-Agent-ID": f"{self.name}-core"},
+            default_headers={"X-Agent-ID": f"{self.name}-{self.thread_id}-core"},
             timeout=httpx.Timeout(None)
         )
         self.model = self.config["llm"]["model_name"]

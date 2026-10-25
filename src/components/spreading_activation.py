@@ -81,7 +81,7 @@ class SpreadingActivationComponent(BaseComponent):
         self.client = AsyncOpenAI(
             base_url=self.api_url,
             api_key=self.api_key,
-            default_headers={"X-Agent-ID": f"{self.agent_name}-spreading_activation"},
+            default_headers={"X-Agent-ID": f"{self.agent_name}-{self.thread_id}-spreading_activation"},
             timeout=httpx.Timeout(None),
         )
         self.internal_memory_components: List[Any] = []

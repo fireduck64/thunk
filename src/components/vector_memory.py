@@ -15,9 +15,10 @@ class VectorMemoryComponent(BaseComponent):
     Allows the agent to save unstructured thoughts, lore, and facts, 
     and retrieve them later using semantic search.
     """
-    def __init__(self, collection_name: str = None):
+    def __init__(self, collection_name: str = None, thread_id: str = "main"):
         self.config = load_config()
         self.agent_name = self.config.get("agent", {}).get("name", "Thunk")
+        self.thread_id = (thread_id or "main").strip() or "main"
         self.host = self.config["vectordb"]["host"]
         self.port = self.config["vectordb"]["port"]
         
@@ -115,7 +116,8 @@ class VectorMemoryComponent(BaseComponent):
     def _get_embedding(self, text: str) -> list[float]:
         """Helper to call the embeddings API."""
         agent_name = getattr(getattr(self, "agent", None), "name", None) or getattr(self, "agent_name", "Thunk")
-        headers = {"X-Agent-ID": f"{agent_name}-vector_memory"}
+        thread_id = getattr(getattr(self, "agent", None), "thread_id", None) or getattr(self, "thread_id", "main") or "main"
+        headers = {"X-Agent-ID": f"{agent_name}-{thread_id}-vector_memory"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
             

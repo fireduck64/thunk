@@ -13,9 +13,10 @@ class SubconsciousRecallComponent(BaseComponent):
     synthesizes and filters the candidates using a lightweight LLM (e.g. gemma4:e2b),
     and quietly prepends relevant associative recall to the LLM's context window.
     """
-    def __init__(self):
+    def __init__(self, thread_id: str = "main"):
         self.config = load_config()
         self.agent_name = self.config.get("agent", {}).get("name", "Thunk")
+        self.thread_id = (thread_id or "main").strip() or "main"
         sub_cfg = self.config.get("subconscious", {})
         llm_cfg = self.config.get("llm", {})
 
@@ -28,7 +29,7 @@ class SubconsciousRecallComponent(BaseComponent):
         self.client = AsyncOpenAI(
             base_url=self.api_url,
             api_key=self.api_key,
-            default_headers={"X-Agent-ID": f"{self.agent_name}-subconscious"},
+            default_headers={"X-Agent-ID": f"{self.agent_name}-{self.thread_id}-subconscious"},
             timeout=httpx.Timeout(None)
         )
         self.internal_memory_components = []

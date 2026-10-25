@@ -9,9 +9,10 @@ class KnowledgeBaseComponent(BaseComponent):
     Provides the agent with access to a Vector Database (Qdrant) 
     containing ingested documents (like EPUBs).
     """
-    def __init__(self):
+    def __init__(self, thread_id: str = "main"):
         self.config = load_config()
         self.agent_name = self.config.get("agent", {}).get("name", "Thunk")
+        self.thread_id = (thread_id or "main").strip() or "main"
         self.host = self.config["vectordb"]["host"]
         self.port = self.config["vectordb"]["port"]
         
@@ -45,7 +46,8 @@ class KnowledgeBaseComponent(BaseComponent):
     def _get_embedding(self, text: str) -> list[float]:
         """Helper to call the embeddings API."""
         agent_name = getattr(getattr(self, "agent", None), "name", None) or getattr(self, "agent_name", "Thunk")
-        headers = {"X-Agent-ID": f"{agent_name}-knowledge"}
+        thread_id = getattr(getattr(self, "agent", None), "thread_id", None) or getattr(self, "thread_id", "main") or "main"
+        headers = {"X-Agent-ID": f"{agent_name}-{thread_id}-knowledge"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
             

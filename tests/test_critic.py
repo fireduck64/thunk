@@ -118,7 +118,7 @@ def test_discord_expand_user_and_role_mentions():
 
 @pytest.mark.asyncio
 async def test_x_agent_id_headers(monkeypatch):
-    """Verifies X-Agent-ID: <agent_name>-<component> headers are attached on all LLM and embedding clients/requests."""
+    """Verifies X-Agent-ID: <agent_name>-<thread_name>-<component> headers are attached on all LLM and embedding clients/requests."""
     import requests
     from src.core.agent import AgentCore
     from src.components.subconscious import SubconsciousRecallComponent
@@ -127,13 +127,16 @@ async def test_x_agent_id_headers(monkeypatch):
     from src.components.knowledge import KnowledgeBaseComponent
 
     agent = AgentCore()
-    assert agent.client.default_headers.get("X-Agent-ID") == f"{agent.name}-core"
+    assert agent.client.default_headers.get("X-Agent-ID") == f"{agent.name}-main-core"
 
-    sub = SubconsciousRecallComponent()
-    assert sub.client.default_headers.get("X-Agent-ID") == f"{agent.name}-subconscious"
+    reader_agent = AgentCore(thread_id="reader")
+    assert reader_agent.client.default_headers.get("X-Agent-ID") == f"{reader_agent.name}-reader-core"
 
-    sa = SpreadingActivationComponent(persist=False)
-    assert sa.client.default_headers.get("X-Agent-ID") == f"{agent.name}-spreading_activation"
+    sub = SubconsciousRecallComponent(thread_id="social")
+    assert sub.client.default_headers.get("X-Agent-ID") == f"{agent.name}-social-subconscious"
+
+    sa = SpreadingActivationComponent(persist=False, thread_id="reader")
+    assert sa.client.default_headers.get("X-Agent-ID") == f"{agent.name}-reader-spreading_activation"
 
     # Critic extra_headers check
     captured_critic_kwargs = {}
@@ -147,17 +150,16 @@ async def test_x_agent_id_headers(monkeypatch):
             return "stream"
 
     critic = CriticComponent(frequency=1)
-    agent.register_component(critic)
-    agent.messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": "hello"}]
-    monkeypatch.setattr(agent.client.chat, "completions", DummyCompletions())
-    monkeypatch.setattr(agent, "_accumulate_stream", lambda s: DummyMsg())
+    reader_agent.register_component(critic)
+    reader_agent.messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": "hello"}]
+    monkeypatch.setattr(reader_agent.client.chat, "completions", DummyCompletions())
 
     async def mock_acc(s):
         return DummyMsg()
 
-    agent._accumulate_stream = mock_acc
+    reader_agent._accumulate_stream = mock_acc
     await critic._evaluate_progress()
-    assert captured_critic_kwargs.get("extra_headers") == {"X-Agent-ID": f"{agent.name}-critic"}
+    assert captured_critic_kwargs.get("extra_headers") == {"X-Agent-ID": f"{reader_agent.name}-reader-critic"}
 
     # Embeddings requests.post headers check
     captured_headers = []
@@ -176,13 +178,13 @@ async def test_x_agent_id_headers(monkeypatch):
     monkeypatch.setattr(requests, "post", fake_post)
     monkeypatch.setattr(VectorMemoryComponent, "_ensure_collection", lambda self: None)
 
-    vm = VectorMemoryComponent(collection_name="test_agent_memory")
+    vm = VectorMemoryComponent(collection_name="test_agent_memory", thread_id="worker")
     vm._get_embedding("hello")
-    assert captured_headers[-1].get("X-Agent-ID") == f"{agent.name}-vector_memory"
+    assert captured_headers[-1].get("X-Agent-ID") == f"{agent.name}-worker-vector_memory"
 
-    kb = KnowledgeBaseComponent()
+    kb = KnowledgeBaseComponent(thread_id="reader")
     kb._get_embedding("world")
-    assert captured_headers[-1].get("X-Agent-ID") == f"{agent.name}-knowledge"
+    assert captured_headers[-1].get("X-Agent-ID") == f"{agent.name}-reader-knowledge"
 
 
 @pytest.mark.asyncio
