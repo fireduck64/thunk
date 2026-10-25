@@ -79,10 +79,12 @@ knowledge_collection = "knowledge_base"  # Static external knowledge collection 
 memory_collection = "agent_memory"       # Agent's personal episodic and semantic memory collection (REQUIRED)
 
 [mqtt]
-# MQTT broker for external event streaming and operator notifications
+# MQTT broker for system inbox notifications, peer direct messaging, and presence discovery
 host = "localhost"
 port = 1883
 inbox_topic = "thunk/agent/inbox"
+dm_topic = "thunk/agent/dm"
+presence_topic = "thunk/agent/presence"
 outbox_topic = "thunk/agent/outbox"
 
 [discord]

@@ -185,5 +185,78 @@ async def test_x_agent_id_headers(monkeypatch):
     assert captured_headers[-1].get("X-Agent-ID") == f"{agent.name}-knowledge"
 
 
+@pytest.mark.asyncio
+async def test_mqtt_direct_messaging_system_inbox_and_presence():
+    """Verifies MQTT system inbox, JSON DM wrapper + retained-until-consumed clearing, and +/agent/presence discovery."""
+    import json
+    from src.core.agent import AgentCore
+    from src.components.system import SystemComponent
+    from src.adapters.mqtt import MQTTAdapter
+
+    agent = AgentCore()
+    sys_comp = SystemComponent()
+    agent.register_component(sys_comp)
+    mqtt_adapter = MQTTAdapter(agent)
+    agent.event_bus.subscribe("send_to_operator", mqtt_adapter._on_send_to_operator)
+
+    published = []
+
+    class DummyMqttClient:
+        async def publish(self, topic, payload, qos=0, retain=False):
+            published.append((topic, payload, qos, retain))
+
+    mqtt_adapter.client = DummyMqttClient()
+
+    # 1. Sending via mqtt without recipient returns an error
+    err_res = await sys_comp.send_message("Hello?", medium="mqtt")
+    assert "Recipient is required" in err_res
+    assert len(published) == 0
+
+    # 2. Sending via mqtt with recipient wraps JSON {"sender", "text"} with qos=1, retain=True to <recipient>/agent/dm
+    ok_res = await sys_comp.send_message("Meet at the tower", medium="mqtt", recipient="Wisp")
+    assert "Direct message sent successfully via mqtt to 'Wisp' (wisp/agent/dm)" in ok_res
+    assert len(published) == 1
+    topic, payload_bytes, qos, retain = published[0]
+    assert topic == "wisp/agent/dm"
+    assert qos == 1
+    assert retain is True
+    assert json.loads(payload_bytes.decode("utf-8")) == {
+        "sender": agent.name,
+        "text": "Meet at the tower",
+    }
+
+    # 3. Presence discovery populates list_mqtt_agents
+    await mqtt_adapter._handle_message(
+        "stuffleupagus/agent/presence",
+        json.dumps({"agent": "Stuffleupagus", "status": "online", "dm_topic": "stuffleupagus/agent/dm"}),
+        retain=True,
+    )
+    agents_list = sys_comp.list_mqtt_agents()
+    assert "Stuffleupagus (recipient='stuffleupagus', status=online, dm_topic='stuffleupagus/agent/dm')" in agents_list
+
+    # 4. Incoming DM clears retained message (b"", qos=1, retain=True) and resumes agent with formatted DM
+    published.clear()
+    await mqtt_adapter._handle_message(
+        mqtt_adapter.dm_topic,
+        json.dumps({"sender": "Wisp", "text": "The clacks are live!"}),
+        retain=True,
+    )
+    assert published == [(mqtt_adapter.dm_topic, b"", 1, True)]
+    inbox_msg = await agent.inbox.get()
+    assert inbox_msg == "[Via MQTT | DM from Wisp] The clacks are live!"
+
+    # Empty retained-clear payload on dm_topic is ignored
+    await mqtt_adapter._handle_message(mqtt_adapter.dm_topic, "", retain=True)
+    assert agent.inbox.empty()
+
+    # 5. Incoming unformatted system inbox message wakes agent as [Via MQTT | System]
+    published.clear()
+    await mqtt_adapter._handle_message(mqtt_adapter.inbox_topic, "clock notification\nFri Oct 23", retain=True)
+    assert published == [(mqtt_adapter.inbox_topic, b"", 1, True)]
+    sys_msg = await agent.inbox.get()
+    assert sys_msg == "[Via MQTT | System] clock notification\nFri Oct 23"
+
+
+
 
 
