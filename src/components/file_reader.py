@@ -1,4 +1,5 @@
 import glob
+import io
 import json
 import os
 import re
@@ -10,7 +11,6 @@ from bs4 import BeautifulSoup
 from ebooklib import epub
 import fitz
 from PIL import Image
-import io
 
 from src.components.base import BaseComponent
 from src.utils.config import load_config
@@ -26,13 +26,20 @@ LIBRARY_ALIASES = {
     "discord_images": "discord_file",
     "discord_files": "discord_file",
     "discord_file": "discord_images",
+    "gutenburg": "gutenberg",
+    "project_gutenberg": "gutenberg",
 }
+
+GUTINDEX_ENTRY_RE = re.compile(r"^(\S.+?)\s{2,}(\d+)C?\s*$")
+MAX_WALK_FILES_PER_LIBRARY = 10000
+MAX_DIR_LIST_ENTRIES = 100
 
 
 class FileReaderComponent(BaseComponent):
     """
-    Unified file, document (EPUB/PDF), and image reader across all configured libraries.
-    Maintains persistent reading bookmark state in SQLite for sequential EPUB/PDF reading.
+    Unified file, document (EPUB/PDF/Gutenberg text), and image reader across all configured libraries.
+    Supports cross-library search (`library='all'`) and zero-walk Project Gutenberg indexing via GUTINDEX.ALL.
+    Maintains persistent reading bookmark state in SQLite for sequential reading via `read_next_chunk()`.
     """
 
     def __init__(
@@ -47,7 +54,6 @@ class FileReaderComponent(BaseComponent):
 
         if libraries is None:
             raw_libs = dict(file_cfg.get("libraries") or {})
-            # Fallback support if legacy [reader] or [pdf_viewer] sections exist
             legacy_ebook = self.config.get("reader", {}).get("library_dir")
             if legacy_ebook and "ebook" not in raw_libs and "ebooks" not in raw_libs:
                 raw_libs["ebook"] = legacy_ebook
@@ -144,6 +150,25 @@ class FileReaderComponent(BaseComponent):
                     """
                 )
                 conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS gutenberg_meta (
+                        library TEXT PRIMARY KEY,
+                        gutindex_mtime REAL,
+                        entry_count INTEGER
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS gutenberg_catalog (
+                        library TEXT NOT NULL,
+                        ebook_id INTEGER NOT NULL,
+                        description TEXT NOT NULL,
+                        PRIMARY KEY (library, ebook_id)
+                    )
+                    """
+                )
+                conn.execute(
                     "INSERT OR IGNORE INTO reader_state (id, current_book, current_index, current_library, current_rel_path) "
                     "VALUES (1, NULL, 0, NULL, NULL)"
                 )
@@ -214,6 +239,8 @@ class FileReaderComponent(BaseComponent):
                 self.current_book_label = self._format_pdf_label(
                     self.current_book, self.current_rel_path or os.path.basename(self.current_book)
                 )
+            else:
+                self.current_book_label = self.current_rel_path or os.path.basename(self.current_book)
 
     def _resolve_library_name(self, library: str) -> str:
         clean = (library or "").strip()
@@ -235,10 +262,163 @@ class FileReaderComponent(BaseComponent):
             clean = clean.split("[path: ", 1)[1][:-1].strip()
         return clean
 
+    # --- Project Gutenberg Catalog & Path Helpers ---
+
+    @staticmethod
+    def _gutenberg_id_to_dir(ebook_id: int) -> str:
+        eid = int(ebook_id)
+        if eid < 10:
+            return f"0/{eid}"
+        s = str(eid)
+        return "/".join(list(s[:-1]) + [s])
+
+    def _resolve_gutenberg_book_rel_path(self, base_dir: str, ebook_id: int) -> str:
+        book_dir = self._gutenberg_id_to_dir(ebook_id)
+        abs_book_dir = os.path.join(base_dir, book_dir)
+        if not os.path.isdir(abs_book_dir):
+            return f"{book_dir}/{ebook_id}-0.txt"
+
+        try:
+            entries = sorted(os.listdir(abs_book_dir))
+        except OSError:
+            return f"{book_dir}/{ebook_id}-0.txt"
+
+        # Prefer UTF-8 text, then standard text, then EPUB, then HTML subdir
+        preferred_names = [f"{ebook_id}-0.txt", f"{ebook_id}-8.txt", f"{ebook_id}.txt"]
+        for cand in preferred_names:
+            if cand in entries and os.path.isfile(os.path.join(abs_book_dir, cand)):
+                return f"{book_dir}/{cand}"
+
+        for entry in entries:
+            lower = entry.lower()
+            if (lower.endswith(".txt") or lower.endswith(".epub")) and lower != "license.txt":
+                if os.path.isfile(os.path.join(abs_book_dir, entry)):
+                    return f"{book_dir}/{entry}"
+
+        html_dir = os.path.join(abs_book_dir, f"{ebook_id}-h")
+        if os.path.isdir(html_dir):
+            for h_cand in (f"{ebook_id}-h.htm", f"{ebook_id}-h.html"):
+                if os.path.isfile(os.path.join(html_dir, h_cand)):
+                    return f"{book_dir}/{ebook_id}-h/{h_cand}"
+
+        return book_dir
+
+    @staticmethod
+    def _parse_gutindex_file(gutindex_path: str) -> List[Tuple[int, str]]:
+        entries_by_id: Dict[int, str] = {}
+        current_id: Optional[int] = None
+        current_lines: List[str] = []
+
+        with open(gutindex_path, "r", encoding="utf-8", errors="replace") as f:
+            for raw_line in f:
+                line = raw_line.rstrip("\r\n")
+                if "<==End of GUTINDEX.ALL==>" in line:
+                    break
+                m = GUTINDEX_ENTRY_RE.match(line)
+                if m:
+                    if current_id is not None and current_id not in entries_by_id:
+                        entries_by_id[current_id] = " ".join(current_lines)
+                    title_part, ebook_id = m.group(1).strip(), int(m.group(2))
+                    current_id = ebook_id
+                    current_lines = [title_part]
+                elif current_id is not None:
+                    if line.startswith(" ") and line.strip():
+                        current_lines.append(line.strip())
+                    else:
+                        if current_id not in entries_by_id:
+                            entries_by_id[current_id] = " ".join(current_lines)
+                        current_id = None
+                        current_lines = []
+            if current_id is not None and current_id not in entries_by_id:
+                entries_by_id[current_id] = " ".join(current_lines)
+
+        return list(entries_by_id.items())
+
+    def _ensure_gutenberg_catalog(self, library: str, base_dir: str) -> bool:
+        gutindex_path = os.path.join(base_dir, "GUTINDEX.ALL")
+        if not os.path.isfile(gutindex_path):
+            return False
+
+        try:
+            mtime = os.path.getmtime(gutindex_path)
+        except OSError:
+            return False
+
+        conn = self._connect_db()
+        try:
+            with conn:
+                row = conn.execute(
+                    "SELECT gutindex_mtime, entry_count FROM gutenberg_meta WHERE library = ?",
+                    (library,),
+                ).fetchone()
+                if row and row[0] == mtime and (row[1] or 0) > 0:
+                    return True
+
+            print(f"[FileReader] Indexing Project Gutenberg catalog from '{gutindex_path}'...")
+            parsed = self._parse_gutindex_file(gutindex_path)
+            with conn:
+                conn.execute("DELETE FROM gutenberg_catalog WHERE library = ?", (library,))
+                conn.executemany(
+                    "INSERT OR REPLACE INTO gutenberg_catalog (library, ebook_id, description) VALUES (?, ?, ?)",
+                    [(library, eid, desc) for eid, desc in parsed],
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO gutenberg_meta (library, gutindex_mtime, entry_count) VALUES (?, ?, ?)",
+                    (library, mtime, len(parsed)),
+                )
+            print(f"[FileReader] Indexed {len(parsed)} Project Gutenberg entries for library '{library}'.")
+            return True
+        finally:
+            conn.close()
+
+    def _search_gutenberg_catalog(self, library: str, base_dir: str, terms: List[str], limit: int = 50) -> List[str]:
+        if not self._ensure_gutenberg_catalog(library, base_dir):
+            return []
+
+        where_clauses = []
+        params: List[Any] = [library]
+        for term in terms:
+            if term.lstrip("#").isdigit():
+                where_clauses.append("(CAST(ebook_id AS TEXT) = ? OR lower(description) LIKE ?)")
+                params.extend([term.lstrip("#"), f"%{term}%"])
+            else:
+                where_clauses.append("lower(description) LIKE ?")
+                params.append(f"%{term}%")
+
+        sql = (
+            "SELECT ebook_id, description FROM gutenberg_catalog "
+            f"WHERE library = ? AND {' AND '.join(where_clauses)} "
+            "ORDER BY ebook_id ASC LIMIT ?"
+        )
+        params.append(limit + 1)
+
+        conn = self._connect_db()
+        try:
+            rows = conn.execute(sql, params).fetchall()
+        finally:
+            conn.close()
+
+        results = []
+        for eid, desc in rows[:limit]:
+            rel_path = self._resolve_gutenberg_book_rel_path(base_dir, int(eid))
+            results.append(f"{desc} (#{eid}) [path: {rel_path}]")
+        if len(rows) > limit:
+            results.append(f"... and more matches in '{library}'. Please refine your query.")
+        return results
+
     def _resolve_and_check_path(self, library: str, rel_path: str) -> Tuple[str, str, str]:
         resolved_lib = self._resolve_library_name(library)
         base_dir = self.libraries[resolved_lib]
         cleaned_rel = self._clean_filepath_arg(rel_path)
+
+        # If this is a Gutenberg library and the caller passed an eBook ID (e.g. "1342" or "#1342"), resolve it
+        if os.path.isfile(os.path.join(base_dir, "GUTINDEX.ALL")):
+            id_candidate = cleaned_rel.lstrip("#").strip()
+            if id_candidate.isdigit() and int(id_candidate) >= 1:
+                # Only treat single-digit 0..9 as a directory when listing, or book ID when >= 10 / prefixed with #
+                if cleaned_rel.startswith("#") or int(id_candidate) >= 10:
+                    cleaned_rel = self._resolve_gutenberg_book_rel_path(base_dir, int(id_candidate))
+
         safe_rel_path = cleaned_rel.lstrip(os.sep) if cleaned_rel else ""
         abs_path = os.path.abspath(os.path.join(base_dir, safe_rel_path))
 
@@ -367,11 +547,12 @@ class FileReaderComponent(BaseComponent):
             "--- UNIFIED FILE, BOOK, PDF & IMAGE READER ---\n"
             f"You have access to a unified file and media reader across libraries: {libs_str}.\n"
             "- Use `list_libraries()` to see all mounted library directories.\n"
-            "- Use `list_files(library, path='', query='')` to list files/directories or search by title/author/filename across a library.\n"
-            "- Use `read_file(library, filepath, chunk=1)` to read any file (EPUB books, PDF documents, or text/code files). "
+            "- Use `list_files(library='all', path='', query='')` to list files/directories in a specific library, "
+            "or pass `query` (with `library='all'` or a specific library name like `'gutenberg'` or `'ebook'`) to search by title, author, or filename across libraries.\n"
+            "- Use `read_file(library, filepath, chunk=1)` to read any file (EPUB books, PDF documents, Project Gutenberg `.txt` books, or code files). "
             "It returns the requested chunk/page along with `total_chunks` (or `total_pages`) and a `next_hint`.\n"
-            "- Use `read_next_chunk()` to advance and read the next chunk or page of the most recently read EPUB or PDF.\n"
-            "- Use `view_image(library, filepath, chunk=1)` to visually inspect an image file (e.g., in `discord_file`) "
+            "- Use `read_next_chunk()` to advance and read the next chunk or page of the most recently read book or document.\n"
+            "- Use `view_image(library, filepath, chunk=1)` to visually inspect an image file (e.g., in `discord_file` or `workspace`) "
             "or render page `chunk` of a PDF into your visual context."
         )
         if self.current_book and os.path.exists(self.current_book):
@@ -383,8 +564,10 @@ class FileReaderComponent(BaseComponent):
             elif ext == ".pdf":
                 _, _, total_pages = self._extract_pdf_metadata(self.current_book)
                 prompt += f"\n[Reader Status: Active PDF is '{label}' (library '{self.current_library}') at page {self.current_index}/{max(1, total_pages)}.]"
+            else:
+                prompt += f"\n[Reader Status: Active document is '{label}' (library '{self.current_library}') at chunk {self.current_index}.]"
         else:
-            prompt += "\n[Reader Status: No active EPUB or PDF bookmark.]"
+            prompt += "\n[Reader Status: No active book or document bookmark.]"
         return prompt
 
     def get_tools(self) -> List[Callable]:
@@ -408,33 +591,71 @@ class FileReaderComponent(BaseComponent):
             result += f"- {name}: mounted at {path}\n"
         return result
 
-    def list_files(self, library: str, path: str = "", query: str = "") -> str:
+    def _search_single_library(self, lib_name: str, target_path: str, terms: List[str], limit: int = 50) -> List[str]:
+        base_dir = self.libraries[lib_name]
+        if target_path == base_dir and os.path.isfile(os.path.join(base_dir, "GUTINDEX.ALL")):
+            return self._search_gutenberg_catalog(lib_name, base_dir, terms, limit=limit)
+
+        matches: List[str] = []
+        walked_files = 0
+        for root, _, files in os.walk(target_path):
+            for fname in sorted(files):
+                walked_files += 1
+                if walked_files > MAX_WALK_FILES_PER_LIBRARY:
+                    matches.append(
+                        f"... search stopped after scanning {MAX_WALK_FILES_PER_LIBRARY} files in '{lib_name}'."
+                    )
+                    return matches
+                abs_f = os.path.join(root, fname)
+                rel_f = os.path.relpath(abs_f, base_dir)
+                label = self._get_cached_file_label(abs_f, rel_f)
+                if all(term in label.lower() or term in rel_f.lower() for term in terms):
+                    matches.append(label)
+                    if len(matches) >= limit:
+                        matches.append(f"... and more matches in '{lib_name}'. Please refine your query.")
+                        return matches
+        return matches
+
+    def list_files(self, library: str = "all", path: str = "", query: str = "") -> str:
         """
-        Lists files and directories inside a specified library, or searches recursively
-        by filename, book title, or author when 'query' is provided.
+        Lists files and directories inside a specified library, or searches by filename,
+        book title, or author when 'query' is provided. Pass library='all' with a 'query'
+        to search across all configured libraries simultaneously.
         """
         try:
-            resolved_lib, target_path, rel_base = self._resolve_and_check_path(library, path)
+            clean_lib = (library or "all").strip()
+            clean_query = (query or "").strip()
+
+            # Cross-library search when library is 'all' / '*' / empty
+            if clean_lib.lower() in ("all", "*", ""):
+                if not clean_query:
+                    return self.list_libraries()
+                terms = [t for t in re.split(r"[\s,]+", clean_query.lower()) if t]
+                if not terms:
+                    return self.list_libraries()
+
+                combined_matches = []
+                for lib_name, base_dir in self.libraries.items():
+                    if not os.path.exists(base_dir):
+                        continue
+                    sub_matches = self._search_single_library(lib_name, base_dir, terms, limit=25)
+                    for m in sub_matches:
+                        combined_matches.append(f"- [{lib_name}] {m}")
+                if not combined_matches:
+                    return f"No files matching '{clean_query}' found across any library."
+                return f"Cross-library search results for '{clean_query}':\n" + "\n".join(combined_matches[:75])
+
+            resolved_lib, target_path, rel_base = self._resolve_and_check_path(clean_lib, path)
             base_dir = self.libraries[resolved_lib]
 
             if not os.path.exists(target_path):
                 return f"Error: Path '{path}' does not exist in library '{resolved_lib}'."
 
-            clean_query = (query or "").strip()
             if clean_query:
                 terms = [t for t in re.split(r"[\s,]+", clean_query.lower()) if t]
-                matches = []
-                for root, _, files in os.walk(target_path):
-                    for fname in sorted(files):
-                        abs_f = os.path.join(root, fname)
-                        rel_f = os.path.relpath(abs_f, base_dir)
-                        label = self._get_cached_file_label(abs_f, rel_f)
-                        if all(term in label.lower() or term in rel_f.lower() for term in terms):
-                            matches.append(label)
+                matches = self._search_single_library(resolved_lib, target_path, terms, limit=50)
                 if not matches:
                     return f"No files matching '{clean_query}' found in library '{resolved_lib}'."
-                if len(matches) > 50:
-                    matches = matches[:50] + [f"... and {len(matches) - 50} more. Please refine your query."]
                 return f"Search results in '{resolved_lib}' for '{clean_query}':\n" + "\n".join(
                     f"- {m}" for m in matches
                 )
@@ -450,17 +671,28 @@ class FileReaderComponent(BaseComponent):
             files = sorted([e for e in entries if os.path.isfile(os.path.join(target_path, e))])
 
             result = [f"Contents of {resolved_lib} : {rel_base or '/'}\n"]
+            shown = 0
+            total_entries = len(dirs) + len(files)
             for d in dirs:
+                if shown >= MAX_DIR_LIST_ENTRIES:
+                    break
                 result.append(f"[DIR]  {d}")
+                shown += 1
             for f in files:
+                if shown >= MAX_DIR_LIST_ENTRIES:
+                    break
                 abs_f = os.path.join(target_path, f)
                 rel_f = os.path.relpath(abs_f, base_dir)
                 ext = os.path.splitext(f)[1].lower()
-                if ext in (".epub", ".pdf"):
+                if ext in (".epub", ".pdf") and len(files) <= 200:
                     label = self._get_cached_file_label(abs_f, rel_f)
                     result.append(f"[FILE] {label}")
                 else:
                     result.append(f"[FILE] {f}")
+                shown += 1
+
+            if total_entries > shown:
+                result.append(f"... and {total_entries - shown} more entries (use 'query' to filter).")
 
             return "\n".join(result)
         except Exception as e:
@@ -470,10 +702,20 @@ class FileReaderComponent(BaseComponent):
         """
         Reads a chunk or page (1-indexed) of any file (EPUB, PDF, or text/code) from a library.
         Returns JSON containing the content, chunk/page index, total_chunks/total_pages, and a next_hint.
-        For EPUBs and PDFs, updates your active bookmark so you can call read_next_chunk() to continue reading.
+        Updates your active bookmark so you can call read_next_chunk() to continue reading sequentially.
         """
         try:
             resolved_lib, abs_path, rel_path = self._resolve_and_check_path(library, filepath)
+            base_dir = self.libraries[resolved_lib]
+
+            # If a Gutenberg book directory was passed (e.g. '1/3/4/1342'), auto-resolve the book text file inside it
+            if os.path.isdir(abs_path):
+                tail = os.path.basename(abs_path)
+                if tail.isdigit():
+                    resolved_rel = self._resolve_gutenberg_book_rel_path(base_dir, int(tail))
+                    abs_path = os.path.abspath(os.path.join(base_dir, resolved_rel))
+                    rel_path = resolved_rel
+
             if not os.path.exists(abs_path):
                 return json.dumps({"error": f"File '{filepath}' does not exist in library '{resolved_lib}'."})
             if not os.path.isfile(abs_path):
@@ -651,10 +893,20 @@ class FileReaderComponent(BaseComponent):
         numbered_lines = [f"{i + 1}: {all_lines[i]}" for i in range(start_idx, end_idx)]
         content = "\n".join(numbered_lines)
 
+        self.current_book = abs_path
+        self.current_library = library
+        self.current_rel_path = rel_path
+        self.current_book_label = rel_path
+        self.current_index = chunk
+        self._save_state()
+
+        if hasattr(self, "agent") and self.agent:
+            self.agent.rebuild_system_prompt()
+
         if chunk < total_chunks:
             next_hint = (
-                f"Call read_file(library='{library}', filepath='{rel_path}', chunk={chunk + 1}) "
-                f"to read chunk {chunk + 1}/{total_chunks}."
+                f"Call read_next_chunk() to read chunk {chunk + 1}/{total_chunks}, "
+                f"or call read_file(library='{library}', filepath='{rel_path}', chunk={chunk + 1})."
             )
         else:
             next_hint = f"End of file '{rel_path}' reached ({total_chunks}/{total_chunks} chunks)."
@@ -699,12 +951,12 @@ class FileReaderComponent(BaseComponent):
 
     def read_next_chunk(self) -> str:
         """
-        Advances and returns the next chunk or page of the most recently read EPUB or PDF.
+        Advances and returns the next chunk or page of the most recently read book or document (EPUB, PDF, or text).
         """
         if not self.current_book or not os.path.exists(self.current_book):
             return json.dumps(
                 {
-                    "error": "No active EPUB or PDF is currently open. Call read_file(library, filepath, chunk=1) on an EPUB or PDF first."
+                    "error": "No active book or document is currently open. Call read_file(library, filepath, chunk=1) first."
                 }
             )
 

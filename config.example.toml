@@ -59,6 +59,7 @@ db_path = "data/thunk/reader_state.db"# SQLite database file for EPUB/PDF bookma
 # Named libraries mapping alias names to local directories for reading books, PDFs, code, and images (REQUIRED)
 ebook = "/vault/ebook"
 pdf = "/vault/pdf"
+gutenberg = "/vault/gutenberg"
 discord_file = "data/thunk/images"
 thunk_source = "/home/fireduck/projects/thunk/src"
 workspace = "data/thunk/workspace"

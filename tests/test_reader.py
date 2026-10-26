@@ -255,3 +255,57 @@ async def test_discord_send_message_with_library_attachment():
         if os.path.exists(test_img_path):
             os.remove(test_img_path)
 
+
+def test_gutenberg_gutindex_catalog_and_cross_library_search(tmp_path):
+    """Verifies GUTINDEX.ALL SQLite indexing, eBook ID resolution, text read_next_chunk, and cross-library search."""
+    cfg = load_config()
+    ebook_lib = cfg["file_reader"]["libraries"]["ebook"]
+    gutenberg_dir = tmp_path / "gutenberg"
+    gutenberg_dir.mkdir()
+
+    # Write synthetic GUTINDEX.ALL
+    gutindex_content = (
+        "TITLE and AUTHOR                                                     EBOOK NO.\n\n"
+        "Pride and Prejudice, by Jane Austen                                       1342\n\n"
+        "Frankenstein, by Mary Wollstonecraft (Godwin) Shelley                       84\n"
+        " [Subtitle: or The Modern Prometheus]\n\n"
+        "The temple, by H. P. (Howard Phillips) Lovecraft                         79842\n"
+    )
+    (gutenberg_dir / "GUTINDEX.ALL").write_text(gutindex_content, encoding="utf-8")
+
+    # Create tiered directory 1/3/4/1342/1342-0.txt with 15 lines
+    book_1342_dir = gutenberg_dir / "1" / "3" / "4" / "1342"
+    book_1342_dir.mkdir(parents=True)
+    lines = [f"Gutenberg Pride & Prejudice Line {i}" for i in range(1, 16)]
+    (book_1342_dir / "1342-0.txt").write_text("\n".join(lines), encoding="utf-8")
+
+    db_path = str(tmp_path / "gutenberg_state.db")
+    fr = FileReaderComponent(
+        libraries={"ebook": ebook_lib, "gutenberg": str(gutenberg_dir)},
+        db_path=db_path,
+        lines_per_chunk=5,
+    )
+
+    # 1. Search Gutenberg catalog via GUTINDEX.ALL (including typo alias 'gutenburg')
+    g_search = fr.list_files("gutenburg", query="Lovecraft")
+    assert "The temple, by H. P. (Howard Phillips) Lovecraft (#79842) [path: 7/9/8/4/79842/79842-0.txt]" in g_search
+
+    # 2. Cross-library search (library='all') finds Jane Austen in both 'ebook' and 'gutenberg'
+    cross_search = fr.list_files("all", query="Austen")
+    assert "[ebook] Pride and Prejudice: Test Edition by Jane Austen [path: MrDarcy.epub]" in cross_search
+    assert "[gutenberg] Pride and Prejudice, by Jane Austen (#1342) [path: 1/3/4/1342/1342-0.txt]" in cross_search
+
+    # 3. Read Gutenberg book by eBook ID ('1342') and advance with read_next_chunk()
+    c1 = json.loads(fr.read_file("gutenberg", "1342", chunk=1))
+    assert c1["format"] == "text"
+    assert c1["filepath"] == "1/3/4/1342/1342-0.txt"
+    assert c1["chunk"] == 1
+    assert c1["total_chunks"] == 3
+    assert "Gutenberg Pride & Prejudice Line 1" in c1["content"]
+    assert "read_next_chunk()" in c1["next_hint"]
+
+    c2 = json.loads(fr.read_next_chunk())
+    assert c2["chunk"] == 2
+    assert "Gutenberg Pride & Prejudice Line 6" in c2["content"]
+
+
