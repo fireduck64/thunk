@@ -1,6 +1,7 @@
 from typing import Dict, Any
 from src.components.base import BaseComponent
 from src.utils.config import load_config
+from src.utils.metrics import MetricSpan, count_tokens, infer_exec_location
 
 class CriticComponent(BaseComponent):
     """
@@ -77,26 +78,38 @@ class CriticComponent(BaseComponent):
             "Do NOT provide any introductory text, just the raw feeling."
         )
 
-        try:
-            # We use the main agent's client, but we don't give the critic access to tools
-            # or the full context window. It just acts as a pure text-in text-out evaluator.
-            agent_name = getattr(self.agent, "name", None) or self.config.get("agent", {}).get("name", "Thunk")
-            thread_id = getattr(self.agent, "thread_id", None) or "main"
-            response_stream = await self.agent.client.chat.completions.create(
-                model=self.agent.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7, # Add a bit of creativity so feelings aren't always identical
-                max_tokens=self.max_output_tokens,
-                extra_headers={"X-Agent-ID": f"{agent_name}-{thread_id}-critic"},
-                stream=True
-            )
-            message = await self.agent._accumulate_stream(response_stream)
-            feeling = message.content.strip()
-            
-            print(f"[Critic Feeling]: {feeling}\n")
-            
-            # Inject the feeling into the agent's working memory as a system message
-            await self.agent.add_message("system", f"[Internal Feeling]: {feeling}")
+        agent_name = getattr(self.agent, "name", None) or self.config.get("agent", {}).get("name", "Thunk")
+        thread_id = getattr(self.agent, "thread_id", None) or "main"
+        exec_loc = infer_exec_location(self.config.get("llm", {}).get("api_url"))
 
-        except Exception as e:
-            print(f"[Critic Error] {e}")
+        with MetricSpan(
+            operation="llm_call",
+            agent=agent_name,
+            thread=thread_id,
+            component="critic",
+            type="critic",
+            model=getattr(self.agent, "model", None),
+            exec_location=exec_loc,
+        ) as span:
+            span.inc("request_tokens", count_tokens(prompt, agent=self.agent))
+            span.inc("request_bytes", len(prompt.encode("utf-8")))
+            try:
+                with span.subtimer("llm_call_ms"):
+                    response_stream = await self.agent.client.chat.completions.create(
+                        model=self.agent.model,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.7,
+                        max_tokens=self.max_output_tokens,
+                        extra_headers={"X-Agent-ID": f"{agent_name}-{thread_id}-critic"},
+                        stream=True,
+                    )
+                    message = await self.agent._accumulate_stream(response_stream)
+                feeling = (message.content or "").strip()
+                span.inc("response_tokens", count_tokens(feeling, agent=self.agent))
+                span.inc("response_bytes", len(feeling.encode("utf-8")))
+
+                print(f"[Critic Feeling]: {feeling}\n")
+                await self.agent.add_message("system", f"[Internal Feeling]: {feeling}")
+            except Exception as e:
+                span.fail()
+                print(f"[Critic Error] {e}")

@@ -10,6 +10,7 @@ from ebooklib import epub
 from src.components.base import BaseComponent
 from src.utils.config import load_config
 from src.utils.image import downsize_image_bytes, encode_jpeg_data_url
+from src.utils.metrics import MetricSpan
 
 
 MIND_README_CONTENT = """# Agent Mind Read-Only Mirror (`/home/agent/mind`)
@@ -291,77 +292,97 @@ class WorkspaceComponent(BaseComponent):
 
         timeout_val = max(1, min(120, int(timeout_sec if timeout_sec is not None else self.default_timeout_sec)))
         effective_workdir = (workdir or self.container_workdir).strip()
+        agent_obj = getattr(self, "agent", None)
+        agent_name = getattr(agent_obj, "name", None) or self.config.get("agent", {}).get("name", "Thunk")
+        thread_id = getattr(agent_obj, "thread_id", None) or "main"
 
-        try:
-            self._sync_mind_snapshot()
-        except Exception as e:
-            return json.dumps(
-                {"exit_code": -1, "stdout": "", "stderr": f"Error syncing mind snapshot before command: {e}"}
-            )
+        with MetricSpan(
+            operation="workspace_exec",
+            agent=agent_name,
+            thread=thread_id,
+            component="workspace",
+        ) as span:
+            span.inc("request_bytes", len(command.encode("utf-8")))
+            try:
+                with span.subtimer("db_save_ms"):
+                    self._sync_mind_snapshot()
+            except Exception as e:
+                span.fail()
+                return json.dumps(
+                    {"exit_code": -1, "stdout": "", "stderr": f"Error syncing mind snapshot before command: {e}"}
+                )
 
-        cmd = [
-            "docker",
-            "exec",
-            "-u",
-            self.container_user,
-            "-w",
-            effective_workdir,
-            self.container_name,
-            "timeout",
-            "--kill-after=2s",
-            f"{timeout_val}s",
-            "bash",
-            "-c",
-            command,
-        ]
+            cmd = [
+                "docker",
+                "exec",
+                "-u",
+                self.container_user,
+                "-w",
+                effective_workdir,
+                self.container_name,
+                "timeout",
+                "--kill-after=2s",
+                f"{timeout_val}s",
+                "bash",
+                "-c",
+                command,
+            ]
 
-        proc = None
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(),
-                timeout=timeout_val + 5,
-            )
-            exit_code = proc.returncode if proc.returncode is not None else 0
-            stdout_str = self._truncate_output(stdout_bytes.decode("utf-8", errors="replace"))
-            stderr_str = self._truncate_output(stderr_bytes.decode("utf-8", errors="replace"))
-            return json.dumps(
-                {
-                    "exit_code": exit_code,
-                    "stdout": stdout_str,
-                    "stderr": stderr_str,
-                },
-                indent=2,
-            )
-        except asyncio.TimeoutError:
-            if proc is not None:
-                try:
-                    proc.kill()
-                    await proc.wait()
-                except Exception:
-                    pass
-            return json.dumps(
-                {
-                    "exit_code": 124,
-                    "stdout": "",
-                    "stderr": f"Error: Command timed out after {timeout_val} seconds.",
-                },
-                indent=2,
-            )
-        except Exception as e:
-            return json.dumps(
-                {
-                    "exit_code": -1,
-                    "stdout": "",
-                    "stderr": f"Error executing workspace command: {str(e)}",
-                },
-                indent=2,
-            )
+            proc = None
+            try:
+                with span.subtimer("exec_ms"):
+                    proc = await asyncio.create_subprocess_exec(
+                        *cmd,
+                        stdin=asyncio.subprocess.DEVNULL,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                        proc.communicate(),
+                        timeout=timeout_val + 5,
+                    )
+                exit_code = proc.returncode if proc.returncode is not None else 0
+                if exit_code != 0:
+                    span.fail()
+                span.inc("exit_code", exit_code)
+                span.inc("response_bytes", len(stdout_bytes or b"") + len(stderr_bytes or b""))
+                stdout_str = self._truncate_output(stdout_bytes.decode("utf-8", errors="replace"))
+                stderr_str = self._truncate_output(stderr_bytes.decode("utf-8", errors="replace"))
+                return json.dumps(
+                    {
+                        "exit_code": exit_code,
+                        "stdout": stdout_str,
+                        "stderr": stderr_str,
+                    },
+                    indent=2,
+                )
+            except asyncio.TimeoutError:
+                span.fail()
+                span.inc("exit_code", 124)
+                if proc is not None:
+                    try:
+                        proc.kill()
+                        await proc.wait()
+                    except Exception:
+                        pass
+                return json.dumps(
+                    {
+                        "exit_code": 124,
+                        "stdout": "",
+                        "stderr": f"Error: Command timed out after {timeout_val} seconds.",
+                    },
+                    indent=2,
+                )
+            except Exception as e:
+                span.fail()
+                return json.dumps(
+                    {
+                        "exit_code": -1,
+                        "stdout": "",
+                        "stderr": f"Error executing workspace command: {str(e)}",
+                    },
+                    indent=2,
+                )
 
     def write_workspace_file(self, path: str, content: str) -> str:
         """

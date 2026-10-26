@@ -18,6 +18,7 @@ def _ensure_test_environment(config_path: str) -> None:
     os.makedirs(os.path.join(TEST_DATA_DIR, "pdf_library"), exist_ok=True)
     os.makedirs(os.path.join(TEST_DATA_DIR, "skills"), exist_ok=True)
     os.makedirs(os.path.join(TEST_DATA_DIR, "logs"), exist_ok=True)
+    os.makedirs(os.path.join(TEST_DATA_DIR, "metrics"), exist_ok=True)
     os.makedirs(os.path.join(TEST_DATA_DIR, "images"), exist_ok=True)
     os.makedirs(os.path.join(TEST_DATA_DIR, "workspace"), exist_ok=True)
     os.makedirs(os.path.join(TEST_DATA_DIR, "mind_ro"), exist_ok=True)
@@ -33,7 +34,7 @@ def _ensure_test_environment(config_path: str) -> None:
     if not need_write_config:
         with open(config_path, "r", encoding="utf-8") as f:
             existing_cfg_text = f.read()
-        if "discord_file" not in existing_cfg_text or "[reader]" in existing_cfg_text:
+        if "discord_file" not in existing_cfg_text or "[reader]" in existing_cfg_text or "metrics_dir" not in existing_cfg_text:
             need_write_config = True
 
     if need_write_config:
@@ -49,7 +50,7 @@ def _ensure_test_environment(config_path: str) -> None:
                 '[notes]\ndb_path = "data/test/notes.db"\n\n'
                 '[tasks]\ndb_path = "data/test/tasks.db"\n\n'
                 '[skills]\nskills_dir = "data/test/skills"\n\n'
-                '[logging]\nlog_dir = "data/test/logs"\nverbose = false\n\n'
+                '[logging]\nlog_dir = "data/test/logs"\nmetrics_dir = "data/test/metrics"\nverbose = false\n\n'
                 '[file_reader]\ndb_path = "data/test/reader_state.db"\n\n'
                 '[file_reader.libraries]\nebook = "data/test/library"\npdf = "data/test/pdf_library"\ndiscord_file = "data/test/images"\nworkspace = "data/test/workspace"\nthunk_source = "src"\n\n'
                 '[embeddings]\napi_url = "http://localhost:11434/api/embeddings"\napi_key = ""\nmodel_name = "nomic-embed-text"\n\n'
@@ -103,6 +104,7 @@ def _verify_test_config_isolation(cfg: dict) -> None:
         libs.get("discord_file", "data/test/images"),
         cfg.get("skills", {}).get("skills_dir", ""),
         cfg.get("logging", {}).get("log_dir", ""),
+        cfg.get("logging", {}).get("metrics_dir", "data/test/metrics"),
         cfg.get("discord", {}).get("images_dir", "data/test/images"),
         cfg.get("workspace", {}).get("workspace_dir", "data/test/workspace"),
         cfg.get("workspace", {}).get("mind_ro_dir", "data/test/mind_ro"),

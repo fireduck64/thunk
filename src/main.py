@@ -10,6 +10,7 @@ from transformers import AutoTokenizer
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.utils.config import set_config_path, load_config
+from src.utils.metrics import set_shared_tokenizer
 from src.core.agent import AgentCore
 from src.components.notes import StructuredNotesComponent
 from src.components.knowledge import KnowledgeBaseComponent
@@ -36,11 +37,13 @@ from src.adapters.discord_adapter import DiscordAdapter
 def _load_shared_tokenizer(config: dict):
     tokenizer_model = config.get("tokenizer", {}).get("model_name", "unsloth/gemma-7b")
     try:
-        return AutoTokenizer.from_pretrained(tokenizer_model, model_max_length=100000)
+        tok = AutoTokenizer.from_pretrained(tokenizer_model, model_max_length=100000)
     except Exception as e:
         print(f"[Memory Warning] Could not load tokenizer '{tokenizer_model}': {e}")
         print("[Memory Warning] Falling back to 'gpt2' tokenizer for approximate token counting.")
-        return AutoTokenizer.from_pretrained("gpt2", model_max_length=100000)
+        tok = AutoTokenizer.from_pretrained("gpt2", model_max_length=100000)
+    set_shared_tokenizer(tok)
+    return tok
 
 
 def _create_shared_log_file(config: dict) -> str:

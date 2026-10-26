@@ -1,6 +1,7 @@
 import asyncio
 import json
 import inspect
+import time
 import httpx
 from openai import AsyncOpenAI
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
@@ -8,6 +9,7 @@ from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMe
 
 from src.core.events import EventBus
 from src.utils.config import load_config
+from src.utils.metrics import MetricSpan, count_tokens, infer_exec_location
 from src.components.base import BaseComponent
 from src.utils.schema import function_to_schema
 
@@ -36,6 +38,8 @@ class AgentCore:
         self.max_output_tokens = int(self.config.get("llm", {}).get("max_output_tokens", 16384))
         self.debug_stream = self.config.get("debug", {}).get("stream_output", False)
         self.last_finish_reason = None
+        self.last_ttft_ms = None
+        self.last_usage = None
         
         # State
         self.messages = []
@@ -133,53 +137,72 @@ class AgentCore:
 
     async def execute_tool(self, name: str, args_str: str) -> str:
         """Safely executes a Python tool function and returns the string result."""
-        if name not in self.tool_map:
-            return f"Error: Tool '{name}' not found."
-            
-        args = {}
-        valid_params = []
-        try:
-            args = json.loads(args_str) if args_str else {}
-            if not isinstance(args, dict):
-                args = {}
-            func = self.tool_map[name]
-            
-            valid_params = [p for p in inspect.signature(func).parameters.keys() if p != "self"]
-            normalized_args = dict(args)
-
-            # Normalize common path and chunk/page parameter aliases across FileReaderComponent and WorkspaceComponent
-            alias_map = {
-                "path": ("filepath", "file_path", "filename", "subdir"),
-                "filepath": ("path", "file_path", "filename"),
-                "subdir": ("path", "filepath", "file_path"),
-                "chunk": ("page_number", "page"),
-            }
-            for target_param, aliases in alias_map.items():
-                if target_param in valid_params and target_param not in normalized_args:
-                    for alias in aliases:
-                        if alias in normalized_args:
-                            normalized_args[target_param] = normalized_args[alias]
-                            break
-
-            # Filter out any hallucinated arguments not in the function signature
-            safe_args = {k: v for k, v in normalized_args.items() if k in valid_params}
-            
-            # If the tool is an async function, await it, otherwise just call it.
-            if asyncio.iscoroutinefunction(func):
-                result = await func(**safe_args)
-            else:
-                result = func(**safe_args)
+        with MetricSpan(
+            operation="tool_call",
+            agent=self.name,
+            thread=self.thread_id,
+            component="core",
+            type=name,
+        ) as span:
+            span.inc("request_bytes", len((args_str or "").encode("utf-8")))
+            if name not in self.tool_map:
+                span.fail()
+                err = f"Error: Tool '{name}' not found."
+                span.inc("response_bytes", len(err.encode("utf-8")))
+                return err
                 
-            await self.event_bus.publish("tool_executed", {"name": name, "args": safe_args, "result": result})
-            return str(result)
-            
-        except TypeError as e:
-            return (
-                f"Error executing tool '{name}': {str(e)} "
-                f"(received args: {list(args.keys())}, expected params: {valid_params})"
-            )
-        except Exception as e:
-            return f"Error executing tool '{name}': {str(e)}"
+            args = {}
+            valid_params = []
+            try:
+                args = json.loads(args_str) if args_str else {}
+                if not isinstance(args, dict):
+                    args = {}
+                func = self.tool_map[name]
+                
+                valid_params = [p for p in inspect.signature(func).parameters.keys() if p != "self"]
+                normalized_args = dict(args)
+
+                # Normalize common path and chunk/page parameter aliases across FileReaderComponent and WorkspaceComponent
+                alias_map = {
+                    "path": ("filepath", "file_path", "filename", "subdir"),
+                    "filepath": ("path", "file_path", "filename"),
+                    "subdir": ("path", "filepath", "file_path"),
+                    "chunk": ("page_number", "page"),
+                }
+                for target_param, aliases in alias_map.items():
+                    if target_param in valid_params and target_param not in normalized_args:
+                        for alias in aliases:
+                            if alias in normalized_args:
+                                normalized_args[target_param] = normalized_args[alias]
+                                break
+
+                # Filter out any hallucinated arguments not in the function signature
+                safe_args = {k: v for k, v in normalized_args.items() if k in valid_params}
+                
+                # If the tool is an async function, await it, otherwise just call it.
+                if asyncio.iscoroutinefunction(func):
+                    result = await func(**safe_args)
+                else:
+                    result = func(**safe_args)
+                    
+                await self.event_bus.publish("tool_executed", {"name": name, "args": safe_args, "result": result})
+                res_str = str(result)
+                span.inc("response_bytes", len(res_str.encode("utf-8")))
+                return res_str
+                
+            except TypeError as e:
+                span.fail()
+                err = (
+                    f"Error executing tool '{name}': {str(e)} "
+                    f"(received args: {list(args.keys())}, expected params: {valid_params})"
+                )
+                span.inc("response_bytes", len(err.encode("utf-8")))
+                return err
+            except Exception as e:
+                span.fail()
+                err = f"Error executing tool '{name}': {str(e)}"
+                span.inc("response_bytes", len(err.encode("utf-8")))
+                return err
 
     async def _accumulate_stream(self, stream) -> ChatCompletionMessage:
         """
@@ -189,8 +212,21 @@ class AgentCore:
         content = ""
         tool_calls_dict = {}
         finish_reason = None
+        t0 = time.perf_counter()
+        ttft_ms = None
+        usage_dict = None
         
         async for chunk in stream:
+            chunk_usage = getattr(chunk, "usage", None)
+            if chunk_usage is not None:
+                p_tok = getattr(chunk_usage, "prompt_tokens", None)
+                c_tok = getattr(chunk_usage, "completion_tokens", None)
+                if isinstance(chunk_usage, dict):
+                    p_tok = chunk_usage.get("prompt_tokens")
+                    c_tok = chunk_usage.get("completion_tokens")
+                if p_tok is not None or c_tok is not None:
+                    usage_dict = {"prompt_tokens": p_tok, "completion_tokens": c_tok}
+
             if not chunk.choices:
                 continue
                 
@@ -200,11 +236,15 @@ class AgentCore:
             delta = chunk.choices[0].delta
             
             if delta.content:
+                if ttft_ms is None:
+                    ttft_ms = (time.perf_counter() - t0) * 1000.0
                 content += delta.content
                 if self.debug_stream:
                     print(delta.content, end="", flush=True)
                 
             if delta.tool_calls:
+                if ttft_ms is None:
+                    ttft_ms = (time.perf_counter() - t0) * 1000.0
                 for tc in delta.tool_calls:
                     idx = tc.index
                     if idx not in tool_calls_dict:
@@ -217,6 +257,8 @@ class AgentCore:
                         tool_calls_dict[idx]["function"]["arguments"] += tc.function.arguments
 
         self.last_finish_reason = finish_reason
+        self.last_ttft_ms = ttft_ms
+        self.last_usage = usage_dict
 
         tool_calls = []
         if tool_calls_dict:
@@ -291,18 +333,50 @@ class AgentCore:
                 wire_messages = self._prepare_llm_messages()
 
                 # 1. Prompt the LLM using a stream to keep Nginx alive
-                response_stream = await self.client.chat.completions.create(
+                exec_loc = infer_exec_location(self.config.get("llm", {}).get("api_url"))
+                with MetricSpan(
+                    operation="llm_call",
+                    agent=self.name,
+                    thread=self.thread_id,
+                    component="core",
+                    type="agent_turn",
                     model=self.model,
-                    messages=wire_messages,
-                    tools=self.tools if self.tools else None,
-                    # Tool choice auto ensures it can choose to use tools or output text
-                    tool_choice="auto" if self.tools else "none",
-                    max_tokens=self.max_output_tokens,
-                    stream=True
-                )
-                
-                # Reconstruct the message object silently
-                message = await self._accumulate_stream(response_stream)
+                    exec_location=exec_loc,
+                ) as llm_span:
+                    req_bytes = len(json.dumps(wire_messages, default=str).encode("utf-8"))
+                    llm_span.inc("request_messages", len(wire_messages))
+                    llm_span.inc("request_bytes", req_bytes)
+
+                    with llm_span.subtimer("llm_call_ms"):
+                        response_stream = await self.client.chat.completions.create(
+                            model=self.model,
+                            messages=wire_messages,
+                            tools=self.tools if self.tools else None,
+                            tool_choice="auto" if self.tools else "none",
+                            max_tokens=self.max_output_tokens,
+                            stream=True,
+                        )
+                        message = await self._accumulate_stream(response_stream)
+
+                    if self.last_ttft_ms is not None:
+                        llm_span.add_timer("ttft_ms", self.last_ttft_ms)
+
+                    usage = self.last_usage or {}
+                    req_tok = usage.get("prompt_tokens")
+                    if req_tok is None:
+                        req_tok = count_tokens(wire_messages, agent=self)
+                    resp_text_for_tok = (message.content or "") + (
+                        str(message.tool_calls) if message.tool_calls else ""
+                    )
+                    resp_tok = usage.get("completion_tokens")
+                    if resp_tok is None:
+                        resp_tok = count_tokens(resp_text_for_tok, agent=self)
+
+                    llm_span.inc("request_tokens", req_tok)
+                    llm_span.inc("response_tokens", resp_tok)
+                    llm_span.inc("response_bytes", len(resp_text_for_tok.encode("utf-8")))
+                    llm_span.inc("tool_calls", len(message.tool_calls or []))
+                    llm_span.set_field("finish_reason", self.last_finish_reason or "stop")
 
                 # Clear transient base64 images now that the LLM has seen them on this call
                 self._clear_ephemeral_images()

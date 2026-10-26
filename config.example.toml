@@ -50,6 +50,7 @@ skills_dir = "data/thunk/skills"      # Directory storing agent procedural markd
 
 [logging]
 log_dir = "data/thunk/logs"           # Directory storing session JSONL audit logs (REQUIRED)
+metrics_dir = "data/thunk/metrics"    # Directory storing daily UTC JSONL metric logs (metrics-YYYY-MM-DD.jsonl)
 verbose = true                        # When true, dumps full agent context on turns
 
 [file_reader]

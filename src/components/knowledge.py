@@ -2,6 +2,7 @@ from typing import List, Callable, Dict, Any
 from qdrant_client import QdrantClient
 from src.components.base import BaseComponent
 from src.utils.config import load_config
+from src.utils.metrics import MetricSpan
 import requests
 
 class KnowledgeBaseComponent(BaseComponent):
@@ -68,30 +69,45 @@ class KnowledgeBaseComponent(BaseComponent):
         Useful for retrieving facts or context from ingested books or documents.
         """
         print(f"[KnowledgeBase] Searching for: '{query}'")
-        
-        try:
-            if not self._client:
-                self._client = QdrantClient(host=self.host, port=self.port)
+        agent_name = getattr(getattr(self, "agent", None), "name", None) or getattr(self, "agent_name", "Thunk")
+        thread_id = getattr(getattr(self, "agent", None), "thread_id", None) or getattr(self, "thread_id", "main") or "main"
+
+        with MetricSpan(
+            operation="vector_search",
+            agent=agent_name,
+            thread=thread_id,
+            component="knowledge",
+            model=self.embed_model,
+        ) as span:
+            span.inc("request_bytes", len((query or "").encode("utf-8")))
+            try:
+                if not self._client:
+                    self._client = QdrantClient(host=self.host, port=self.port)
+                    
+                with span.subtimer("embedding_ms"):
+                    query_vector = self._get_embedding(query)
                 
-            query_vector = self._get_embedding(query)
-            
-            search_result = self._client.search(
-                collection_name=self.collection,
-                query_vector=query_vector,
-                limit=num_results
-            )
-            
-            if not search_result:
-                return f"No relevant information found in the knowledge base for '{query}'."
+                with span.subtimer("db_lookup_ms"):
+                    search_result = self._client.search(
+                        collection_name=self.collection,
+                        query_vector=query_vector,
+                        limit=num_results
+                    )
+                span.inc("db_lookup", 1)
+                span.inc("db_lookup_records", len(search_result))
                 
-            results = []
-            for i, hit in enumerate(search_result):
-                source = hit.payload.get('source', 'Unknown Document')
-                text = hit.payload.get('text', '')
-                score = round(hit.score, 3)
-                results.append(f"--- Result {i+1} (Source: {source}, Relevance: {score}) ---\n{text}")
+                if not search_result:
+                    return f"No relevant information found in the knowledge base for '{query}'."
+                    
+                results = []
+                for i, hit in enumerate(search_result):
+                    source = hit.payload.get('source', 'Unknown Document')
+                    text = hit.payload.get('text', '')
+                    score = round(hit.score, 3)
+                    results.append(f"--- Result {i+1} (Source: {source}, Relevance: {score}) ---\n{text}")
+                    
+                return "\n\n".join(results)
                 
-            return "\n\n".join(results)
-            
-        except Exception as e:
-            return f"Error accessing knowledge base: {str(e)}"
+            except Exception as e:
+                span.fail()
+                return f"Error accessing knowledge base: {str(e)}"

@@ -10,6 +10,7 @@ from typing import List, Dict, Callable, Any
 from transformers import AutoTokenizer
 from src.components.base import BaseComponent
 from src.utils.config import load_config
+from src.utils.metrics import MetricSpan, count_tokens, infer_exec_location, set_shared_tokenizer
 
 class TieredMemoryComponent(BaseComponent):
     """
@@ -53,7 +54,8 @@ class TieredMemoryComponent(BaseComponent):
                 print(f"[Memory Warning] Could not load tokenizer '{tokenizer_model}': {e}")
                 print("[Memory Warning] Falling back to 'gpt2' tokenizer for approximate token counting.")
                 self.tokenizer = AutoTokenizer.from_pretrained("gpt2", model_max_length=100000)
-            
+
+        set_shared_tokenizer(self.tokenizer)
         self._init_db()
 
     def _connect_db(self) -> sqlite3.Connection:
@@ -463,70 +465,98 @@ class TieredMemoryComponent(BaseComponent):
         new_summary = None
         agent_name = getattr(agent, "name", None) or self.config.get("agent", {}).get("name", "Thunk")
         thread_id = getattr(agent, "thread_id", None) or self.thread_id or "main"
-        for attempt in range(self.max_retries):
-            try:
-                # We make a direct LLM call using the agent's client with a stream
-                response_stream = await agent.client.chat.completions.create(
-                    model=agent.model,
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=self.max_summary_tokens,
-                    extra_headers={"X-Agent-ID": f"{agent_name}-{thread_id}-memory"},
-                    stream=True
-                )
-                message = await agent._accumulate_stream(response_stream)
-                candidate_summary = (message.content or "").strip()
-                if not candidate_summary:
-                    raise ValueError("Refusing to overwrite core_summary with an empty summary.")
-                new_summary = candidate_summary
-                break
-            except Exception as e:
-                print(
-                    f"[Memory ERROR] Compression attempt {attempt + 1}/{self.max_retries} failed: {e}",
-                    flush=True,
-                )
-                if attempt + 1 < self.max_retries:
-                    delay = self.retry_base_delay * (2 ** attempt)
-                    if delay > 0:
-                        await asyncio.sleep(delay)
+        exec_loc = infer_exec_location(self.config.get("llm", {}).get("api_url"))
 
-        if not new_summary:
-            print(
-                f"[Memory FATAL] All {self.max_retries} compression attempts failed. Refusing to evict memory without summary. Exiting process.",
-                flush=True,
-            )
-            sys.exit(1)
+        with MetricSpan(
+            operation="llm_call",
+            agent=agent_name,
+            thread=thread_id,
+            component="tiered_memory",
+            type="memory_compaction",
+            model=getattr(agent, "model", None),
+            exec_location=exec_loc,
+        ) as span:
+            span.inc("evicted_messages", num_to_evict)
+            span.inc("evicted_tokens", accumulated_tokens)
+            span.inc("request_tokens", count_tokens(prompt, tokenizer=self.tokenizer))
+            span.inc("request_bytes", len(prompt.encode("utf-8")))
 
-        # --- MEMORY CONSOLIDATION (Subconscious Integration) ---
-        for comp in agent.components:
-            if comp.__class__.__name__ == "VectorMemoryComponent":
+            for attempt in range(self.max_retries):
                 try:
-                    consolidation = f"Consolidated Memory Block:\nSummary: {new_summary}\nRaw Events:\n{transcript}"
-                    sig_params = inspect.signature(comp.save_semantic_memory).parameters
-                    supports_kwargs = any(
-                        p.kind == inspect.Parameter.VAR_KEYWORD or p.name == "metadata"
-                        for p in sig_params.values()
-                    )
-                    if supports_kwargs:
-                        result = comp.save_semantic_memory(
-                            consolidation,
-                            metadata={"thread_id": self.thread_id},
+                    with span.subtimer("llm_call_ms"):
+                        response_stream = await agent.client.chat.completions.create(
+                            model=agent.model,
+                            messages=[{"role": "user", "content": prompt}],
+                            max_tokens=self.max_summary_tokens,
+                            extra_headers={"X-Agent-ID": f"{agent_name}-{thread_id}-memory"},
+                            stream=True,
                         )
-                    else:
-                        result = comp.save_semantic_memory(consolidation)
-                    if isinstance(result, str) and result.startswith("Error"):
-                        raise RuntimeError(result)
-                    print("[Memory] Sent consolidated block to long-term Vector Memory.")
+                        message = await agent._accumulate_stream(response_stream)
+                    candidate_summary = (message.content or "").strip()
+                    if not candidate_summary:
+                        raise ValueError("Refusing to overwrite core_summary with an empty summary.")
+                    new_summary = candidate_summary
+                    break
                 except Exception as e:
                     print(
-                        f"[Memory FATAL] Failed to consolidate to Vector Memory: {e}. Exiting process.",
+                        f"[Memory ERROR] Compression attempt {attempt + 1}/{self.max_retries} failed: {e}",
                         flush=True,
                     )
-                    sys.exit(1)
+                    if attempt + 1 < self.max_retries:
+                        span.inc("retries", 1)
+                        delay = self.retry_base_delay * (2 ** attempt)
+                        if delay > 0:
+                            await asyncio.sleep(delay)
 
-        # Atomically save the new summary, append to history, and advance last_compacted_id
-        self._update_core_summary(new_summary, max_evicted_id=max_evicted_id)
-        print(f"[Memory] New Core Summary Generated: {new_summary[:50]}...")
+            if not new_summary:
+                span.fail()
+                span.finish()
+                print(
+                    f"[Memory FATAL] All {self.max_retries} compression attempts failed. Refusing to evict memory without summary. Exiting process.",
+                    flush=True,
+                )
+                sys.exit(1)
 
-        # Evict compacted messages only after Vector Memory and SQLite commits have succeeded
-        del agent.messages[1 : 1 + num_to_evict]
-        agent.rebuild_system_prompt()
+            span.inc("response_tokens", count_tokens(new_summary, tokenizer=self.tokenizer))
+            span.inc("response_bytes", len(new_summary.encode("utf-8")))
+
+            # --- MEMORY CONSOLIDATION (Subconscious Integration) ---
+            for comp in agent.components:
+                if comp.__class__.__name__ == "VectorMemoryComponent":
+                    try:
+                        consolidation = f"Consolidated Memory Block:\nSummary: {new_summary}\nRaw Events:\n{transcript}"
+                        sig_params = inspect.signature(comp.save_semantic_memory).parameters
+                        supports_kwargs = any(
+                            p.kind == inspect.Parameter.VAR_KEYWORD or p.name == "metadata"
+                            for p in sig_params.values()
+                        )
+                        with span.subtimer("embedding_ms"):
+                            if supports_kwargs:
+                                result = comp.save_semantic_memory(
+                                    consolidation,
+                                    metadata={"thread_id": self.thread_id},
+                                )
+                            else:
+                                result = comp.save_semantic_memory(consolidation)
+                        if isinstance(result, str) and result.startswith("Error"):
+                            raise RuntimeError(result)
+                        print("[Memory] Sent consolidated block to long-term Vector Memory.")
+                    except BaseException as e:
+                        span.fail()
+                        span.finish()
+                        print(
+                            f"[Memory FATAL] Failed to consolidate to Vector Memory: {e}. Exiting process.",
+                            flush=True,
+                        )
+                        sys.exit(1)
+
+            # Atomically save the new summary, append to history, and advance last_compacted_id
+            with span.subtimer("db_save_ms"):
+                self._update_core_summary(new_summary, max_evicted_id=max_evicted_id)
+            span.inc("db_save", 1)
+            span.inc("db_save_records", 1)
+            print(f"[Memory] New Core Summary Generated: {new_summary[:50]}...")
+
+            # Evict compacted messages only after Vector Memory and SQLite commits have succeeded
+            del agent.messages[1 : 1 + num_to_evict]
+            agent.rebuild_system_prompt()

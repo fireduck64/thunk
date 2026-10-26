@@ -8,6 +8,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import VectorParams, Distance, PointStruct
 from src.components.base import BaseComponent
 from src.utils.config import load_config
+from src.utils.metrics import MetricSpan
 
 class VectorMemoryComponent(BaseComponent):
     """
@@ -165,47 +166,63 @@ class VectorMemoryComponent(BaseComponent):
         timestamp = datetime.utcnow().isoformat() + "Z"
         extra_metadata = dict(kwargs.get("metadata") or {})
         agent_thread_id = getattr(getattr(self, "agent", None), "thread_id", None)
+        agent_name = getattr(getattr(self, "agent", None), "name", None) or getattr(self, "agent_name", "Thunk")
+        thread_id = getattr(getattr(self, "agent", None), "thread_id", None) or getattr(self, "thread_id", "main") or "main"
         if agent_thread_id and "thread_id" not in extra_metadata:
             extra_metadata["thread_id"] = agent_thread_id
 
-        for attempt in range(self.max_retries):
-            try:
-                if not self._client:
-                    self._client = QdrantClient(host=self.host, port=self.port)
+        with MetricSpan(
+            operation="vector_save",
+            agent=agent_name,
+            thread=thread_id,
+            component="vector_memory",
+            model=self.embed_model,
+        ) as span:
+            span.inc("request_bytes", len((content or "").encode("utf-8")))
+            for attempt in range(self.max_retries):
+                try:
+                    if not self._client:
+                        self._client = QdrantClient(host=self.host, port=self.port)
 
-                points = []
-                for chunk in chunks:
-                    for sub_chunk, vector in self._embed_with_auto_split(chunk):
-                        payload = {
-                            "text": sub_chunk,
-                            "timestamp": timestamp,
-                            **extra_metadata,
-                        }
-                        # Using UUID4 since agent memories don't need deterministic overwrites like RAG ingestion
-                        point_id = str(uuid.uuid4())
-                        points.append(PointStruct(id=point_id, vector=vector, payload=payload))
+                    points = []
+                    with span.subtimer("embedding_ms"):
+                        for chunk in chunks:
+                            for sub_chunk, vector in self._embed_with_auto_split(chunk):
+                                payload = {
+                                    "text": sub_chunk,
+                                    "timestamp": timestamp,
+                                    **extra_metadata,
+                                }
+                                point_id = str(uuid.uuid4())
+                                points.append(PointStruct(id=point_id, vector=vector, payload=payload))
 
-                self._client.upsert(
-                    collection_name=self.collection,
-                    points=points,
-                )
-                return "Memory saved successfully."
+                    with span.subtimer("db_save_ms"):
+                        self._client.upsert(
+                            collection_name=self.collection,
+                            points=points,
+                        )
+                    span.inc("db_save", 1)
+                    span.inc("db_save_records", len(points))
+                    return "Memory saved successfully."
 
-            except Exception as e:
-                print(
-                    f"[VectorMemory ERROR] Save memory attempt {attempt + 1}/{self.max_retries} failed: {e}",
-                    flush=True,
-                )
-                if attempt + 1 < self.max_retries:
-                    delay = self.retry_base_delay * (2 ** attempt)
-                    if delay > 0:
-                        time.sleep(delay)
+                except Exception as e:
+                    print(
+                        f"[VectorMemory ERROR] Save memory attempt {attempt + 1}/{self.max_retries} failed: {e}",
+                        flush=True,
+                    )
+                    if attempt + 1 < self.max_retries:
+                        span.inc("retries", 1)
+                        delay = self.retry_base_delay * (2 ** attempt)
+                        if delay > 0:
+                            time.sleep(delay)
 
-        print(
-            f"[VectorMemory FATAL] Failed to save semantic memory after {self.max_retries} attempts. Exiting process.",
-            flush=True,
-        )
-        sys.exit(1)
+            span.fail()
+            span.finish()
+            print(
+                f"[VectorMemory FATAL] Failed to save semantic memory after {self.max_retries} attempts. Exiting process.",
+                flush=True,
+            )
+            sys.exit(1)
 
     def search_semantic_memory_raw(self, query: str, num_results: int = 8) -> List[Dict[str, Any]]:
         """
@@ -213,29 +230,45 @@ class VectorMemoryComponent(BaseComponent):
         [{"id": str, "content": str, "metadata": dict, "score": float}, ...]
         """
         print(f"[VectorMemory] Searching raw hits (limit={num_results}) for: '{query[:80]}'")
-        if not self._client:
-            self._client = QdrantClient(host=self.host, port=self.port)
+        agent_name = getattr(getattr(self, "agent", None), "name", None) or getattr(self, "agent_name", "Thunk")
+        thread_id = getattr(getattr(self, "agent", None), "thread_id", None) or getattr(self, "thread_id", "main") or "main"
 
-        query_vector = self._get_embedding(query)
+        with MetricSpan(
+            operation="vector_search",
+            agent=agent_name,
+            thread=thread_id,
+            component="vector_memory",
+            model=self.embed_model,
+        ) as span:
+            span.inc("request_bytes", len((query or "").encode("utf-8")))
+            if not self._client:
+                self._client = QdrantClient(host=self.host, port=self.port)
 
-        search_result = self._client.search(
-            collection_name=self.collection,
-            query_vector=query_vector,
-            limit=num_results,
-        )
+            with span.subtimer("embedding_ms"):
+                query_vector = self._get_embedding(query)
 
-        hits = []
-        for hit in search_result:
-            payload = dict(hit.payload or {})
-            hits.append(
-                {
-                    "id": str(hit.id),
-                    "content": payload.get("text", ""),
-                    "metadata": payload,
-                    "score": float(hit.score),
-                }
-            )
-        return hits
+            with span.subtimer("db_lookup_ms"):
+                search_result = self._client.search(
+                    collection_name=self.collection,
+                    query_vector=query_vector,
+                    limit=num_results,
+                )
+
+            span.inc("db_lookup", 1)
+            span.inc("db_lookup_records", len(search_result))
+
+            hits = []
+            for hit in search_result:
+                payload = dict(hit.payload or {})
+                hits.append(
+                    {
+                        "id": str(hit.id),
+                        "content": payload.get("text", ""),
+                        "metadata": payload,
+                        "score": float(hit.score),
+                    }
+                )
+            return hits
 
     def search_semantic_memory(self, query: str, num_results: int = 3) -> str:
         """
@@ -243,32 +276,48 @@ class VectorMemoryComponent(BaseComponent):
         Returns the closest matches.
         """
         print(f"[VectorMemory] Searching for: '{query}'")
-        try:
-            if not self._client:
-                self._client = QdrantClient(host=self.host, port=self.port)
+        agent_name = getattr(getattr(self, "agent", None), "name", None) or getattr(self, "agent_name", "Thunk")
+        thread_id = getattr(getattr(self, "agent", None), "thread_id", None) or getattr(self, "thread_id", "main") or "main"
+
+        with MetricSpan(
+            operation="vector_search",
+            agent=agent_name,
+            thread=thread_id,
+            component="vector_memory",
+            model=self.embed_model,
+        ) as span:
+            span.inc("request_bytes", len((query or "").encode("utf-8")))
+            try:
+                if not self._client:
+                    self._client = QdrantClient(host=self.host, port=self.port)
+                    
+                with span.subtimer("embedding_ms"):
+                    query_vector = self._get_embedding(query)
                 
-            query_vector = self._get_embedding(query)
-            
-            search_result = self._client.search(
-                collection_name=self.collection,
-                query_vector=query_vector,
-                limit=num_results
-            )
-            
-            if not search_result:
-                return f"No relevant memories found for '{query}'."
+                with span.subtimer("db_lookup_ms"):
+                    search_result = self._client.search(
+                        collection_name=self.collection,
+                        query_vector=query_vector,
+                        limit=num_results
+                    )
+                span.inc("db_lookup", 1)
+                span.inc("db_lookup_records", len(search_result))
                 
-            results = []
-            for i, hit in enumerate(search_result):
-                text = hit.payload.get('text', '')
-                timestamp = hit.payload.get('timestamp', 'Unknown Time')
-                score = round(hit.score, 3)
-                results.append(f"--- Memory {i+1} (Relevance: {score}, Saved: {timestamp}) ---\n{text}")
+                if not search_result:
+                    return f"No relevant memories found for '{query}'."
+                    
+                results = []
+                for i, hit in enumerate(search_result):
+                    text = hit.payload.get('text', '')
+                    timestamp = hit.payload.get('timestamp', 'Unknown Time')
+                    score = round(hit.score, 3)
+                    results.append(f"--- Memory {i+1} (Relevance: {score}, Saved: {timestamp}) ---\n{text}")
+                    
+                return "\n\n".join(results)
                 
-            return "\n\n".join(results)
-            
-        except Exception as e:
-            return f"Error accessing semantic memory: {str(e)}"
+            except Exception as e:
+                span.fail()
+                return f"Error accessing semantic memory: {str(e)}"
 
     def dump_semantic_memory(self, limit: int = 10, offset: int = 0) -> str:
         """

@@ -10,6 +10,7 @@ import httpx
 from openai import AsyncOpenAI
 from src.components.base import BaseComponent
 from src.utils.config import load_config
+from src.utils.metrics import MetricSpan, count_tokens, infer_exec_location
 
 
 @dataclass
@@ -460,53 +461,87 @@ class SpreadingActivationComponent(BaseComponent):
             if original_text.startswith("[System Clock]"):
                 return
 
-            # 1. Age Existing Pool
-            self._age_pool()
+            agent_obj = getattr(self, "agent", None)
+            agent_name = getattr(agent_obj, "name", None) or self.agent_name
+            thread_id = getattr(agent_obj, "thread_id", None) or self.thread_id or "main"
+            exec_loc = infer_exec_location(self.api_url)
 
-            # 2. Dynamic Intake (Fetch from Layer-2 Qdrant DB)
-            fetch_count = self.compute_fetch_count()
-            print(
-                f"[SpreadingActivation] Pool size={len(self.layer_1_pool)}/{self.layer_1_pool_size}; "
-                f"fetching top-{fetch_count} candidates from Layer-2..."
-            )
-            matches = await self._fetch_matches(original_text, fetch_count)
+            with MetricSpan(
+                operation="llm_call",
+                agent=agent_name,
+                thread=thread_id,
+                component="spreading_activation",
+                type="subconscious_recall",
+                model=self.model_name,
+                exec_location=exec_loc,
+            ) as span:
+                # 1. Age Existing Pool
+                self._age_pool()
 
-            # 3. Merge & Reinforce (Spreading Activation)
-            self._merge_and_reinforce(matches)
-
-            # 4. Competitive Eviction (Keep Pool at layer_1_pool_size)
-            self._evict_pool()
-
-            # 5. Split-Slate Selection for Layer-0 Promotion
-            promoted_items, recurring_ids = self._select_promotion_slate()
-            if not promoted_items:
-                self._save_pool_to_db()
-                return
-
-            formatted_candidates = self._format_promoted_candidates(promoted_items, recurring_ids)
-
-            # 6. Refractory Cooldown (Prevent Echo Loops)
-            self._apply_refractory_cooldown(promoted_items)
-            self._save_pool_to_db()
-
-            try:
+                # 2. Dynamic Intake (Fetch from Layer-2 Qdrant DB)
+                fetch_count = self.compute_fetch_count()
                 print(
-                    f"[SpreadingActivation] Synthesizing {len(promoted_items)} promoted candidates "
-                    f"({len(recurring_ids)} recurring) with {self.model_name}..."
+                    f"[SpreadingActivation] Pool size={len(self.layer_1_pool)}/{self.layer_1_pool_size}; "
+                    f"fetching top-{fetch_count} candidates from Layer-2..."
                 )
-                subconscious_thoughts = await self._synthesize_memories(
-                    original_text, formatted_candidates
-                )
-            except Exception as e:
-                print(f"[SpreadingActivation Warning] Synthesis failed ({e}); falling back to raw recall.")
-                subconscious_thoughts = formatted_candidates
+                with span.subtimer("db_lookup_ms"):
+                    matches = await self._fetch_matches(original_text, fetch_count)
+                span.inc("db_lookup", len(self.internal_memory_components))
+                span.inc("db_lookup_records", len(matches))
 
-            if subconscious_thoughts.strip():
-                print("[SpreadingActivation] Found relevant associative memories. Injecting into Layer-0.")
-                new_content = (
-                    f"[Subconscious Recall Triggered by below message:]\n"
-                    f"{subconscious_thoughts.strip()}\n"
-                    f"--- End Recall ---\n\n"
-                    f"{original_text}"
-                )
-                payload["content"] = new_content
+                # 3. Merge & Reinforce (Spreading Activation)
+                self._merge_and_reinforce(matches)
+
+                # 4. Competitive Eviction (Keep Pool at layer_1_pool_size)
+                self._evict_pool()
+
+                # 5. Split-Slate Selection for Layer-0 Promotion
+                promoted_items, recurring_ids = self._select_promotion_slate()
+                span.inc("promoted_records", len(promoted_items))
+                span.inc("recurring_records", len(recurring_ids))
+                if not promoted_items:
+                    with span.subtimer("db_save_ms"):
+                        self._save_pool_to_db()
+                    span.inc("db_save", 1)
+                    span.inc("db_save_records", len(self.layer_1_pool))
+                    return
+
+                formatted_candidates = self._format_promoted_candidates(promoted_items, recurring_ids)
+
+                # 6. Refractory Cooldown (Prevent Echo Loops)
+                self._apply_refractory_cooldown(promoted_items)
+                with span.subtimer("db_save_ms"):
+                    self._save_pool_to_db()
+                span.inc("db_save", 1)
+                span.inc("db_save_records", len(self.layer_1_pool))
+
+                req_str = f"{original_text}\n{formatted_candidates}"
+                span.inc("request_tokens", count_tokens(req_str, agent=agent_obj))
+                span.inc("request_bytes", len(req_str.encode("utf-8")))
+
+                try:
+                    print(
+                        f"[SpreadingActivation] Synthesizing {len(promoted_items)} promoted candidates "
+                        f"({len(recurring_ids)} recurring) with {self.model_name}..."
+                    )
+                    with span.subtimer("llm_call_ms"):
+                        subconscious_thoughts = await self._synthesize_memories(
+                            original_text, formatted_candidates
+                        )
+                except Exception as e:
+                    span.fail()
+                    print(f"[SpreadingActivation Warning] Synthesis failed ({e}); falling back to raw recall.")
+                    subconscious_thoughts = formatted_candidates
+
+                span.inc("response_tokens", count_tokens(subconscious_thoughts, agent=agent_obj))
+                span.inc("response_bytes", len((subconscious_thoughts or "").encode("utf-8")))
+
+                if subconscious_thoughts.strip():
+                    print("[SpreadingActivation] Found relevant associative memories. Injecting into Layer-0.")
+                    new_content = (
+                        f"[Subconscious Recall Triggered by below message:]\n"
+                        f"{subconscious_thoughts.strip()}\n"
+                        f"--- End Recall ---\n\n"
+                        f"{original_text}"
+                    )
+                    payload["content"] = new_content

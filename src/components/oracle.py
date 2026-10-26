@@ -2,6 +2,7 @@ import asyncio
 from typing import List, Callable
 from src.components.base import BaseComponent
 from src.utils.config import load_config
+from src.utils.metrics import MetricSpan, count_tokens
 from google import genai
 from google.genai import types
 
@@ -41,17 +42,44 @@ class OracleComponent(BaseComponent):
         Use this tool to look up current events, facts, or seek advice on complex topics.
         """
         print(f"[Oracle] Consulting the oracle for: '{query}'")
-        
-        try:
-            response = await self.client.aio.models.generate_content(
-                model=self.model_name,
-                contents=query,
-                config=types.GenerateContentConfig(
-                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
-                )
-            )
-            return response.text
-        except Exception as e:
-            error_msg = f"Failed to consult the oracle: {str(e)}"
-            print(f"[Oracle] {error_msg}")
-            return error_msg
+        agent_obj = getattr(self, "agent", None)
+        agent_name = getattr(agent_obj, "name", None) or self.config.get("agent", {}).get("name", "Thunk")
+        thread_id = getattr(agent_obj, "thread_id", None) or "main"
+
+        with MetricSpan(
+            operation="llm_call",
+            agent=agent_name,
+            thread=thread_id,
+            component="oracle",
+            type="oracle",
+            model=self.model_name,
+            exec_location="cloud",
+        ) as span:
+            span.inc("request_bytes", len((query or "").encode("utf-8")))
+            try:
+                with span.subtimer("llm_call_ms"):
+                    response = await self.client.aio.models.generate_content(
+                        model=self.model_name,
+                        contents=query,
+                        config=types.GenerateContentConfig(
+                            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
+                        ),
+                    )
+                text = response.text or ""
+                usage_meta = getattr(response, "usage_metadata", None)
+                req_tok = getattr(usage_meta, "prompt_token_count", None) if usage_meta else None
+                resp_tok = getattr(usage_meta, "candidates_token_count", None) if usage_meta else None
+                if req_tok is None:
+                    req_tok = count_tokens(query, agent=agent_obj)
+                if resp_tok is None:
+                    resp_tok = count_tokens(text, agent=agent_obj)
+
+                span.inc("request_tokens", req_tok)
+                span.inc("response_tokens", resp_tok)
+                span.inc("response_bytes", len(text.encode("utf-8")))
+                return text
+            except Exception as e:
+                span.fail()
+                error_msg = f"Failed to consult the oracle: {str(e)}"
+                print(f"[Oracle] {error_msg}")
+                return error_msg

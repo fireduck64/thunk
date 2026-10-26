@@ -4,6 +4,7 @@ import httpx
 from openai import AsyncOpenAI
 from src.components.base import BaseComponent
 from src.utils.config import load_config
+from src.utils.metrics import MetricSpan, count_tokens, infer_exec_location
 
 class SubconsciousRecallComponent(BaseComponent):
     """
@@ -88,48 +89,71 @@ class SubconsciousRecallComponent(BaseComponent):
             if original_text.startswith("[System Clock]"):
                 return
 
-            print(f"[Subconscious] Associating top-{self.top_k} concepts for incoming message...")
-            
-            tasks = []
-            loop = asyncio.get_event_loop()
-            for comp in self.internal_memory_components:
-                if hasattr(comp, "search_semantic_memory"):
-                    tasks.append(loop.run_in_executor(None, comp.search_semantic_memory, original_text, self.top_k))
-                elif asyncio.iscoroutinefunction(comp.execute_search):
-                    tasks.append(comp.execute_search(original_text))
-                else:
-                    tasks.append(loop.run_in_executor(None, comp.execute_search, original_text))
-                    
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            raw_candidates = []
-            for result in results:
-                if isinstance(result, Exception) or not result:
-                    continue
-                text = result.strip()
-                if text and not text.startswith("No relevant memories found") and not text.startswith("Error "):
-                    raw_candidates.append(text)
+            agent_obj = getattr(self, "agent", None)
+            agent_name = getattr(agent_obj, "name", None) or self.agent_name
+            thread_id = getattr(agent_obj, "thread_id", None) or self.thread_id or "main"
+            exec_loc = infer_exec_location(self.api_url)
 
-            if not raw_candidates:
-                return
+            with MetricSpan(
+                operation="llm_call",
+                agent=agent_name,
+                thread=thread_id,
+                component="subconscious",
+                type="subconscious_recall",
+                model=self.model_name,
+                exec_location=exec_loc,
+            ) as span:
+                print(f"[Subconscious] Associating top-{self.top_k} concepts for incoming message...")
+                
+                tasks = []
+                loop = asyncio.get_event_loop()
+                for comp in self.internal_memory_components:
+                    if hasattr(comp, "search_semantic_memory"):
+                        tasks.append(loop.run_in_executor(None, comp.search_semantic_memory, original_text, self.top_k))
+                    elif asyncio.iscoroutinefunction(comp.execute_search):
+                        tasks.append(comp.execute_search(original_text))
+                    else:
+                        tasks.append(loop.run_in_executor(None, comp.execute_search, original_text))
+                        
+                with span.subtimer("db_lookup_ms"):
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                span.inc("db_lookup", len(tasks))
+                
+                raw_candidates = []
+                for result in results:
+                    if isinstance(result, Exception) or not result:
+                        continue
+                    text = result.strip()
+                    if text and not text.startswith("No relevant memories found") and not text.startswith("Error "):
+                        raw_candidates.append(text)
 
-            combined_raw = "\n\n".join(raw_candidates)
-            try:
-                print(f"[Subconscious] Synthesizing candidate memories with {self.model_name}...")
-                subconscious_thoughts = await self._synthesize_memories(original_text, combined_raw)
-            except Exception as e:
-                print(f"[Subconscious Warning] Synthesis failed ({e}); falling back to raw recall.")
-                subconscious_thoughts = combined_raw
+                span.inc("db_lookup_records", len(raw_candidates))
+                if not raw_candidates:
+                    return
 
-            # If we found relevant internal memories, we prepend them to the message.
-            # This injected text goes into Working Memory (LLM context window)
-            # without getting permanently written to the Archival Log.
-            if subconscious_thoughts.strip():
-                print("[Subconscious] Found relevant associative memories. Injecting.")
-                new_content = (
-                    f"[Subconscious Recall Triggered by below message:]\n"
-                    f"{subconscious_thoughts.strip()}\n"
-                    f"--- End Recall ---\n\n"
-                    f"{original_text}"
-                )
-                payload["content"] = new_content
+                combined_raw = "\n\n".join(raw_candidates)
+                req_str = f"{original_text}\n{combined_raw}"
+                span.inc("request_tokens", count_tokens(req_str, agent=agent_obj))
+                span.inc("request_bytes", len(req_str.encode("utf-8")))
+
+                try:
+                    print(f"[Subconscious] Synthesizing candidate memories with {self.model_name}...")
+                    with span.subtimer("llm_call_ms"):
+                        subconscious_thoughts = await self._synthesize_memories(original_text, combined_raw)
+                except Exception as e:
+                    span.fail()
+                    print(f"[Subconscious Warning] Synthesis failed ({e}); falling back to raw recall.")
+                    subconscious_thoughts = combined_raw
+
+                span.inc("response_tokens", count_tokens(subconscious_thoughts, agent=agent_obj))
+                span.inc("response_bytes", len((subconscious_thoughts or "").encode("utf-8")))
+
+                if subconscious_thoughts.strip():
+                    print("[Subconscious] Found relevant associative memories. Injecting.")
+                    new_content = (
+                        f"[Subconscious Recall Triggered by below message:]\n"
+                        f"{subconscious_thoughts.strip()}\n"
+                        f"--- End Recall ---\n\n"
+                        f"{original_text}"
+                    )
+                    payload["content"] = new_content
