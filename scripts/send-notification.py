@@ -33,10 +33,10 @@ async def send_notification():
         print(f"Error loading configuration: {e}")
         sys.exit(1)
 
-    # Publish message to MQTT broker with QoS 1 and retain=True so it is held until consumed
+    # Publish message to MQTT broker with QoS 1 (queued by broker for persistent clean_session=False clients)
     try:
         async with aiomqtt.Client(hostname=host, port=port) as client:
-            await client.publish(topic, payload=content.encode('utf-8'), qos=1, retain=True)
+            await client.publish(topic, payload=content.encode('utf-8'), qos=1, retain=False)
             print(f"Successfully sent notification to '{topic}' via MQTT.")
     except Exception as e:
         print(f"Failed to send notification via MQTT: {e}")

@@ -141,12 +141,6 @@ async def chat_loop(username: str, initial_recipient: str = None):
                         if not payload_raw.strip():
                             continue
 
-                        # Clear retained DM upon consumption per mqtt-standards.md
-                        try:
-                            await client.publish(dm_topic, b"", qos=1, retain=True)
-                        except Exception as e:
-                            print(f"\r\033[K\n[MQTT Warning] Failed to clear retained DM: {e}")
-
                         try:
                             data = json.loads(payload_raw)
                             if isinstance(data, dict):
@@ -212,7 +206,7 @@ async def chat_loop(username: str, initial_recipient: str = None):
                         target_topic,
                         build_dm_payload(user_display, body),
                         qos=1,
-                        retain=True,
+                        retain=False,
                     )
                     print(prompt_str(), end="", flush=True)
 

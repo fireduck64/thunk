@@ -73,7 +73,7 @@ class MQTTAdapter:
                     target_topic,
                     dm_envelope.encode("utf-8"),
                     qos=1,
-                    retain=True,
+                    retain=False,
                 )
                 payload["mqtt_recipient"] = recipient
                 payload["mqtt_topic"] = target_topic
@@ -115,16 +115,9 @@ class MQTTAdapter:
         # 2. Direct Message topic (<agent>/agent/dm)
         if topic_str == self.dm_topic:
             if not payload_raw.strip():
-                # Empty payload is used to clear a consumed retained message
                 return
 
             print(f"\n[MQTT Incoming DM] {topic_str}: {payload_raw}")
-            # Clear the retained message on the broker now that it has been consumed
-            if self.client:
-                try:
-                    await self.client.publish(self.dm_topic, b"", qos=1, retain=True)
-                except Exception as e:
-                    print(f"[MQTT Warning] Could not clear retained DM on {self.dm_topic}: {e}")
 
             try:
                 data = json.loads(payload_raw)
@@ -156,12 +149,6 @@ class MQTTAdapter:
                 return
 
             print(f"\n[MQTT Incoming System] {topic_str}: {payload_raw}")
-            if retain and self.client:
-                try:
-                    await self.client.publish(self.inbox_topic, b"", qos=1, retain=True)
-                except Exception as e:
-                    print(f"[MQTT Warning] Could not clear retained inbox message on {self.inbox_topic}: {e}")
-
             formatted_payload = f"[Via MQTT | System] {payload_raw}"
             await self.agent.resume(formatted_payload)
 
