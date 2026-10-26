@@ -45,14 +45,6 @@ db_path = "data/thunk/notes.db"       # SQLite database file for structured scra
 [tasks]
 db_path = "data/thunk/tasks.db"       # SQLite database file for priority task queue (REQUIRED)
 
-[reader]
-library_dir = "/vault/ebook"          # Path to directory containing EPUB documents (REQUIRED)
-db_path = "data/thunk/reader_state.db"# SQLite database file for reader bookmark state (REQUIRED)
-
-[pdf_viewer]
-library_dir = "/vault/pdf"            # Path to directory containing PDF documents (REQUIRED)
-db_path = "data/thunk/pdf_state.db"   # SQLite database file for PDF viewer state and metadata cache (REQUIRED)
-
 [skills]
 skills_dir = "data/thunk/skills"      # Directory storing agent procedural markdown skills (REQUIRED)
 
@@ -60,10 +52,15 @@ skills_dir = "data/thunk/skills"      # Directory storing agent procedural markd
 log_dir = "data/thunk/logs"           # Directory storing session JSONL audit logs (REQUIRED)
 verbose = true                        # When true, dumps full agent context on turns
 
+[file_reader]
+db_path = "data/thunk/reader_state.db"# SQLite database file for EPUB/PDF bookmark state and metadata cache
+
 [file_reader.libraries]
-# Named libraries mapping alias names to local directories for inspection (REQUIRED)
+# Named libraries mapping alias names to local directories for reading books, PDFs, code, and images (REQUIRED)
+ebook = "/vault/ebook"
+pdf = "/vault/pdf"
+discord_file = "data/thunk/images"
 thunk_source = "/home/fireduck/projects/thunk/src"
-discord_images = "data/thunk/images"
 
 [embeddings]
 # Embedding model for vector database ingestion and semantic search
@@ -131,7 +128,7 @@ stream_output = true
 # [threads.reader]
 # role = "Deep sequential reading, literature study, and synthesis (EPUBs & PDFs)"
 # adapters = []
-# components = ["reader", "pdf_viewer", "notes", "tasks", "vector_memory", "knowledge", "global_search", "skills"]
+# components = ["file_reader", "notes", "tasks", "vector_memory", "knowledge", "global_search", "skills"]
 #
 # [threads.worker]
 # role = "Autonomous coding, data analysis, and Linux workspace execution"

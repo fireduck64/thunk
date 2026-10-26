@@ -4,8 +4,12 @@ import os
 import shutil
 import sqlite3
 from typing import Callable, Dict, List, Optional, Tuple
+import fitz
+from bs4 import BeautifulSoup
+from ebooklib import epub
 from src.components.base import BaseComponent
 from src.utils.config import load_config
+from src.utils.image import downsize_image_bytes, encode_jpeg_data_url
 
 
 MIND_README_CONTENT = """# Agent Mind Read-Only Mirror (`/home/agent/mind`)
@@ -94,14 +98,18 @@ class WorkspaceComponent(BaseComponent):
                 "notes.db": os.path.join(base_agent_dir, "notes.db"),
                 "tasks.db": os.path.join(base_agent_dir, "tasks.db"),
                 "reader_state.db": os.path.join(base_agent_dir, "reader_state.db"),
-                "pdf_state.db": os.path.join(base_agent_dir, "pdf_state.db"),
             }
         else:
+            base_agent_dir = os.path.dirname(os.path.abspath(self.live_db_path))
+            reader_db = (
+                self.config.get("file_reader", {}).get("db_path")
+                or self.config.get("reader", {}).get("db_path")
+                or os.path.join(base_agent_dir, "reader_state.db")
+            )
             self.extra_db_paths = {
                 "notes.db": self.config.get("notes", {}).get("db_path", ""),
                 "tasks.db": self.config.get("tasks", {}).get("db_path", ""),
-                "reader_state.db": self.config.get("reader", {}).get("db_path", ""),
-                "pdf_state.db": self.config.get("pdf_viewer", {}).get("db_path", ""),
+                "reader_state.db": reader_db,
             }
 
         if skills_dir is not None:
@@ -119,10 +127,10 @@ class WorkspaceComponent(BaseComponent):
             "--- LINUX WORKSPACE & MIND MIRROR ---\n"
             f"You have a persistent, air-gapped Linux workspace at `{self.container_workdir}` (read-write) "
             "equipped with Python 3 (numpy, pandas, networkx, sympy, matplotlib), Go, Java, Bazel, C/C++, sqlite3, ripgrep, jq, and standard CLI tools.\n"
-            f"You also have a read-only mirror of your own internal SQLite databases (`memory.db`, `notes.db`, `tasks.db`, `reader_state.db`, `pdf_state.db`) "
+            f"You also have a read-only mirror of your own internal SQLite databases (`memory.db`, `notes.db`, `tasks.db`, `reader_state.db`) "
             f"and `skills/` mounted at `{self.container_mind_dir}` (see `{self.container_mind_dir}/README.md` for table schemas).\n"
-            "Use `run_workspace_command`, `write_workspace_file`, `read_workspace_file`, and `list_workspace_files` to write scripts, "
-            "run experiments, analyze data, or inspect your own memory database."
+            "Use `run_workspace_command`, `write_workspace_file`, `read_workspace_file`, `view_workspace_image`, and `list_workspace_files` "
+            "to write scripts, run experiments, inspect generated plots/PDFs, or query your own memory database."
         )
 
     def get_tools(self) -> List[Callable]:
@@ -130,6 +138,7 @@ class WorkspaceComponent(BaseComponent):
             self.run_workspace_command,
             self.write_workspace_file,
             self.read_workspace_file,
+            self.view_workspace_image,
             self.list_workspace_files,
         ]
 
@@ -371,21 +380,170 @@ class WorkspaceComponent(BaseComponent):
         except Exception as e:
             return f"Error writing workspace file '{path}': {str(e)}"
 
-    def read_workspace_file(self, path: str) -> str:
+    def read_workspace_file(self, path: str, chunk: int = 1) -> str:
         """
-        Reads a UTF-8 text file from your workspace (/home/agent/workspace) or mind mirror (/home/agent/mind).
+        Reads a file (UTF-8 text, PDF page, or EPUB chunk) from your workspace (/home/agent/workspace)
+        or mind mirror (/home/agent/mind). Pass 'chunk' (1-indexed) to read specific pages of PDFs or chunks of large files.
         """
         try:
-            abs_path, _ = self._resolve_workspace_read_path(path, allow_dir=False)
+            abs_path, base_dir = self._resolve_workspace_read_path(path, allow_dir=False)
             if not os.path.exists(abs_path):
                 return f"Error: File '{path}' does not exist."
             if not os.path.isfile(abs_path):
                 return f"Error: '{path}' is not a regular file."
+
+            rel_path = os.path.relpath(abs_path, base_dir)
+            chunk_idx = max(1, int(chunk if chunk is not None else 1))
+            ext = os.path.splitext(abs_path)[1].lower()
+
+            if ext == ".pdf":
+                with fitz.open(abs_path) as doc:
+                    total_pages = len(doc)
+                    if chunk_idx > total_pages:
+                        return json.dumps(
+                            {
+                                "format": "pdf",
+                                "path": rel_path,
+                                "error": f"Invalid chunk/page {chunk_idx}. PDF has {total_pages} pages (1..{total_pages}).",
+                                "total_pages": total_pages,
+                            },
+                            indent=2,
+                        )
+                    page = doc[chunk_idx - 1]
+                    text = page.get_text("text").strip()
+                    raw_images = page.get_images(full=True)
+                    images = [
+                        {"width": int(img[2]), "height": int(img[3])}
+                        for img in raw_images
+                        if int(img[2]) > 8 and int(img[3]) > 8
+                    ]
+                    vector_drawing_count = len(page.get_drawings())
+                    has_visuals = bool(images) or vector_drawing_count > 5
+
+                next_hint = (
+                    f"Call read_workspace_file(path='{rel_path}', chunk={chunk_idx + 1}) for page {chunk_idx + 1}/{total_pages}."
+                    if chunk_idx < total_pages
+                    else f"End of PDF '{rel_path}' reached ({total_pages}/{total_pages})."
+                )
+                res = {
+                    "format": "pdf",
+                    "path": rel_path,
+                    "chunk": chunk_idx,
+                    "page_number": chunk_idx,
+                    "total_pages": total_pages,
+                    "total_chunks": total_pages,
+                    "content": text,
+                    "has_unrenderable_visuals": has_visuals,
+                    "image_count": len(images),
+                    "vector_drawing_count": vector_drawing_count,
+                    "next_hint": next_hint,
+                }
+                if has_visuals or not text:
+                    res["notice"] = (
+                        f"Call view_workspace_image(path='{rel_path}', chunk={chunk_idx}) to visually inspect this page."
+                    )
+                return json.dumps(res, indent=2)
+
+            if ext == ".epub":
+                book = epub.read_epub(abs_path)
+                parts = []
+                for item in book.get_items_of_type(9):
+                    soup = BeautifulSoup(item.get_body_content(), "html.parser")
+                    t = soup.get_text(separator=" ", strip=True)
+                    if t:
+                        parts.append(t)
+                combined = "\n\n".join(parts)
+                c_size = 2500
+                chunks = [combined[i : i + c_size] for i in range(0, len(combined), c_size)] or [""]
+                total_chunks = len(chunks)
+                if chunk_idx > total_chunks:
+                    return json.dumps(
+                        {
+                            "format": "epub",
+                            "path": rel_path,
+                            "error": f"Requested chunk {chunk_idx} exceeds total_chunks ({total_chunks}).",
+                            "total_chunks": total_chunks,
+                        },
+                        indent=2,
+                    )
+                return json.dumps(
+                    {
+                        "format": "epub",
+                        "path": rel_path,
+                        "chunk": chunk_idx,
+                        "total_chunks": total_chunks,
+                        "content": chunks[chunk_idx - 1],
+                        "next_hint": (
+                            f"Call read_workspace_file(path='{rel_path}', chunk={chunk_idx + 1}) for chunk {chunk_idx + 1}/{total_chunks}."
+                            if chunk_idx < total_chunks
+                            else f"End of EPUB '{rel_path}' reached."
+                        ),
+                    },
+                    indent=2,
+                )
+
             with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
-            return self._truncate_output(content)
+
+            if chunk_idx == 1:
+                return self._truncate_output(content)
+
+            step = max(1, self.max_output_chars)
+            chunks = [content[i : i + step] for i in range(0, len(content), step)] or [""]
+            if chunk_idx > len(chunks):
+                return f"Error: Requested chunk {chunk_idx} exceeds total_chunks ({len(chunks)})."
+            return chunks[chunk_idx - 1]
         except Exception as e:
             return f"Error reading workspace file '{path}': {str(e)}"
+
+    def view_workspace_image(self, path: str, chunk: int = 1) -> str:
+        """
+        Loads an image file (or renders page 'chunk' of a PDF) from your workspace (/home/agent/workspace),
+        downsizes it to at most 1024px on its longest edge, and attaches it to your visual context for the current turn.
+        """
+        try:
+            abs_path, base_dir = self._resolve_workspace_read_path(path, allow_dir=False)
+            if not os.path.exists(abs_path):
+                return f"Error: File '{path}' does not exist."
+            if not os.path.isfile(abs_path):
+                return f"Error: '{path}' is not a regular file."
+
+            rel_path = os.path.relpath(abs_path, base_dir)
+            ext = os.path.splitext(abs_path)[1].lower()
+
+            if ext == ".pdf":
+                page_number = max(1, int(chunk if chunk is not None else 1))
+                with fitz.open(abs_path) as doc:
+                    total_pages = len(doc)
+                    if page_number < 1 or page_number > total_pages:
+                        return f"Error: Invalid page/chunk {page_number}. PDF has {total_pages} pages (1..{total_pages})."
+                    page = doc[page_number - 1]
+                    pix = page.get_pixmap(dpi=150, alpha=False)
+                    raw_png = pix.tobytes("png")
+
+                jpeg_bytes, width, height = downsize_image_bytes(raw_png, max_edge=1024)
+                data_url = encode_jpeg_data_url(jpeg_bytes)
+                if hasattr(self, "agent") and self.agent is not None:
+                    self.agent.pending_tool_images.append(data_url)
+
+                return (
+                    f"Rendered page {page_number}/{total_pages} of workspace PDF '{rel_path}' "
+                    f"({width}x{height}px) into your visual context for this turn."
+                )
+
+            with open(abs_path, "rb") as f:
+                raw_bytes = f.read()
+
+            jpeg_bytes, width, height = downsize_image_bytes(raw_bytes, max_edge=1024)
+            data_url = encode_jpeg_data_url(jpeg_bytes)
+            if hasattr(self, "agent") and self.agent is not None:
+                self.agent.pending_tool_images.append(data_url)
+
+            return (
+                f"Loaded workspace image '{rel_path}' ({width}x{height}px) into your visual context for this turn."
+            )
+        except Exception as e:
+            return f"Error viewing workspace image '{path}': {str(e)}"
 
     def list_workspace_files(self, subdir: str = ".") -> str:
         """

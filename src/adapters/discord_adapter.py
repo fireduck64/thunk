@@ -7,12 +7,14 @@ from src.utils.config import load_config
 from src.utils.image import downsize_image_bytes, encode_jpeg_data_url, save_image_atomic
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
+DOCUMENT_EXTENSIONS = (".pdf", ".epub")
 TEXT_EXTENSIONS = (
     ".txt", ".md", ".markdown", ".json", ".jsonl", ".py", ".sh",
     ".toml", ".yaml", ".yml", ".csv", ".log", ".xml", ".html",
     ".css", ".js", ".ts", ".sql", ".ini", ".cfg"
 )
 MAX_TEXT_ATTACHMENT_BYTES = 2 * 1024 * 1024
+MAX_DOC_ATTACHMENT_BYTES = 25 * 1024 * 1024
 
 class DiscordAdapter:
     """
@@ -27,9 +29,12 @@ class DiscordAdapter:
         discord_cfg = self.config.get("discord", {})
         self.token = discord_cfg.get("bot_token")
         self.allowed_channel_id = discord_cfg.get("allowed_channel_id")
+        libs = self.config.get("file_reader", {}).get("libraries", {})
         self.images_dir = (
-            discord_cfg.get("images_dir")
-            or self.config.get("file_reader", {}).get("libraries", {}).get("discord_images")
+            discord_cfg.get("files_dir")
+            or discord_cfg.get("images_dir")
+            or libs.get("discord_file")
+            or libs.get("discord_images")
         )
         if self.images_dir:
             os.makedirs(self.images_dir, exist_ok=True)
@@ -196,7 +201,7 @@ class DiscordAdapter:
                             dest_path = os.path.join(self.images_dir, saved_name)
                             save_image_atomic(jpeg_bytes, dest_path)
                             attachment_notes.append(
-                                f"[Attached Image: '{attachment.filename}' ({width}x{height}px, saved in library 'discord_images' as '{saved_name}')]"
+                                f"[Attached Image: '{attachment.filename}' ({width}x{height}px, saved in library 'discord_file' as '{saved_name}')]"
                             )
                         else:
                             attachment_notes.append(
@@ -206,6 +211,25 @@ class DiscordAdapter:
                         print(f"[Discord Error] Failed to process image attachment '{attachment.filename}': {e}")
                         attachment_notes.append(
                             f"[Attached File: '{attachment.filename}' (type: {ctype_label}, size: {size_bytes} bytes — failed to load image: {e})]"
+                        )
+                elif (
+                    (ctype == "application/pdf" or ctype == "application/epub+zip" or ext in DOCUMENT_EXTENSIONS)
+                    and size_bytes <= MAX_DOC_ATTACHMENT_BYTES
+                    and self.images_dir
+                ):
+                    try:
+                        raw_bytes = await attachment.read()
+                        safe_ext = ext if ext in DOCUMENT_EXTENSIONS else (".pdf" if "pdf" in ctype else ".epub")
+                        saved_name = f"{message.id}_{idx}_{safe_stem}{safe_ext}"
+                        dest_path = os.path.join(self.images_dir, saved_name)
+                        save_image_atomic(raw_bytes, dest_path)
+                        attachment_notes.append(
+                            f"[Attached Document: '{attachment.filename}' (type: {ctype_label}, size: {size_bytes} bytes, saved in library 'discord_file' as '{saved_name}' — use read_file or view_image on library 'discord_file' to inspect)]"
+                        )
+                    except Exception as e:
+                        print(f"[Discord Error] Failed to save document attachment '{attachment.filename}': {e}")
+                        attachment_notes.append(
+                            f"[Attached File: '{attachment.filename}' (type: {ctype_label}, size: {size_bytes} bytes — attachment not loaded)]"
                         )
                 elif (
                     (ctype.startswith("text/") or "json" in ctype or "xml" in ctype or ext in TEXT_EXTENSIONS)
@@ -219,7 +243,7 @@ class DiscordAdapter:
                         dest_path = os.path.join(self.images_dir, saved_name)
                         save_image_atomic(raw_bytes, dest_path)
                         attachment_notes.append(
-                            f"[Attached File: '{attachment.filename}' (type: {ctype_label}, size: {size_bytes} bytes, saved in library 'discord_images' as '{saved_name}' — use read_file to inspect)]"
+                            f"[Attached File: '{attachment.filename}' (type: {ctype_label}, size: {size_bytes} bytes, saved in library 'discord_file' as '{saved_name}' — use read_file on library 'discord_file' to inspect)]"
                         )
                     except Exception as e:
                         print(f"[Discord Error] Failed to save text attachment '{attachment.filename}': {e}")

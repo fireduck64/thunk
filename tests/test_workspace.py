@@ -273,5 +273,57 @@ async def test_workspace_filepath_alias_and_error_reporting(tmp_path):
         json.dumps({"wrong_arg": "museum/crab_union_manifesto.md"}),
     )
     assert "received args: ['wrong_arg']" in err_res
-    assert "expected params: ['path']" in err_res
+    assert "expected params: ['path', 'chunk']" in err_res
+
+
+def test_workspace_view_image_and_pdf_reading(tmp_path):
+    """Verifies view_workspace_image and read_workspace_file support images and PDFs inside the workspace."""
+    import io
+    import fitz
+    from PIL import Image
+    from src.core.agent import AgentCore
+
+    ws_dir = tmp_path / "workspace"
+    mind_dir = tmp_path / "mind_ro"
+    live_db = tmp_path / "memory.db"
+
+    comp = WorkspaceComponent(
+        workspace_dir=str(ws_dir),
+        mind_ro_dir=str(mind_dir),
+        live_db_path=str(live_db),
+    )
+    agent = AgentCore()
+    agent.register_component(comp)
+
+    # 1. Save a plot image inside workspace and inspect with view_workspace_image
+    plot_path = ws_dir / "plot.png"
+    Image.new("RGB", (800, 600), (30, 140, 90)).save(str(plot_path), format="PNG")
+
+    img_res = comp.view_workspace_image("plot.png")
+    assert "Loaded workspace image 'plot.png' (800x600px)" in img_res
+    assert len(agent.pending_tool_images) == 1
+    assert agent.pending_tool_images[0].startswith("data:image/jpeg;base64,")
+    agent.pending_tool_images.clear()
+
+    # 2. Save a 2-page PDF inside workspace, read page 1 with read_workspace_file, and render page 2 with view_workspace_image
+    pdf_path = ws_dir / "analysis.pdf"
+    doc = fitz.open()
+    p1 = doc.new_page(width=612, height=792)
+    p1.insert_text((72, 72), "Workspace PDF Page 1 Summary")
+    p2 = doc.new_page(width=612, height=792)
+    p2.insert_text((72, 72), "Workspace PDF Page 2 Chart")
+    doc.save(str(pdf_path))
+    doc.close()
+
+    pdf_p1 = json.loads(comp.read_workspace_file("analysis.pdf", chunk=1))
+    assert pdf_p1["format"] == "pdf"
+    assert pdf_p1["chunk"] == 1
+    assert pdf_p1["total_pages"] == 2
+    assert "Workspace PDF Page 1 Summary" in pdf_p1["content"]
+
+    pdf_view = comp.view_workspace_image("analysis.pdf", chunk=2)
+    assert "Rendered page 2/2 of workspace PDF 'analysis.pdf'" in pdf_view
+    assert len(agent.pending_tool_images) == 1
+    assert agent.pending_tool_images[0].startswith("data:image/jpeg;base64,")
+
 

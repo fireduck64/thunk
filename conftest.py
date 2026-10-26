@@ -29,7 +29,14 @@ def _ensure_test_environment(config_path: str) -> None:
             f.write("# Test Agent Directives\nYou are TestAgent, running inside the automated test suite.\n")
         os.replace(tmp_dir, directives_path)
 
-    if not os.path.exists(config_path):
+    need_write_config = not os.path.exists(config_path)
+    if not need_write_config:
+        with open(config_path, "r", encoding="utf-8") as f:
+            existing_cfg_text = f.read()
+        if "discord_file" not in existing_cfg_text or "[reader]" in existing_cfg_text:
+            need_write_config = True
+
+    if need_write_config:
         tmp_cfg = f"{config_path}.tmp"
         with open(tmp_cfg, "w", encoding="utf-8") as f:
             f.write(
@@ -41,11 +48,10 @@ def _ensure_test_environment(config_path: str) -> None:
                 '[memory]\nhigh_watermark = 300\nlow_watermark = 150\nmax_summarize_tokens = 300\nmax_summary_tokens = 200\ndb_path = "data/test/memory.db"\n\n'
                 '[notes]\ndb_path = "data/test/notes.db"\n\n'
                 '[tasks]\ndb_path = "data/test/tasks.db"\n\n'
-                '[reader]\nlibrary_dir = "data/test/library"\ndb_path = "data/test/reader_state.db"\n\n'
-                '[pdf_viewer]\nlibrary_dir = "data/test/pdf_library"\ndb_path = "data/test/pdf_state.db"\n\n'
                 '[skills]\nskills_dir = "data/test/skills"\n\n'
                 '[logging]\nlog_dir = "data/test/logs"\nverbose = false\n\n'
-                '[file_reader.libraries]\nthunk_source = "src"\ndiscord_images = "data/test/images"\n\n'
+                '[file_reader]\ndb_path = "data/test/reader_state.db"\n\n'
+                '[file_reader.libraries]\nebook = "data/test/library"\npdf = "data/test/pdf_library"\ndiscord_file = "data/test/images"\nthunk_source = "src"\n\n'
                 '[embeddings]\napi_url = "http://localhost:11434/api/embeddings"\napi_key = ""\nmodel_name = "nomic-embed-text"\n\n'
                 '[vectordb]\nhost = "localhost"\nport = 6333\nknowledge_collection = "test_knowledge_base"\nmemory_collection = "test_agent_memory"\n\n'
                 '[mqtt]\nhost = "localhost"\nport = 1883\ninbox_topic = "test/agent/inbox"\noutbox_topic = "test/agent/outbox"\n\n'
@@ -85,15 +91,16 @@ def _ensure_test_environment(config_path: str) -> None:
 def _verify_test_config_isolation(cfg: dict) -> None:
     """Refuses to run tests if any configured path or Qdrant collection points outside test namespaces."""
     abs_test_dir = os.path.abspath(TEST_DATA_DIR)
+    libs = cfg.get("file_reader", {}).get("libraries", {})
     paths_to_check = [
         cfg.get("directives", {}).get("file_path", ""),
         cfg.get("memory", {}).get("db_path", ""),
         cfg.get("notes", {}).get("db_path", ""),
         cfg.get("tasks", {}).get("db_path", ""),
-        cfg.get("reader", {}).get("library_dir", ""),
-        cfg.get("reader", {}).get("db_path", ""),
-        cfg.get("pdf_viewer", {}).get("library_dir", "data/test/pdf_library"),
-        cfg.get("pdf_viewer", {}).get("db_path", "data/test/pdf_state.db"),
+        cfg.get("file_reader", {}).get("db_path", "data/test/reader_state.db"),
+        libs.get("ebook", "data/test/library"),
+        libs.get("pdf", "data/test/pdf_library"),
+        libs.get("discord_file", "data/test/images"),
         cfg.get("skills", {}).get("skills_dir", ""),
         cfg.get("logging", {}).get("log_dir", ""),
         cfg.get("discord", {}).get("images_dir", "data/test/images"),

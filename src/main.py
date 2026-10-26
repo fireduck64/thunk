@@ -16,8 +16,6 @@ from src.components.knowledge import KnowledgeBaseComponent
 from src.components.logger import AuditLogComponent
 from src.components.tiered import TieredMemoryComponent
 from src.components.critic import CriticComponent
-from src.components.reader import SequentialReaderComponent
-from src.components.pdf_viewer import PdfViewerComponent
 from src.components.system import SystemComponent
 from src.components.tasks import TaskQueueComponent
 from src.components.clock import ClockComponent
@@ -100,13 +98,18 @@ def _register_thread_components(
         agent.register_component(KnowledgeBaseComponent(thread_id=thread_id))
     if _wants("vector_memory", "vectormemorycomponent"):
         agent.register_component(VectorMemoryComponent(thread_id=thread_id))
-    if _wants("reader", "sequential_reader", "sequentialreadercomponent"):
-        agent.register_component(SequentialReaderComponent())
-    if _wants("pdf_viewer", "pdf", "pdfviewercomponent"):
-        agent.register_component(PdfViewerComponent())
     if _wants("global_search", "globalsearchcomponent"):
         agent.register_component(GlobalSearchComponent())
-    if _wants("file_reader", "filereadercomponent"):
+    if _wants(
+        "file_reader",
+        "filereadercomponent",
+        "reader",
+        "sequential_reader",
+        "sequentialreadercomponent",
+        "pdf_viewer",
+        "pdf",
+        "pdfviewercomponent",
+    ):
         agent.register_component(FileReaderComponent())
     if _wants("oracle", "oraclecomponent"):
         agent.register_component(OracleComponent())

@@ -1,67 +1,76 @@
+import io
+import json
 import os
+import fitz
 import pytest
+from PIL import Image
+
+from src.core.agent import AgentCore
+from src.components.file_reader import FileReaderComponent
 from src.utils.config import load_config
-from src.components.reader import SequentialReaderComponent
+from src.utils.image import downsize_image_bytes, encode_jpeg_data_url, save_image_atomic
 
 
-def test_sequential_reader_metadata_and_chunks():
-    """Tests EPUB metadata extraction, caching, opening, and chunk headers in isolated data/test."""
+def test_unified_file_reader_epub_and_text_chunks():
+    """Tests unified FileReaderComponent EPUB metadata, listing/search, chunk reading, read_next_chunk, and bookmark persistence."""
     cfg = load_config()
-    db_path = cfg["reader"]["db_path"]
+    db_path = cfg["file_reader"]["db_path"]
     if os.path.exists(db_path):
         os.remove(db_path)
 
-    reader = SequentialReaderComponent(chunk_size=300)
+    reader = FileReaderComponent(chunk_size=300, lines_per_chunk=20)
 
-    # 1. Verify library catalog includes title, author, and relative path
-    catalog = reader.list_library()
-    assert len(catalog) >= 1
-    assert any("Pride and Prejudice: Test Edition by Jane Austen [path: MrDarcy.epub]" in item for item in catalog)
+    # 1. Verify list_libraries includes ebook, pdf, discord_file, thunk_source
+    libs_out = reader.list_libraries()
+    assert "ebook" in libs_out
+    assert "pdf" in libs_out
+    assert "discord_file" in libs_out
+    assert "thunk_source" in libs_out
 
-    # 2. Verify search_library matches against title/author metadata as well as path (regardless of word order)
-    matches = reader.search_library("Austen, Jane")
-    assert len(matches) == 1
-    assert matches[0] == "Pride and Prejudice: Test Edition by Jane Austen [path: MrDarcy.epub]"
+    # 2. Verify list_files and query search on 'ebook' library
+    listing = reader.list_files("ebook")
+    assert "Pride and Prejudice: Test Edition by Jane Austen [path: MrDarcy.epub]" in listing
 
-    # 3. Verify open_book accepts the full catalog entry and sets the book label
-    open_msg = reader.open_book(matches[0])
-    assert "Successfully opened" in open_msg
-    assert "Pride and Prejudice: Test Edition by Jane Austen" in open_msg
-    assert len(reader.current_chunks) >= 2
+    search_out = reader.list_files("ebook", query="Austen, Jane")
+    assert "Pride and Prejudice: Test Edition by Jane Austen [path: MrDarcy.epub]" in search_out
 
-    # 4. Verify read_next_chunk and read_previous_chunk include the book label in the header
-    chunk1 = reader.read_next_chunk()
-    assert chunk1.startswith(
-        "--- [Book: Pride and Prejudice: Test Edition by Jane Austen [path: MrDarcy.epub]] Chunk 1/"
-    )
-    assert "universally acknowledged" in chunk1
+    # 3. Verify read_file opens EPUB at chunk 1, returns total_chunks and next_hint, and sets bookmark
+    c1 = json.loads(reader.read_file("ebook", "MrDarcy.epub", chunk=1))
+    assert c1["format"] == "epub"
+    assert c1["chunk"] == 1
+    assert c1["total_chunks"] >= 2
+    assert "universally acknowledged" in c1["content"]
+    assert "read_next_chunk()" in c1["next_hint"]
     assert reader.current_index == 1
 
-    chunk2 = reader.read_next_chunk()
-    assert "Chunk 2/" in chunk2
+    # 4. Verify read_next_chunk advances to chunk 2 of the active EPUB
+    c2 = json.loads(reader.read_next_chunk())
+    assert c2["format"] == "epub"
+    assert c2["chunk"] == 2
     assert reader.current_index == 2
 
-    prev_chunk = reader.read_previous_chunk()
-    assert "Chunk 1/" in prev_chunk
-    assert reader.current_index == 1
-
     # 5. Verify bookmark persistence across component re-instantiation
-    reader_reloaded = SequentialReaderComponent(chunk_size=300)
-    assert reader_reloaded.current_index == 1
+    reader_reloaded = FileReaderComponent(chunk_size=300)
+    assert reader_reloaded.current_index == 2
+    assert reader_reloaded.current_library == "ebook"
     assert "Pride and Prejudice: Test Edition" in reader_reloaded.current_book_label
+
+    # 6. Verify chunked text/code file reading
+    txt1 = json.loads(reader.read_file("thunk_source", "main.py", chunk=1))
+    assert txt1["format"] == "text"
+    assert txt1["chunk"] == 1
+    assert txt1["total_chunks"] >= 2
+    assert txt1["start_line"] == 1
+    assert txt1["end_line"] == 20
+    assert "1: " in txt1["content"]
+    assert "chunk=2" in txt1["next_hint"]
 
 
 @pytest.mark.asyncio
 async def test_image_downsize_save_and_ephemeral_vision():
-    """Tests 1024px image downsizing, atomic disk storage, view_image tool, and ephemeral vision messages."""
-    import io
-    from PIL import Image
-    from src.core.agent import AgentCore
-    from src.components.file_reader import FileReaderComponent
-    from src.utils.image import downsize_image_bytes, encode_jpeg_data_url, save_image_atomic
-
+    """Tests 1024px image downsizing, atomic disk storage, view_image tool on discord_file, and ephemeral vision messages."""
     cfg = load_config()
-    images_dir = cfg["discord"]["images_dir"]
+    images_dir = cfg["file_reader"]["libraries"]["discord_file"]
     os.makedirs(images_dir, exist_ok=True)
 
     # 1. Create a 2400x1200 RGBA PNG in memory and verify downsizing to 1024x512 JPEG
@@ -96,8 +105,14 @@ async def test_image_downsize_save_and_ephemeral_vision():
         wire_msgs_after = agent._prepare_llm_messages()
         assert isinstance(wire_msgs_after[-1]["content"], str)
 
-        # 3. Verify view_image re-loads the saved image into pending_tool_images
-        res = fr.view_image("discord_images", "test_attachment.jpg")
+        # 3. Verify read_file on an image returns image dimensions and next_hint to call view_image
+        img_meta = json.loads(fr.read_file("discord_file", "test_attachment.jpg"))
+        assert img_meta["format"] == "image"
+        assert (img_meta["width"], img_meta["height"]) == (1024, 512)
+        assert "view_image" in img_meta["next_hint"]
+
+        # 4. Verify view_image loads the saved image from 'discord_file' into pending_tool_images
+        res = fr.view_image("discord_file", "test_attachment.jpg")
         assert "1024x512px" in res
         assert len(agent.pending_tool_images) == 1
         assert agent.pending_tool_images[0].startswith("data:image/jpeg;base64,")
@@ -106,21 +121,14 @@ async def test_image_downsize_save_and_ephemeral_vision():
             os.remove(saved_file)
 
 
-def test_pdf_viewer_read_and_view_pages():
-    """Tests PdfViewerComponent catalog, JSON page extraction, visual detection, and page rendering."""
-    import io
-    import json
-    import fitz
-    from PIL import Image
-    from src.core.agent import AgentCore
-    from src.components.pdf_viewer import PdfViewerComponent
-
+def test_unified_file_reader_pdf_read_next_and_view_pages():
+    """Tests PDF listing/search, page reading via read_file and read_next_chunk, visual detection, and page rendering via view_image."""
     cfg = load_config()
-    pdf_lib = cfg["pdf_viewer"]["library_dir"]
-    pdf_db = cfg["pdf_viewer"]["db_path"]
+    pdf_lib = cfg["file_reader"]["libraries"]["pdf"]
+    db_path = cfg["file_reader"]["db_path"]
     os.makedirs(pdf_lib, exist_ok=True)
-    if os.path.exists(pdf_db):
-        os.remove(pdf_db)
+    if os.path.exists(db_path):
+        os.remove(db_path)
 
     pdf_path = os.path.join(pdf_lib, "DungeonMap.pdf")
     try:
@@ -143,41 +151,40 @@ def test_pdf_viewer_read_and_view_pages():
         os.replace(tmp_pdf, pdf_path)
 
         agent = AgentCore()
-        viewer = PdfViewerComponent()
-        agent.register_component(viewer)
+        fr = FileReaderComponent()
+        agent.register_component(fr)
 
-        # 1. Verify list_pdfs and search_pdfs
-        catalog = viewer.list_pdfs()
-        assert any("Larracos Tactical Atlas by Mordecai (2 pages) [path: DungeonMap.pdf]" in c for c in catalog)
-        matches = viewer.search_pdfs("Mordecai")
-        assert len(matches) == 1
+        # 1. Verify list_files and query search on 'pdf' library
+        listing = fr.list_files("pdf")
+        assert "Larracos Tactical Atlas by Mordecai (2 pages) [path: DungeonMap.pdf]" in listing
+        search_res = fr.list_files("pdf", query="Mordecai")
+        assert "DungeonMap.pdf" in search_res
 
-        # 2. Read Page 1 (pure text, no unrenderable visuals)
-        p1_json = json.loads(viewer.read_pdf_page(page_number=1, filename=matches[0]))
-        assert p1_json["page_number"] == 1
+        # 2. Read Page 1 via read_file(library='pdf', filepath='DungeonMap.pdf', chunk=1)
+        p1_json = json.loads(fr.read_file("pdf", "DungeonMap.pdf", chunk=1))
+        assert p1_json["format"] == "pdf"
+        assert p1_json["chunk"] == 1
         assert p1_json["total_pages"] == 2
-        assert "Larracos Saferoom Network" in p1_json["text"]
+        assert p1_json["total_chunks"] == 2
+        assert "Larracos Saferoom Network" in p1_json["content"]
         assert p1_json["has_unrenderable_visuals"] is False
-        assert p1_json["image_count"] == 0
+        assert "read_next_chunk()" in p1_json["next_hint"]
 
-        # 3. Read Page 2 with filename omitted (uses active PDF) and verify image detection
-        p2_json = json.loads(viewer.read_pdf_page(page_number=2))
+        # 3. Advance to Page 2 via read_next_chunk() and verify embedded image detection
+        p2_json = json.loads(fr.read_next_chunk())
+        assert p2_json["chunk"] == 2
         assert p2_json["page_number"] == 2
-        assert "Bait Shop Entrance" in p2_json["text"]
+        assert "Bait Shop Entrance" in p2_json["content"]
         assert p2_json["has_unrenderable_visuals"] is True
         assert p2_json["image_count"] == 1
         assert p2_json["images"] == [{"width": 200, "height": 150}]
-        assert "view_pdf_page" in p2_json["notice"]
+        assert "view_image" in p2_json["notice"]
 
-        # 4. View Page 2 (renders page to <=1024px JPEG and attaches to agent.pending_tool_images)
-        view_res = viewer.view_pdf_page(page_number=2)
+        # 4. Render Page 2 via view_image(library='pdf', filepath='DungeonMap.pdf', chunk=2)
+        view_res = fr.view_image("pdf", "DungeonMap.pdf", chunk=2)
         assert "Rendered page 2/2" in view_res
         assert len(agent.pending_tool_images) == 1
         assert agent.pending_tool_images[0].startswith("data:image/jpeg;base64,")
     finally:
         if os.path.exists(pdf_path):
             os.remove(pdf_path)
-
-
-
-

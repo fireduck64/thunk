@@ -147,11 +147,12 @@ class AgentCore:
             valid_params = [p for p in inspect.signature(func).parameters.keys() if p != "self"]
             normalized_args = dict(args)
 
-            # Normalize common path parameter aliases across FileReaderComponent and WorkspaceComponent
+            # Normalize common path and chunk/page parameter aliases across FileReaderComponent and WorkspaceComponent
             alias_map = {
-                "path": ("filepath", "file_path", "subdir"),
-                "filepath": ("path", "file_path"),
+                "path": ("filepath", "file_path", "filename", "subdir"),
+                "filepath": ("path", "file_path", "filename"),
                 "subdir": ("path", "filepath", "file_path"),
+                "chunk": ("page_number", "page"),
             }
             for target_param, aliases in alias_map.items():
                 if target_param in valid_params and target_param not in normalized_args:
