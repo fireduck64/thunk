@@ -188,3 +188,70 @@ def test_unified_file_reader_pdf_read_next_and_view_pages():
     finally:
         if os.path.exists(pdf_path):
             os.remove(pdf_path)
+
+
+@pytest.mark.asyncio
+async def test_discord_send_message_with_library_attachment():
+    """Verifies SystemComponent.send_message and DiscordAdapter._on_send_to_operator attach library files safely."""
+    from src.components.system import SystemComponent
+    from src.adapters.discord_adapter import DiscordAdapter
+
+    cfg = load_config()
+    images_dir = cfg["file_reader"]["libraries"]["discord_file"]
+    os.makedirs(images_dir, exist_ok=True)
+    test_img_path = os.path.join(images_dir, "outbound_chart.png")
+
+    buf = io.BytesIO()
+    Image.new("RGB", (320, 240), (50, 100, 200)).save(buf, format="PNG")
+    save_image_atomic(buf.getvalue(), test_img_path)
+
+    try:
+        agent = AgentCore()
+        sys_comp = SystemComponent()
+        agent.register_component(sys_comp)
+        adapter = DiscordAdapter(agent)
+        adapter.last_channel_id = 999888777
+        agent.event_bus.subscribe("send_to_operator", adapter._on_send_to_operator)
+
+        sent_calls = []
+
+        class DummySentMsg:
+            id = 555444333
+
+        class DummyChannel:
+            id = 999888777
+
+            async def send(self, content=None, **kwargs):
+                sent_calls.append((content, kwargs))
+                return DummySentMsg()
+
+        adapter.client.get_channel = lambda cid: DummyChannel() if cid == 999888777 else None
+
+        # 1. Path traversal attempt is rejected
+        err_res = await sys_comp.send_message(
+            "Trying traversal",
+            medium="discord",
+            attachment_library="discord_file",
+            attachment_path="../../etc/passwd",
+        )
+        assert "Access denied" in err_res
+        assert len(sent_calls) == 0
+
+        # 2. Valid attachment from 'discord_file' library sends discord.File
+        ok_res = await sys_comp.send_message(
+            "Here is the chart!",
+            medium="discord",
+            attachment_library="discord_file",
+            attachment_path="outbound_chart.png",
+        )
+        assert "Message sent successfully via discord" in ok_res
+        assert "attached='outbound_chart.png'" in ok_res
+        assert len(sent_calls) == 1
+        sent_text, sent_kwargs = sent_calls[0]
+        assert sent_text == "Here is the chart!"
+        assert "file" in sent_kwargs
+        assert sent_kwargs["file"].filename == "outbound_chart.png"
+    finally:
+        if os.path.exists(test_img_path):
+            os.remove(test_img_path)
+

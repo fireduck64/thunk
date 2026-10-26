@@ -321,6 +321,65 @@ class DiscordAdapter:
 
             await self.agent.resume(event_str)
 
+    def _resolve_library_attachment(self, attachment_library: str, attachment_path: str) -> str:
+        """Resolves and validates an attachment path inside a configured library (with path-traversal protection)."""
+        raw_libs = dict(self.config.get("file_reader", {}).get("libraries") or {})
+        ws_dir = self.config.get("workspace", {}).get("workspace_dir")
+        if ws_dir and "workspace" not in raw_libs:
+            raw_libs["workspace"] = ws_dir
+
+        aliases = {
+            "ebooks": "ebook",
+            "ebook": "ebooks",
+            "pdfs": "pdf",
+            "pdf": "pdfs",
+            "discord_images": "discord_file",
+            "discord_files": "discord_file",
+            "discord_file": "discord_images",
+        }
+
+        lib_key = (attachment_library or "").strip()
+        resolved_lib = None
+        if lib_key in raw_libs:
+            resolved_lib = lib_key
+        else:
+            lower = lib_key.lower()
+            for k in raw_libs:
+                if k.lower() == lower:
+                    resolved_lib = k
+                    break
+            if resolved_lib is None and lower in aliases and aliases[lower] in raw_libs:
+                resolved_lib = aliases[lower]
+
+        if not resolved_lib or not raw_libs.get(resolved_lib):
+            raise ValueError(
+                f"Library '{attachment_library}' is not configured. Available libraries: {list(raw_libs.keys())}"
+            )
+
+        base_dir = os.path.abspath(raw_libs[resolved_lib])
+        clean_rel = (attachment_path or "").strip()
+        if "[path: " in clean_rel and clean_rel.endswith("]"):
+            clean_rel = clean_rel.split("[path: ", 1)[1][:-1].strip()
+
+        container_ws_prefix = (
+            self.config.get("workspace", {}).get("container_workdir", "/home/agent/workspace").rstrip("/") + "/"
+        )
+        if resolved_lib.lower() == "workspace" and clean_rel.startswith(container_ws_prefix):
+            clean_rel = clean_rel[len(container_ws_prefix):]
+
+        safe_rel = clean_rel.lstrip(os.sep)
+        if not safe_rel:
+            raise ValueError("attachment_path must not be empty.")
+
+        abs_path = os.path.abspath(os.path.join(base_dir, safe_rel))
+        if os.path.commonpath([base_dir, abs_path]) != base_dir:
+            raise ValueError(f"Access denied: '{attachment_path}' is outside of library '{resolved_lib}'.")
+        if not os.path.exists(abs_path):
+            raise FileNotFoundError(f"Attachment '{attachment_path}' does not exist in library '{resolved_lib}'.")
+        if not os.path.isfile(abs_path):
+            raise ValueError(f"Attachment '{attachment_path}' in library '{resolved_lib}' is not a regular file.")
+        return abs_path
+
     async def _on_send_to_operator(self, event_name: str, payload: dict):
         """Intercept explicit operator messages and publish via Discord if requested."""
         # Only process if intended for Discord or broadcast
@@ -328,9 +387,23 @@ class DiscordAdapter:
         if medium not in ["discord", "all"]:
             return
             
-        msg_content = payload.get("message", "")
+        msg_content = payload.get("message", "") or ""
         reply_to_raw = payload.get("reply_to_message_id", "")
-        if msg_content and self.last_channel_id:
+        att_lib = (payload.get("attachment_library") or "").strip()
+        att_path = (payload.get("attachment_path") or "").strip()
+
+        abs_attachment_path = None
+        if att_lib or att_path:
+            if not att_lib or not att_path:
+                payload["error"] = "Both 'attachment_library' and 'attachment_path' must be provided when attaching a file."
+                return
+            try:
+                abs_attachment_path = self._resolve_library_attachment(att_lib, att_path)
+            except Exception as e:
+                payload["error"] = str(e)
+                return
+
+        if (msg_content or abs_attachment_path) and self.last_channel_id:
             try:
                 channel = self.client.get_channel(self.last_channel_id)
                 if channel:
@@ -347,17 +420,27 @@ class DiscordAdapter:
                             payload["error"] = f"Invalid reply_to_message_id '{reply_to_raw}'."
                             return
 
-                    print(f"[Discord] Sending message to channel {self.last_channel_id}" + (f" (reply to {reply_to_raw})" if reference else ""))
+                    print(
+                        f"[Discord] Sending message to channel {self.last_channel_id}"
+                        + (f" (reply to {reply_to_raw})" if reference else "")
+                        + (f" [attachment: {abs_attachment_path}]" if abs_attachment_path else "")
+                    )
                     # Discord has a 2000 character limit per message.
-                    # We should chunk it if it's too long.
-                    chunks = [msg_content[i:i+1900] for i in range(0, len(msg_content), 1900)]
+                    chunks = [msg_content[i:i+1900] for i in range(0, len(msg_content), 1900)] if msg_content else [""]
                     first_sent = None
                     for idx, chunk in enumerate(chunks):
-                        sent_msg = await channel.send(chunk, reference=reference if idx == 0 else None)
+                        send_kwargs = {}
+                        if idx == 0 and reference is not None:
+                            send_kwargs["reference"] = reference
+                        if idx == 0 and abs_attachment_path is not None:
+                            send_kwargs["file"] = discord.File(abs_attachment_path)
+                        sent_msg = await channel.send(chunk if chunk else None, **send_kwargs)
                         if first_sent is None:
                             first_sent = sent_msg
                     if first_sent is not None:
                         payload["sent_message_id"] = str(first_sent.id)
+                    if abs_attachment_path is not None:
+                        payload["attached_file"] = os.path.basename(abs_attachment_path)
                 else:
                     err = f"Could not find channel {self.last_channel_id}"
                     print(f"[Discord Error] {err}")

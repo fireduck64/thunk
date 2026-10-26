@@ -51,7 +51,7 @@ def _ensure_test_environment(config_path: str) -> None:
                 '[skills]\nskills_dir = "data/test/skills"\n\n'
                 '[logging]\nlog_dir = "data/test/logs"\nverbose = false\n\n'
                 '[file_reader]\ndb_path = "data/test/reader_state.db"\n\n'
-                '[file_reader.libraries]\nebook = "data/test/library"\npdf = "data/test/pdf_library"\ndiscord_file = "data/test/images"\nthunk_source = "src"\n\n'
+                '[file_reader.libraries]\nebook = "data/test/library"\npdf = "data/test/pdf_library"\ndiscord_file = "data/test/images"\nworkspace = "data/test/workspace"\nthunk_source = "src"\n\n'
                 '[embeddings]\napi_url = "http://localhost:11434/api/embeddings"\napi_key = ""\nmodel_name = "nomic-embed-text"\n\n'
                 '[vectordb]\nhost = "localhost"\nport = 6333\nknowledge_collection = "test_knowledge_base"\nmemory_collection = "test_agent_memory"\n\n'
                 '[mqtt]\nhost = "localhost"\nport = 1883\ninbox_topic = "test/agent/inbox"\noutbox_topic = "test/agent/outbox"\n\n'

@@ -13,7 +13,8 @@ class SystemComponent(BaseComponent):
             "Your standard text output is your INTERNAL MONOLOGUE (thoughts). Nobody outside can see it.\n"
             "To communicate externally (with the human operator or with peer agents), you MUST use the `send_message` or `react_to_message` tools.\n"
             "If replying to a specific message, set `medium` to match the medium the message arrived on (e.g., 'discord' or 'mqtt'). "
-            "On Discord, you can optionally pass `reply_to_message_id` to `send_message` to create a threaded Discord reply to a specific message.\n"
+            "On Discord, you can optionally pass `reply_to_message_id` to `send_message` to create a threaded Discord reply to a specific message, "
+            "and you can attach an image or file from any configured library (e.g., `attachment_library='workspace'`, `attachment_path='plot.png'`) to post it to the channel.\n"
             "On MQTT, you can send direct messages to another agent by setting `medium='mqtt'` and `recipient='<agent_name>'` (e.g., `recipient='wisp'` or `recipient='thunk'`). "
             "Use `list_mqtt_agents` to discover available MQTT agents and their status. Incoming `[Via MQTT | System]` messages are unformatted system broadcasts (clock, daily news); incoming `[Via MQTT | DM from <sender>]` messages are direct messages from another agent.\n"
             "You can also use `react_to_message(message_id, emoji)` with a standard Unicode emoji (e.g., '👍', '🔥', '🤔', '⚡') to react to any Discord message.\n"
@@ -32,27 +33,33 @@ class SystemComponent(BaseComponent):
 
     async def send_message(
         self,
-        message: str,
+        message: str = "",
         medium: str = "all",
         reply_to_message_id: str = "",
         recipient: str = "",
+        attachment_library: str = "",
+        attachment_path: str = "",
     ) -> str:
         """
         Sends an external message via 'discord', 'mqtt', or 'all'.
         When medium is 'mqtt', specify 'recipient' (the target agent's name, e.g. 'wisp' or 'thunk').
-        When medium is 'discord', optionally provide 'reply_to_message_id' to reply to a specific Discord message ID.
+        When medium is 'discord', optionally provide 'reply_to_message_id' to reply to a specific Discord message ID,
+        and optionally provide 'attachment_library' and 'attachment_path' to attach a file or image from a library (e.g. 'workspace' or 'discord_file').
         """
         payload: Dict[str, Any] = {
-            "message": message,
+            "message": message or "",
             "medium": medium,
             "reply_to_message_id": str(reply_to_message_id).strip() if reply_to_message_id else "",
             "recipient": str(recipient).strip() if recipient else "",
+            "attachment_library": str(attachment_library).strip() if attachment_library else "",
+            "attachment_path": str(attachment_path).strip() if attachment_path else "",
         }
         await self.agent.event_bus.publish("send_to_operator", payload)
         if "error" in payload:
             return f"Error sending message via {medium}: {payload['error']}"
         if "sent_message_id" in payload:
-            return f"Message sent successfully via {medium} (Discord message_id={payload['sent_message_id']})."
+            att_info = f", attached='{payload['attached_file']}'" if payload.get("attached_file") else ""
+            return f"Message sent successfully via {medium} (Discord message_id={payload['sent_message_id']}{att_info})."
         if "mqtt_recipient" in payload:
             return f"Direct message sent successfully via mqtt to '{payload['mqtt_recipient']}' ({payload.get('mqtt_topic')})."
         return f"Message sent successfully via {medium}."

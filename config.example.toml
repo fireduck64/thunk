@@ -61,6 +61,7 @@ ebook = "/vault/ebook"
 pdf = "/vault/pdf"
 discord_file = "data/thunk/images"
 thunk_source = "/home/fireduck/projects/thunk/src"
+workspace = "data/thunk/workspace"
 
 [embeddings]
 # Embedding model for vector database ingestion and semantic search
