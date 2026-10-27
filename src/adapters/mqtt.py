@@ -118,6 +118,11 @@ class MQTTAdapter:
                 return
 
             print(f"\n[MQTT Incoming DM] {topic_str}: {payload_raw}")
+            if retain and self.client:
+                try:
+                    await self.client.publish(self.dm_topic, b"", qos=1, retain=True)
+                except Exception:
+                    pass
 
             try:
                 data = json.loads(payload_raw)
@@ -149,6 +154,11 @@ class MQTTAdapter:
                 return
 
             print(f"\n[MQTT Incoming System] {topic_str}: {payload_raw}")
+            if retain and self.client:
+                try:
+                    await self.client.publish(self.inbox_topic, b"", qos=1, retain=True)
+                except Exception:
+                    pass
             formatted_payload = f"[Via MQTT | System] {payload_raw}"
             await self.agent.resume(formatted_payload)
 

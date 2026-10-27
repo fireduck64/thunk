@@ -17,7 +17,7 @@ Every JSONL entry **must** include the following top-level fields:
 | Field | Type | Description |
 | :--- | :--- | :--- |
 | `timestamp` | `string` | When the operation completed, formatted as RFC 3339 in UTC with millisecond precision (e.g., `"2026-10-26T20:24:15.123Z"`). |
-| `operation` | `string` | Low-cardinality name of the operation performed (e.g., `"llm_call"`, `"tool_call"`, `"vector_search"`, `"vector_save"`, `"workspace_exec"`, `"db_query"`). Avoid encoding dynamic parameters in `operation` (use `"db_query"`, not `"db_query_for_books"`). |
+| `operation` | `string` | Low-cardinality name of the operation performed (e.g., `"llm_call"`, `"tool_call"`, `"vector_search"`, `"vector_save"`, `"workspace_exec"`, `"speaker_call"`, `"db_query"`). Avoid encoding dynamic parameters in `operation` (use `"db_query"`, not `"db_query_for_books"`). |
 | `duration_ms` | `number` | Total wall-clock duration of the operation in milliseconds. |
 | `error` | `integer` | `0` if the operation succeeded (or recovered via retries); `1` if the operation failed with an unrecovered error. |
 

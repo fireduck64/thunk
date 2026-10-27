@@ -101,6 +101,11 @@ images_dir = "data/thunk/images"      # Directory where incoming Discord image a
 gemini_api_key = "YOUR_GEMINI_API_KEY_HERE"
 gemini_model = "gemini-3.8-flash"
 
+[speaker]
+# Physical room speaker integration (lertspeak ApiSpeak HTTP endpoint)
+api_url = "http://ogog.1209k.com:13233/api/v1/say"
+voice_id = "YOUR_VOICE_ID_HERE"
+
 [workspace]
 # Air-gapped Linux container workspace and read-only mind mirror
 enabled = false

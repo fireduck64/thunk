@@ -141,6 +141,12 @@ async def chat_loop(username: str, initial_recipient: str = None):
                         if not payload_raw.strip():
                             continue
 
+                        if getattr(message, "retain", False):
+                            try:
+                                await client.publish(dm_topic, b"", qos=1, retain=True)
+                            except Exception:
+                                pass
+
                         try:
                             data = json.loads(payload_raw)
                             if isinstance(data, dict):

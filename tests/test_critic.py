@@ -287,6 +287,63 @@ def test_mqtt_chat_script_helpers_and_cli():
     assert "--recipient" in help_out
 
 
+@pytest.mark.asyncio
+async def test_speaker_component_speak_tool(monkeypatch):
+    """Verifies SpeakerComponent.speak POSTs {'voice_id', 'msg'} and checks for HTTP 200."""
+    import json
+    import httpx
+    from src.core.agent import AgentCore
+    from src.components.speaker import SpeakerComponent
+
+    captured_requests = []
+
+    class DummyResponse:
+        def __init__(self, status_code=200, text="Cool"):
+            self.status_code = status_code
+            self.text = text
+            self.content = text.encode("utf-8")
+
+    next_status = {"code": 200}
+
+    class DummyAsyncClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        async def post(self, url, json=None, **kwargs):
+            captured_requests.append((url, json))
+            return DummyResponse(status_code=next_status["code"], text="Cool" if next_status["code"] == 200 else "Fail")
+
+    monkeypatch.setattr(httpx, "AsyncClient", DummyAsyncClient)
+
+    agent = AgentCore()
+    speaker = SpeakerComponent(
+        api_url="http://ogog.1209k.com:13233/api/v1/say",
+        voice_id="NOpBlnGInO9m6vDvFkFC",
+    )
+    agent.register_component(speaker)
+    agent._build_tools()
+
+    # 1. Successful speak call (including 'msg' alias normalization via execute_tool)
+    res_ok = await agent.execute_tool("speak", json.dumps({"msg": "The kettle is boiling."}))
+    assert "Spoke out loud on room speakers" in res_ok
+    assert captured_requests[-1] == (
+        "http://ogog.1209k.com:13233/api/v1/say",
+        {"voice_id": "NOpBlnGInO9m6vDvFkFC", "msg": "The kettle is boiling."},
+    )
+
+    # 2. Non-200 HTTP response returns an error
+    next_status["code"] = 500
+    res_err = await speaker.speak("Hello room")
+    assert "HTTP 500" in res_err
+
+
+
 
 
 

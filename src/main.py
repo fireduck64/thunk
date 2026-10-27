@@ -27,6 +27,7 @@ from src.components.subconscious import SubconsciousRecallComponent
 from src.components.spreading_activation import SpreadingActivationComponent
 from src.components.file_reader import FileReaderComponent
 from src.components.oracle import OracleComponent
+from src.components.speaker import SpeakerComponent
 from src.components.skills import SkillComponent
 from src.components.workspace import WorkspaceComponent
 from src.components.thread_presence import ThreadRegistry, ThreadPresenceComponent
@@ -116,6 +117,8 @@ def _register_thread_components(
         agent.register_component(FileReaderComponent())
     if _wants("oracle", "oraclecomponent"):
         agent.register_component(OracleComponent())
+    if _wants("speaker", "speakercomponent"):
+        agent.register_component(SpeakerComponent())
     if _wants("skills", "skillcomponent"):
         agent.register_component(SkillComponent())
 
