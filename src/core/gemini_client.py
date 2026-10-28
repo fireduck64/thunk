@@ -155,9 +155,14 @@ class GeminiOpenAIClientAdapter:
     ) -> Tuple[Optional[str], List[types.Content]]:
         """
         Converts OpenAI-format messages into (system_instruction, List[types.Content]).
-        Preserves cached Gemini function_call parts (with thought_signature) when present,
-        and safely serializes older non-Gemini tool calls as text so switching providers
-        mid-conversation never fails Gemini schema/signature checks.
+        Enforces Gemini's strict turn ordering rules:
+        1. Every model turn (especially one with function_call parts) is immediately preceded
+           by a user turn or a function_response turn (never at index 0 or after another model turn).
+        2. Native function_call parts are only emitted when all tool_calls in that assistant turn
+           have cached Gemini Part objects (with thought_signature) AND have matching role='tool'
+           responses immediately following them.
+        3. Consecutive function_response parts for a multi-tool turn are grouped into a single
+           Content(role='user') turn.
         """
         system_blocks: List[str] = []
         contents: List[types.Content] = []
@@ -169,7 +174,7 @@ class GeminiOpenAIClientAdapter:
             text_str, image_parts = self._extract_text_and_image_parts(raw_content)
 
             if role == "system":
-                if idx == 0 or not contents:
+                if idx == 0:
                     if text_str.strip():
                         system_blocks.append(text_str.strip())
                 else:
@@ -197,42 +202,76 @@ class GeminiOpenAIClientAdapter:
                 if text_str:
                     parts.append(types.Part.from_text(text=text_str))
                 tool_calls = msg.get("tool_calls") or []
+
+                # Verify whether all tool calls in this turn have cached Gemini parts AND matching following tool results
+                use_native_fc = False
+                if tool_calls:
+                    following_tool_ids: set[str] = set()
+                    look_idx = idx + 1
+                    while look_idx < len(messages) and messages[look_idx].get("role") == "tool":
+                        tid_val = str(messages[look_idx].get("tool_call_id") or "")
+                        if tid_val:
+                            following_tool_ids.add(tid_val)
+                        look_idx += 1
+
+                    tc_ids = [self._extract_tc_fields(tc)[0] for tc in tool_calls]
+                    if all(
+                        tid and tid in self._gemini_part_cache and tid in following_tool_ids
+                        for tid in tc_ids
+                    ):
+                        use_native_fc = True
+
                 for tc in tool_calls:
                     tc_id, fn_name, args_dict = self._extract_tc_fields(tc)
-                    cached_part = self._gemini_part_cache.get(tc_id)
-                    if cached_part is not None:
-                        parts.append(cached_part)
+                    if use_native_fc:
+                        parts.append(self._gemini_part_cache[tc_id])
                         active_gemini_tc_ids.add(tc_id)
                     else:
-                        # Historical tool call from a local OpenAI/Ollama turn (no Gemini thought_signature)
                         parts.append(
                             types.Part.from_text(
                                 text=f"[Called tool {fn_name}({json.dumps(args_dict)})]"
                             )
                         )
+
                 if parts:
+                    # Ensure a model turn (especially with function_call) always follows a user/function_response turn
+                    if not contents or contents[-1].role != "user":
+                        contents.append(
+                            types.Content(
+                                role="user",
+                                parts=[types.Part.from_text(text="[Continuing from Core Summary]")],
+                            )
+                        )
                     contents.append(types.Content(role="model", parts=parts))
                 continue
 
             if role == "tool":
                 tc_id = str(msg.get("tool_call_id") or "")
                 fn_name = str(msg.get("name") or "tool")
-                parts = []
                 if tc_id in active_gemini_tc_ids:
-                    parts.append(
-                        types.Part.from_function_response(
-                            name=fn_name,
-                            response={"result": text_str},
-                        )
+                    fr_part = types.Part.from_function_response(
+                        name=fn_name,
+                        response={"result": text_str},
                     )
+                    # Group consecutive function_response parts into a single Content(role="user") turn
+                    if (
+                        contents
+                        and contents[-1].role == "user"
+                        and contents[-1].parts
+                        and any(getattr(p, "function_response", None) is not None for p in contents[-1].parts)
+                    ):
+                        contents[-1].parts.append(fr_part)
+                        contents[-1].parts.extend(image_parts)
+                    else:
+                        contents.append(types.Content(role="user", parts=[fr_part, *image_parts]))
                 else:
-                    parts.append(
+                    parts = [
                         types.Part.from_text(
                             text=f"[Tool Result from {fn_name}]:\n{text_str}"
-                        )
-                    )
-                parts.extend(image_parts)
-                contents.append(types.Content(role="user", parts=parts))
+                        ),
+                        *image_parts,
+                    ]
+                    contents.append(types.Content(role="user", parts=parts))
 
         if not contents:
             contents.append(types.Content(role="user", parts=[types.Part.from_text(text="Continue.")]))

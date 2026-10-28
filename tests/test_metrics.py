@@ -334,3 +334,56 @@ async def test_agent_core_llm_retries_and_fail_fast_exit(tmp_path, monkeypatch):
     assert rec["counters"]["retries"] == 2
 
 
+def test_gemini_convert_messages_post_compaction_function_call_and_multi_tool_grouping():
+    """
+    Verifies that when memory compaction leaves an assistant function_call turn at index 1
+    (immediately after system prompt with no user turn before it), _convert_messages
+    prepends a user turn and groups consecutive function_response parts into one user turn.
+    """
+    from google.genai import types
+    from src.core.gemini_client import GeminiOpenAIClientAdapter
+
+    adapter = GeminiOpenAIClientAdapter(api_key="test-key")
+    fc1 = types.Part(
+        function_call=types.FunctionCall(name="ping_thread", args={"target_thread": "mind", "message": "hi"}),
+        thought_signature=b"sig1",
+    )
+    fc2 = types.Part(
+        function_call=types.FunctionCall(name="suspend_until_next_event", args={}),
+    )
+    adapter._gemini_part_cache["gemini_tc_1"] = fc1
+    adapter._gemini_part_cache["gemini_tc_2"] = fc2
+
+    # Simulate Wisp's exact post-compaction state where [1] is role=assistant with 2 cached Gemini tool calls
+    messages = [
+        {"role": "system", "content": "You are Wisp."},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "gemini_tc_1", "function": {"name": "ping_thread", "arguments": '{"target_thread": "mind", "message": "hi"}'}},
+                {"id": "gemini_tc_2", "function": {"name": "suspend_until_next_event", "arguments": "{}"}},
+            ],
+        },
+        {"role": "tool", "tool_call_id": "gemini_tc_1", "name": "ping_thread", "content": "Internal ping delivered."},
+        {"role": "tool", "tool_call_id": "gemini_tc_2", "name": "suspend_until_next_event", "content": "Woken up."},
+        {"role": "user", "content": "Hello Wisp!"},
+        {"role": "system", "content": "[Parallel Streams of Mind (Live Status)]\n- [mind (1m ago)]: Working."},
+    ]
+
+    sys_inst, contents = adapter._convert_messages(messages)
+    assert sys_inst == "You are Wisp."
+    # contents[0] MUST be role='user' (synthetic anchor before leading model function_call turn)
+    assert contents[0].role == "user"
+    assert contents[1].role == "model"
+    assert len(contents[1].parts) == 2
+    assert contents[1].parts[0].function_call.name == "ping_thread"
+    assert contents[1].parts[1].function_call.name == "suspend_until_next_event"
+
+    # Both tool results MUST be grouped into a single Content(role='user') turn at contents[2]
+    assert contents[2].role == "user"
+    assert len(contents[2].parts) == 2
+    assert contents[2].parts[0].function_response.name == "ping_thread"
+    assert contents[2].parts[1].function_response.name == "suspend_until_next_event"
+
+
+

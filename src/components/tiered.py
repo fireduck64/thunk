@@ -425,6 +425,21 @@ class TieredMemoryComponent(BaseComponent):
             # Stop if we hit the safe chunk limit for the summarizer
             if accumulated_tokens >= self.max_summarize_tokens:
                 break
+
+        # Align eviction boundary so we don't slice mid-tool-turn or leave an assistant tool_call
+        # at the very top of working memory when a subsequent user turn exists.
+        remaining_slice = agent.messages[1 + num_to_evict :]
+        if any(m.get("role") == "user" for m in remaining_slice):
+            while (1 + num_to_evict) < len(agent.messages):
+                next_msg = agent.messages[1 + num_to_evict]
+                if next_msg.get("role") == "user":
+                    break
+                msg_tokens = self._count_tokens([next_msg])
+                messages_to_compress.append(next_msg)
+                accumulated_tokens += msg_tokens
+                num_to_evict += 1
+                if "_db_id" in next_msg:
+                    max_evicted_id = max(max_evicted_id, next_msg["_db_id"])
                 
         if num_to_evict == 0:
             return
