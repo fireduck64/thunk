@@ -336,20 +336,22 @@ class DiscordAdapter:
             "discord_images": "discord_file",
             "discord_files": "discord_file",
             "discord_file": "discord_images",
+            "shared": "workspace",
+            "shared_workspace": "workspace",
         }
 
         lib_key = (attachment_library or "").strip()
+        lower_lib_key = lib_key.lower()
         resolved_lib = None
         if lib_key in raw_libs:
             resolved_lib = lib_key
         else:
-            lower = lib_key.lower()
             for k in raw_libs:
-                if k.lower() == lower:
+                if k.lower() == lower_lib_key:
                     resolved_lib = k
                     break
-            if resolved_lib is None and lower in aliases and aliases[lower] in raw_libs:
-                resolved_lib = aliases[lower]
+            if resolved_lib is None and lower_lib_key in aliases and aliases[lower_lib_key] in raw_libs:
+                resolved_lib = aliases[lower_lib_key]
 
         if not resolved_lib or not raw_libs.get(resolved_lib):
             raise ValueError(
@@ -367,9 +369,27 @@ class DiscordAdapter:
         if resolved_lib.lower() == "workspace" and clean_rel.startswith(container_ws_prefix):
             clean_rel = clean_rel[len(container_ws_prefix):]
 
+        if lower_lib_key in ("shared", "shared_workspace") and not (
+            clean_rel == "shared" or clean_rel.startswith("shared/")
+        ):
+            clean_rel = f"shared/{clean_rel.lstrip('/')}"
+
         safe_rel = clean_rel.lstrip(os.sep)
         if not safe_rel:
             raise ValueError("attachment_path must not be empty.")
+
+        if resolved_lib.lower() == "workspace" and (safe_rel == "shared" or safe_rel.startswith("shared/")):
+            ws_cfg = self.config.get("workspace", {})
+            raw_shared = ws_cfg.get("shared_workspace_dir")
+            if not raw_shared:
+                if os.path.basename(os.path.dirname(base_dir)) == "test":
+                    raw_shared = os.path.join(os.path.dirname(base_dir), "shared_workspace")
+                else:
+                    raw_shared = "data/shared/workspace"
+            base_dir = os.path.abspath(raw_shared)
+            safe_rel = safe_rel[len("shared"):].lstrip(os.sep)
+            if not safe_rel:
+                raise ValueError("attachment_path must reference a file inside shared/, not the directory itself.")
 
         abs_path = os.path.abspath(os.path.join(base_dir, safe_rel))
         if os.path.commonpath([base_dir, abs_path]) != base_dir:

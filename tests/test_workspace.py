@@ -327,3 +327,45 @@ def test_workspace_view_image_and_pdf_reading(tmp_path):
     assert agent.pending_tool_images[0].startswith("data:image/jpeg;base64,")
 
 
+def test_workspace_shared_mount_routing(tmp_path):
+    """Verifies write_workspace_file, read_workspace_file, view_workspace_image, and list_workspace_files route shared/ to shared_workspace_dir."""
+    from PIL import Image
+    from src.core.agent import AgentCore
+
+    ws_dir = tmp_path / "workspace"
+    shared_dir = tmp_path / "external_shared_workspace"
+    mind_dir = tmp_path / "mind_ro"
+    live_db = tmp_path / "memory.db"
+
+    comp = WorkspaceComponent(
+        workspace_dir=str(ws_dir),
+        shared_workspace_dir=str(shared_dir),
+        mind_ro_dir=str(mind_dir),
+        live_db_path=str(live_db),
+    )
+    agent = AgentCore()
+    agent.register_component(comp)
+
+    # Even if an empty mountpoint stub exists at ws_dir/shared, operations route to shared_dir
+    (ws_dir / "shared").mkdir(parents=True, exist_ok=True)
+
+    root_list = comp.list_workspace_files(".")
+    assert "[DIR]  shared" in root_list
+
+    w_res = comp.write_workspace_file("shared/collab/notes.txt", "Hello from Thunk to Wisp!")
+    assert "workspace file 'shared/collab/notes.txt'" in w_res
+    assert (shared_dir / "collab" / "notes.txt").read_text(encoding="utf-8") == "Hello from Thunk to Wisp!"
+    assert not (ws_dir / "shared" / "collab" / "notes.txt").exists()
+
+    # Also test container-prefixed path /home/agent/workspace/shared/...
+    assert comp.read_workspace_file("/home/agent/workspace/shared/collab/notes.txt") == "Hello from Thunk to Wisp!"
+    assert "[FILE] notes.txt" in comp.list_workspace_files("shared/collab")
+
+    # Test view_workspace_image on shared image
+    Image.new("RGB", (400, 300), (10, 20, 30)).save(str(shared_dir / "shared_plot.png"), format="PNG")
+    img_res = comp.view_workspace_image("/home/agent/workspace/shared/shared_plot.png")
+    assert "Loaded workspace image 'shared/shared_plot.png' (400x300px)" in img_res
+    assert len(agent.pending_tool_images) == 1
+
+
+

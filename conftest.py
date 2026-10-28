@@ -21,6 +21,7 @@ def _ensure_test_environment(config_path: str) -> None:
     os.makedirs(os.path.join(TEST_DATA_DIR, "metrics"), exist_ok=True)
     os.makedirs(os.path.join(TEST_DATA_DIR, "images"), exist_ok=True)
     os.makedirs(os.path.join(TEST_DATA_DIR, "workspace"), exist_ok=True)
+    os.makedirs(os.path.join(TEST_DATA_DIR, "shared_workspace"), exist_ok=True)
     os.makedirs(os.path.join(TEST_DATA_DIR, "mind_ro"), exist_ok=True)
 
     directives_path = os.path.join(TEST_DATA_DIR, "directives.md")
@@ -107,6 +108,7 @@ def _verify_test_config_isolation(cfg: dict) -> None:
         cfg.get("logging", {}).get("metrics_dir", "data/test/metrics"),
         cfg.get("discord", {}).get("images_dir", "data/test/images"),
         cfg.get("workspace", {}).get("workspace_dir", "data/test/workspace"),
+        cfg.get("workspace", {}).get("shared_workspace_dir", "data/test/shared_workspace"),
         cfg.get("workspace", {}).get("mind_ro_dir", "data/test/mind_ro"),
         cfg.get("workspace", {}).get("live_db_path", "data/test/memory.db"),
     ]

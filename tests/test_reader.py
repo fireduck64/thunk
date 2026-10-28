@@ -309,3 +309,45 @@ def test_gutenberg_gutindex_catalog_and_cross_library_search(tmp_path):
     assert "Gutenberg Pride & Prejudice Line 6" in c2["content"]
 
 
+def test_file_reader_and_discord_shared_workspace_routing(tmp_path):
+    """Verifies FileReaderComponent (list_files, read_file, view_image) and DiscordAdapter route workspace shared/ to shared_workspace_dir."""
+    ws_dir = tmp_path / "agent_ws"
+    shared_dir = tmp_path / "shared_ws"
+    ws_dir.mkdir()
+    shared_dir.mkdir()
+    # Create empty mountpoint stub inside ws_dir/shared as Docker does
+    (ws_dir / "shared").mkdir()
+
+    (shared_dir / "joint_report.txt").write_text("Line 1 of joint report\nLine 2 of joint report", encoding="utf-8")
+    Image.new("RGB", (500, 400), (120, 40, 180)).save(str(shared_dir / "joint_chart.png"), format="PNG")
+
+    fr = FileReaderComponent(
+        libraries={"workspace": str(ws_dir)},
+        db_path=str(tmp_path / "reader_shared.db"),
+        shared_workspace_dir=str(shared_dir),
+    )
+    agent = AgentCore()
+    agent.register_component(fr)
+
+    # 1. list_files on workspace root and workspace/shared
+    root_listing = fr.list_files("workspace")
+    assert "[DIR]  shared" in root_listing
+    shared_listing = fr.list_files("workspace", path="shared")
+    assert "[FILE] joint_report.txt" in shared_listing
+    assert "[FILE] joint_chart.png" in shared_listing
+
+    # 2. Cross-library search finds files inside shared_workspace_dir under workspace
+    search_res = fr.list_files("all", query="joint_report")
+    assert "[workspace] shared/joint_report.txt" in search_res
+
+    # 3. read_file and view_image work via both library='workspace', filepath='shared/...' and library='shared'
+    read_res = json.loads(fr.read_file("workspace", "shared/joint_report.txt", chunk=1))
+    assert read_res["filepath"] == "shared/joint_report.txt"
+    assert "Line 1 of joint report" in read_res["content"]
+
+    img_res = fr.view_image("shared", "joint_chart.png")
+    assert "Loaded image 'shared/joint_chart.png' from library 'workspace' (500x400px)" in img_res
+    assert len(agent.pending_tool_images) == 1
+
+
+

@@ -64,6 +64,7 @@ class WorkspaceComponent(BaseComponent):
         max_output_chars: int = None,
         extra_db_paths: Dict[str, str] = None,
         skills_dir: str = None,
+        shared_workspace_dir: str = None,
     ):
         self.config = load_config()
         ws_cfg = self.config.get("workspace", {})
@@ -77,6 +78,18 @@ class WorkspaceComponent(BaseComponent):
         raw_mind_dir = mind_ro_dir or ws_cfg.get("mind_ro_dir", "data/thunk/mind_ro")
         self.workspace_dir = os.path.abspath(raw_ws_dir)
         self.mind_ro_dir = os.path.abspath(raw_mind_dir)
+
+        if shared_workspace_dir is not None:
+            raw_shared_dir = shared_workspace_dir
+        elif workspace_dir is not None:
+            raw_shared_dir = os.path.join(os.path.dirname(self.workspace_dir), "shared_workspace")
+        elif ws_cfg.get("shared_workspace_dir"):
+            raw_shared_dir = ws_cfg["shared_workspace_dir"]
+        elif os.path.basename(os.path.dirname(self.workspace_dir)) == "test":
+            raw_shared_dir = os.path.join(os.path.dirname(self.workspace_dir), "shared_workspace")
+        else:
+            raw_shared_dir = "data/shared/workspace"
+        self.shared_workspace_dir = os.path.abspath(raw_shared_dir)
 
         self.live_db_path = (
             live_db_path
@@ -121,12 +134,14 @@ class WorkspaceComponent(BaseComponent):
             self.skills_dir = self.config.get("skills", {}).get("skills_dir", "")
 
         os.makedirs(self.workspace_dir, exist_ok=True)
+        os.makedirs(self.shared_workspace_dir, exist_ok=True)
         os.makedirs(self.mind_ro_dir, exist_ok=True)
 
     def get_system_prompt_addition(self) -> str:
         return (
             "--- LINUX WORKSPACE & MIND MIRROR ---\n"
-            f"You have a persistent, air-gapped Linux workspace at `{self.container_workdir}` (read-write) "
+            f"You have a persistent, air-gapped Linux workspace at `{self.container_workdir}` (read-write), "
+            f"including a cross-agent shared directory at `{self.container_workdir}/shared` (`shared/`), "
             "equipped with Python 3 (numpy, pandas, networkx, sympy, matplotlib), Go, Java, Bazel, C/C++, sqlite3, ripgrep, jq, and standard CLI tools.\n"
             f"You also have a read-only mirror of your own internal SQLite databases (`memory.db`, `notes.db`, `tasks.db`, `reader_state.db`) "
             f"and `skills/` mounted at `{self.container_mind_dir}` (see `{self.container_mind_dir}/README.md` for table schemas).\n"
@@ -215,8 +230,14 @@ class WorkspaceComponent(BaseComponent):
         omitted = len(text) - self.max_output_chars
         return f"{text[:half]}\n...[truncated {omitted} chars]...\n{text[-half:]}"
 
+    def _display_rel_path(self, abs_path: str, base_dir: str) -> str:
+        rel = os.path.relpath(abs_path, base_dir)
+        if base_dir == self.shared_workspace_dir:
+            return "shared" if rel == "." else f"shared/{rel}"
+        return rel
+
     def _resolve_workspace_write_path(self, path: str) -> str:
-        """Resolves a path strictly inside workspace_dir for writing."""
+        """Resolves a path strictly inside workspace_dir (or shared_workspace_dir under shared/) for writing."""
         if not path or not path.strip():
             raise ValueError("Path must not be empty.")
         clean = path.strip()
@@ -232,14 +253,22 @@ class WorkspaceComponent(BaseComponent):
         if ".." in norm_parts:
             raise ValueError(f"Access denied: path traversal ('..') is not allowed in '{path}'.")
 
-        abs_path = os.path.abspath(os.path.join(self.workspace_dir, clean))
-        if os.path.commonpath([self.workspace_dir, abs_path]) != self.workspace_dir or abs_path == self.workspace_dir:
+        target_base = self.workspace_dir
+        if clean == "shared" or clean.startswith("shared/"):
+            target_base = self.shared_workspace_dir
+            clean = clean[len("shared"):].lstrip("/")
+            if not clean:
+                raise ValueError(f"Access denied: path '{path}' resolves to a directory, not a file.")
+
+        abs_path = os.path.abspath(os.path.join(target_base, clean))
+        if os.path.commonpath([target_base, abs_path]) != target_base or abs_path == target_base:
             raise ValueError(f"Access denied: path '{path}' resolves outside of workspace.")
         return abs_path
 
     def _resolve_workspace_read_path(self, path: str, allow_dir: bool = False) -> Tuple[str, str]:
         """
-        Resolves a path inside workspace_dir (or mind_ro_dir if prefixed with /home/agent/mind or mind/).
+        Resolves a path inside workspace_dir, shared_workspace_dir (if under shared/),
+        or mind_ro_dir (if prefixed with /home/agent/mind or mind/).
         Returns (abs_path, base_dir).
         """
         if not path or not path.strip():
@@ -268,6 +297,10 @@ class WorkspaceComponent(BaseComponent):
         norm_parts = os.path.normpath(clean).split(os.sep)
         if ".." in norm_parts:
             raise ValueError(f"Access denied: path traversal ('..') is not allowed in '{path}'.")
+
+        if base_dir == self.workspace_dir and (clean == "shared" or clean.startswith("shared/")):
+            base_dir = self.shared_workspace_dir
+            clean = clean[len("shared"):].lstrip("/") or "."
 
         abs_path = os.path.abspath(os.path.join(base_dir, clean))
         if os.path.commonpath([base_dir, abs_path]) != base_dir:
@@ -396,7 +429,10 @@ class WorkspaceComponent(BaseComponent):
             with open(tmp_path, "w", encoding="utf-8") as f:
                 f.write(content)
             os.replace(tmp_path, abs_path)
-            rel = os.path.relpath(abs_path, self.workspace_dir)
+            if os.path.commonpath([self.shared_workspace_dir, abs_path]) == self.shared_workspace_dir:
+                rel = self._display_rel_path(abs_path, self.shared_workspace_dir)
+            else:
+                rel = os.path.relpath(abs_path, self.workspace_dir)
             return f"Success: Wrote {len(content)} chars to workspace file '{rel}'."
         except Exception as e:
             return f"Error writing workspace file '{path}': {str(e)}"
@@ -413,7 +449,7 @@ class WorkspaceComponent(BaseComponent):
             if not os.path.isfile(abs_path):
                 return f"Error: '{path}' is not a regular file."
 
-            rel_path = os.path.relpath(abs_path, base_dir)
+            rel_path = self._display_rel_path(abs_path, base_dir)
             chunk_idx = max(1, int(chunk if chunk is not None else 1))
             ext = os.path.splitext(abs_path)[1].lower()
 
@@ -529,7 +565,7 @@ class WorkspaceComponent(BaseComponent):
             if not os.path.isfile(abs_path):
                 return f"Error: '{path}' is not a regular file."
 
-            rel_path = os.path.relpath(abs_path, base_dir)
+            rel_path = self._display_rel_path(abs_path, base_dir)
             ext = os.path.splitext(abs_path)[1].lower()
 
             if ext == ".pdf":
@@ -578,13 +614,16 @@ class WorkspaceComponent(BaseComponent):
                 return f"Error: '{subdir}' is not a directory."
 
             entries = os.listdir(abs_path)
-            if not entries:
-                return f"Directory '{subdir or '.'}' is empty."
-
-            dirs = sorted([e for e in entries if os.path.isdir(os.path.join(abs_path, e))])
+            dirs_set = {e for e in entries if os.path.isdir(os.path.join(abs_path, e))}
+            if abs_path == self.workspace_dir and os.path.isdir(self.shared_workspace_dir):
+                dirs_set.add("shared")
+            dirs = sorted(dirs_set)
             files = sorted([e for e in entries if os.path.isfile(os.path.join(abs_path, e))])
 
-            rel_display = os.path.relpath(abs_path, base_dir)
+            if not dirs and not files:
+                return f"Directory '{subdir or '.'}' is empty."
+
+            rel_display = self._display_rel_path(abs_path, base_dir)
             lines = [f"Contents of {rel_display}:"]
             for d in dirs:
                 lines.append(f"[DIR]  {d}")

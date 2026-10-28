@@ -48,9 +48,11 @@ class FileReaderComponent(BaseComponent):
         db_path: str = None,
         chunk_size: int = 2500,
         lines_per_chunk: int = 200,
+        shared_workspace_dir: str = None,
     ):
         self.config = load_config()
         file_cfg = self.config.get("file_reader", {})
+        explicit_libs_passed = libraries is not None
 
         if libraries is None:
             raw_libs = dict(file_cfg.get("libraries") or {})
@@ -70,6 +72,25 @@ class FileReaderComponent(BaseComponent):
         for name, path in libraries.items():
             if path:
                 self.libraries[name] = os.path.abspath(path)
+
+        ws_cfg = self.config.get("workspace", {})
+        self.container_workdir = (ws_cfg.get("container_workdir") or "/home/agent/workspace").rstrip("/")
+        if shared_workspace_dir is not None:
+            self.shared_workspace_dir: Optional[str] = os.path.abspath(shared_workspace_dir)
+        elif "workspace" in self.libraries:
+            ws_abs = self.libraries["workspace"]
+            if explicit_libs_passed or os.path.basename(os.path.dirname(ws_abs)) == "test":
+                self.shared_workspace_dir = os.path.abspath(
+                    os.path.join(os.path.dirname(ws_abs), "shared_workspace")
+                )
+            elif ws_cfg.get("shared_workspace_dir"):
+                self.shared_workspace_dir = os.path.abspath(ws_cfg["shared_workspace_dir"])
+            else:
+                self.shared_workspace_dir = os.path.abspath("data/shared/workspace")
+        else:
+            self.shared_workspace_dir = None
+        if self.shared_workspace_dir:
+            os.makedirs(self.shared_workspace_dir, exist_ok=True)
 
         if db_path is not None:
             self.db_path = db_path
@@ -192,6 +213,13 @@ class FileReaderComponent(BaseComponent):
 
     def _infer_library_and_rel_path(self, abs_file_path: str) -> Tuple[Optional[str], Optional[str]]:
         abs_target = os.path.abspath(abs_file_path)
+        if self.shared_workspace_dir and "workspace" in self.libraries:
+            try:
+                if os.path.commonpath([self.shared_workspace_dir, abs_target]) == self.shared_workspace_dir:
+                    rel_s = os.path.relpath(abs_target, self.shared_workspace_dir)
+                    return "workspace", ("shared" if rel_s == "." else f"shared/{rel_s}")
+            except ValueError:
+                pass
         for lib_name, base_dir in self.libraries.items():
             try:
                 if os.path.commonpath([base_dir, abs_target]) == base_dir:
@@ -407,9 +435,27 @@ class FileReaderComponent(BaseComponent):
         return results
 
     def _resolve_and_check_path(self, library: str, rel_path: str) -> Tuple[str, str, str]:
-        resolved_lib = self._resolve_library_name(library)
-        base_dir = self.libraries[resolved_lib]
+        raw_lib_lower = (library or "").strip().lower()
         cleaned_rel = self._clean_filepath_arg(rel_path)
+
+        if raw_lib_lower in ("shared", "shared_workspace") and "workspace" in self.libraries:
+            resolved_lib = "workspace"
+            if cleaned_rel.startswith(self.container_workdir + "/"):
+                cleaned_rel = cleaned_rel[len(self.container_workdir) + 1 :]
+            if cleaned_rel == "shared" or cleaned_rel.startswith("shared/"):
+                pass
+            else:
+                cleaned_rel = f"shared/{cleaned_rel.lstrip('/')}" if cleaned_rel.lstrip("/") else "shared"
+        else:
+            resolved_lib = self._resolve_library_name(library)
+
+        base_dir = self.libraries[resolved_lib]
+
+        if resolved_lib == "workspace":
+            if cleaned_rel == self.container_workdir:
+                cleaned_rel = ""
+            elif cleaned_rel.startswith(self.container_workdir + "/"):
+                cleaned_rel = cleaned_rel[len(self.container_workdir) + 1 :]
 
         # If this is a Gutenberg library and the caller passed an eBook ID (e.g. "1342" or "#1342"), resolve it
         if os.path.isfile(os.path.join(base_dir, "GUTINDEX.ALL")):
@@ -420,6 +466,17 @@ class FileReaderComponent(BaseComponent):
                     cleaned_rel = self._resolve_gutenberg_book_rel_path(base_dir, int(id_candidate))
 
         safe_rel_path = cleaned_rel.lstrip(os.sep) if cleaned_rel else ""
+        if resolved_lib == "workspace" and self.shared_workspace_dir:
+            norm_parts = os.path.normpath(safe_rel_path or ".").split(os.sep)
+            if ".." not in norm_parts and (safe_rel_path == "shared" or safe_rel_path.startswith("shared/")):
+                sub_rel = safe_rel_path[len("shared") :].lstrip(os.sep)
+                abs_path = os.path.abspath(os.path.join(self.shared_workspace_dir, sub_rel))
+                if os.path.commonpath([self.shared_workspace_dir, abs_path]) != self.shared_workspace_dir:
+                    raise ValueError(f"Access denied. Path '{rel_path}' is outside of library '{resolved_lib}'.")
+                sub_norm = os.path.relpath(abs_path, self.shared_workspace_dir)
+                display_rel = "shared" if sub_norm == "." else f"shared/{sub_norm}"
+                return resolved_lib, abs_path, display_rel
+
         abs_path = os.path.abspath(os.path.join(base_dir, safe_rel_path))
 
         if os.path.commonpath([base_dir, abs_path]) != base_dir:
@@ -591,29 +648,53 @@ class FileReaderComponent(BaseComponent):
             result += f"- {name}: mounted at {path}\n"
         return result
 
+    def _rel_path_for_library_file(self, lib_name: str, abs_f: str) -> str:
+        base_dir = self.libraries[lib_name]
+        if lib_name == "workspace" and self.shared_workspace_dir:
+            try:
+                if os.path.commonpath([self.shared_workspace_dir, abs_f]) == self.shared_workspace_dir:
+                    sub = os.path.relpath(abs_f, self.shared_workspace_dir)
+                    return "shared" if sub == "." else f"shared/{sub}"
+            except ValueError:
+                pass
+        return os.path.relpath(abs_f, base_dir)
+
     def _search_single_library(self, lib_name: str, target_path: str, terms: List[str], limit: int = 50) -> List[str]:
         base_dir = self.libraries[lib_name]
         if target_path == base_dir and os.path.isfile(os.path.join(base_dir, "GUTINDEX.ALL")):
             return self._search_gutenberg_catalog(lib_name, base_dir, terms, limit=limit)
 
+        walk_roots = [target_path]
+        if (
+            lib_name == "workspace"
+            and target_path == base_dir
+            and self.shared_workspace_dir
+            and os.path.isdir(self.shared_workspace_dir)
+        ):
+            walk_roots.append(self.shared_workspace_dir)
+
         matches: List[str] = []
         walked_files = 0
-        for root, _, files in os.walk(target_path):
-            for fname in sorted(files):
-                walked_files += 1
-                if walked_files > MAX_WALK_FILES_PER_LIBRARY:
-                    matches.append(
-                        f"... search stopped after scanning {MAX_WALK_FILES_PER_LIBRARY} files in '{lib_name}'."
-                    )
-                    return matches
-                abs_f = os.path.join(root, fname)
-                rel_f = os.path.relpath(abs_f, base_dir)
-                label = self._get_cached_file_label(abs_f, rel_f)
-                if all(term in label.lower() or term in rel_f.lower() for term in terms):
-                    matches.append(label)
-                    if len(matches) >= limit:
-                        matches.append(f"... and more matches in '{lib_name}'. Please refine your query.")
+        for walk_root in walk_roots:
+            for root, dirs, files in os.walk(walk_root):
+                if walk_root == base_dir and lib_name == "workspace" and self.shared_workspace_dir and root == base_dir:
+                    if "shared" in dirs:
+                        dirs.remove("shared")
+                for fname in sorted(files):
+                    walked_files += 1
+                    if walked_files > MAX_WALK_FILES_PER_LIBRARY:
+                        matches.append(
+                            f"... search stopped after scanning {MAX_WALK_FILES_PER_LIBRARY} files in '{lib_name}'."
+                        )
                         return matches
+                    abs_f = os.path.join(root, fname)
+                    rel_f = self._rel_path_for_library_file(lib_name, abs_f)
+                    label = self._get_cached_file_label(abs_f, rel_f)
+                    if all(term in label.lower() or term in rel_f.lower() for term in terms):
+                        matches.append(label)
+                        if len(matches) >= limit:
+                            matches.append(f"... and more matches in '{lib_name}'. Please refine your query.")
+                            return matches
         return matches
 
     def list_files(self, library: str = "all", path: str = "", query: str = "") -> str:
@@ -664,11 +745,19 @@ class FileReaderComponent(BaseComponent):
                 return f"Error: '{path}' is not a directory."
 
             entries = os.listdir(target_path)
-            if not entries:
-                return f"Directory '{rel_base or '/'}' in library '{resolved_lib}' is empty."
-
-            dirs = sorted([e for e in entries if os.path.isdir(os.path.join(target_path, e))])
+            dirs_set = {e for e in entries if os.path.isdir(os.path.join(target_path, e))}
+            if (
+                resolved_lib == "workspace"
+                and target_path == base_dir
+                and self.shared_workspace_dir
+                and os.path.isdir(self.shared_workspace_dir)
+            ):
+                dirs_set.add("shared")
+            dirs = sorted(dirs_set)
             files = sorted([e for e in entries if os.path.isfile(os.path.join(target_path, e))])
+
+            if not dirs and not files:
+                return f"Directory '{rel_base or '/'}' in library '{resolved_lib}' is empty."
 
             result = [f"Contents of {resolved_lib} : {rel_base or '/'}\n"]
             shown = 0
@@ -682,7 +771,7 @@ class FileReaderComponent(BaseComponent):
                 if shown >= MAX_DIR_LIST_ENTRIES:
                     break
                 abs_f = os.path.join(target_path, f)
-                rel_f = os.path.relpath(abs_f, base_dir)
+                rel_f = self._rel_path_for_library_file(resolved_lib, abs_f)
                 ext = os.path.splitext(f)[1].lower()
                 if ext in (".epub", ".pdf") and len(files) <= 200:
                     label = self._get_cached_file_label(abs_f, rel_f)

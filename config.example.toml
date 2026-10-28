@@ -116,6 +116,7 @@ container_name = "thunk-workspace"
 container_user = "agent"
 container_workdir = "/home/agent/workspace"
 workspace_dir = "data/thunk/workspace"
+shared_workspace_dir = "data/shared/workspace"
 mind_ro_dir = "data/thunk/mind_ro"
 live_db_path = "data/thunk/memory.db"
 default_timeout_sec = 30
