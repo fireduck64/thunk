@@ -22,6 +22,7 @@ class Layer1Item:
     hits: int = 1
     age: int = 0
     last_similarity: float = 0.0
+    groomed_at: int = 0
 
     @property
     def priority(self) -> float:
@@ -146,11 +147,15 @@ class SpreadingActivationComponent(BaseComponent):
                             hits INTEGER,
                             age INTEGER,
                             last_similarity REAL,
+                            groomed_at INTEGER NOT NULL DEFAULT 0,
                             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                             PRIMARY KEY (thread_id, id)
                         )
                         """
                     )
+                cols_now = [row[1] for row in conn.execute("PRAGMA table_info(layer_1_pool)").fetchall()]
+                if "groomed_at" not in cols_now:
+                    conn.execute("ALTER TABLE layer_1_pool ADD COLUMN groomed_at INTEGER NOT NULL DEFAULT 0")
         finally:
             conn.close()
 
@@ -160,10 +165,10 @@ class SpreadingActivationComponent(BaseComponent):
         conn = self._connect_db()
         try:
             rows = conn.execute(
-                "SELECT id, content, metadata, hits, age, last_similarity FROM layer_1_pool WHERE thread_id = ?",
+                "SELECT id, content, metadata, hits, age, last_similarity, groomed_at FROM layer_1_pool WHERE thread_id = ?",
                 (self.thread_id,),
             ).fetchall()
-            for row_id, content, meta_json, hits, age, last_sim in rows:
+            for row_id, content, meta_json, hits, age, last_sim, groomed_at in rows:
                 try:
                     metadata = json.loads(meta_json) if meta_json else {}
                 except Exception:
@@ -175,6 +180,7 @@ class SpreadingActivationComponent(BaseComponent):
                     hits=int(hits or 1),
                     age=int(age or 0),
                     last_similarity=float(last_sim or 0.0),
+                    groomed_at=int(groomed_at or 0),
                 )
             self._evict_pool()
         finally:
@@ -189,8 +195,8 @@ class SpreadingActivationComponent(BaseComponent):
                 conn.execute("DELETE FROM layer_1_pool WHERE thread_id = ?", (self.thread_id,))
                 conn.executemany(
                     """
-                    INSERT INTO layer_1_pool (thread_id, id, content, metadata, hits, age, last_similarity)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO layer_1_pool (thread_id, id, content, metadata, hits, age, last_similarity, groomed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
@@ -201,6 +207,7 @@ class SpreadingActivationComponent(BaseComponent):
                             item.hits,
                             item.age,
                             item.last_similarity,
+                            int(getattr(item, "groomed_at", 0) or 0),
                         )
                         for item in self.layer_1_pool.values()
                     ],
@@ -211,9 +218,10 @@ class SpreadingActivationComponent(BaseComponent):
     def compute_fetch_count(self) -> int:
         """
         Calculates how many items to fetch from Qdrant (Layer-2) based on current Layer-1 pool vacuum:
-        fetch_count = max(0, layer_1_pool_size - len(layer_1_pool)) + layer_0_promotion_count
+        fetch_count = max(missing + layer_0_promotion_count, layer_0_promotion_count * 2)
         """
-        return max(0, self.layer_1_pool_size - len(self.layer_1_pool)) + self.layer_0_promotion_count
+        missing = max(0, self.layer_1_pool_size - len(self.layer_1_pool))
+        return max(missing + self.layer_0_promotion_count, self.layer_0_promotion_count * 2)
 
     def _age_pool(self) -> None:
         """1. Age Existing Pool: increment age by 1 for every item currently in Layer-1."""
@@ -350,7 +358,12 @@ class SpreadingActivationComponent(BaseComponent):
                     f"[Immediate Associative Match | hits={item.hits}, "
                     f"priority={prio_str}, similarity={sim_str}, saved={timestamp}]"
                 )
-            blocks.append(f"--- Candidate {idx} {tag} ---\n{item.content}")
+            snippet = (
+                item.content[:1200] + "\n...[truncated]..."
+                if len(item.content) > 1200
+                else item.content
+            )
+            blocks.append(f"--- Candidate {idx} {tag} ---\n{snippet}")
         return "\n\n".join(blocks)
 
     async def _synthesize_memories(self, incoming_message: str, raw_memories: str) -> str:

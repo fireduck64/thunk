@@ -545,6 +545,9 @@ class TieredMemoryComponent(BaseComponent):
                 parts = content.split("--- End Recall ---\n\n", 1)
                 if len(parts) == 2:
                     content = parts[1]
+
+            if role == "tool" and len(content) > 600:
+                content = content[:600] + "\n...[truncated]..."
                     
             transcript += f"[{role.upper()}]: {content}\n"
 
@@ -560,7 +563,7 @@ class TieredMemoryComponent(BaseComponent):
             "CRITICAL INSTRUCTIONS:\n"
             "- Aggressively condense or completely discard older, stale information (e.g., books you have already finished, resolved quests, or old context) to make room for current priorities.\n"
             "- Prioritize recent events, current state, and active goals over past history.\n"
-            "- Remember that evicted facts are safely archived in Vector Memory, so it is safe to drop them from this active summary.\n"
+            "- Remember that evicted raw turns and historical summaries are safely archived in SQLite history, so it is safe to drop stale details from this active summary.\n"
             "- Keep the summary highly condensed and written from the perspective of the agent (e.g., 'I am currently reading...').\n"
             "Return ONLY the raw text of the new summary. Do not include introductory text."
         )
@@ -627,36 +630,6 @@ class TieredMemoryComponent(BaseComponent):
             span.inc("response_tokens", count_tokens(new_summary, tokenizer=self.tokenizer))
             span.inc("response_bytes", len(new_summary.encode("utf-8")))
 
-            # --- MEMORY CONSOLIDATION (Subconscious Integration) ---
-            for comp in agent.components:
-                if comp.__class__.__name__ == "VectorMemoryComponent":
-                    try:
-                        consolidation = f"Consolidated Memory Block:\nSummary: {new_summary}\nRaw Events:\n{transcript}"
-                        sig_params = inspect.signature(comp.save_semantic_memory).parameters
-                        supports_kwargs = any(
-                            p.kind == inspect.Parameter.VAR_KEYWORD or p.name == "metadata"
-                            for p in sig_params.values()
-                        )
-                        with span.subtimer("embedding_ms"):
-                            if supports_kwargs:
-                                result = comp.save_semantic_memory(
-                                    consolidation,
-                                    metadata={"thread_id": self.thread_id},
-                                )
-                            else:
-                                result = comp.save_semantic_memory(consolidation)
-                        if isinstance(result, str) and result.startswith("Error"):
-                            raise RuntimeError(result)
-                        print("[Memory] Sent consolidated block to long-term Vector Memory.")
-                    except BaseException as e:
-                        span.fail()
-                        span.finish()
-                        print(
-                            f"[Memory FATAL] Failed to consolidate to Vector Memory: {e}. Exiting process.",
-                            flush=True,
-                        )
-                        sys.exit(1)
-
             # Atomically save the new summary, append to history, and advance last_compacted_id
             with span.subtimer("db_save_ms"):
                 self._update_core_summary(new_summary, max_evicted_id=max_evicted_id)
@@ -664,6 +637,6 @@ class TieredMemoryComponent(BaseComponent):
             span.inc("db_save_records", 1)
             print(f"[Memory] New Core Summary Generated: {new_summary[:50]}...")
 
-            # Evict compacted messages only after Vector Memory and SQLite commits have succeeded
+            # Evict compacted messages after SQLite commit has succeeded
             del agent.messages[1 : 1 + num_to_evict]
             agent.rebuild_system_prompt()

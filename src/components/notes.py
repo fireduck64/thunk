@@ -1,5 +1,6 @@
 from typing import List, Callable, Dict, Any
 import os
+import re
 import sqlite3
 from src.components.base import BaseComponent
 from src.utils.config import load_config
@@ -33,7 +34,17 @@ class StructuredNotesComponent(BaseComponent):
                 conn.execute(
                     "CREATE TABLE IF NOT EXISTS notes (key TEXT PRIMARY KEY, value TEXT)"
                 )
-
+                try:
+                    conn.execute(
+                        "CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(key, value)"
+                    )
+                    n_count = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
+                    fts_count = conn.execute("SELECT COUNT(*) FROM notes_fts").fetchone()[0]
+                    if n_count != fts_count:
+                        conn.execute("DELETE FROM notes_fts")
+                        conn.execute("INSERT INTO notes_fts (key, value) SELECT key, value FROM notes")
+                except Exception:
+                    pass
         finally:
             conn.close()
     def get_system_prompt_addition(self) -> str:
@@ -71,23 +82,95 @@ class StructuredNotesComponent(BaseComponent):
             self.rename_note
         ]
 
+    @staticmethod
+    def _extract_snippet(value: str, tokens: List[str], max_chars: int = 600) -> str:
+        text = value or ""
+        if len(text) <= max_chars:
+            return text
+        lower = text.lower()
+        match_pos = -1
+        for tok in tokens:
+            idx = lower.find(tok.lower())
+            if idx != -1:
+                match_pos = idx
+                break
+        if match_pos == -1:
+            return text[:max_chars] + "\n...[truncated]..."
+        half = max_chars // 2
+        start = max(0, match_pos - half)
+        end = min(len(text), start + max_chars)
+        start = max(0, end - max_chars)
+        prefix = "...[truncated]...\n" if start > 0 else ""
+        suffix = "\n...[truncated]..." if end < len(text) else ""
+        return f"{prefix}{text[start:end]}{suffix}"
+
     def execute_search(self, query: str) -> str:
-        """Standardized interface for GlobalSearchComponent."""
-        # Simple string matching across all note keys and values
-        query_lower = query.lower()
-        results = []
+        """Standardized interface for GlobalSearchComponent using FTS5 BM25 + tokenized keyword ranking."""
+        clean_query = (query or "").strip()
+        if not clean_query:
+            return ""
+
+        tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9_]+", clean_query) if len(t) >= 2]
+        if not tokens:
+            tokens = [clean_query.lower()]
+
+        scored_notes: Dict[str, tuple[float, str]] = {}
         conn = self._connect_db()
         try:
             with conn:
-                cursor = conn.execute("SELECT key, value FROM notes")
-                for key, value in cursor.fetchall():
-                    if query_lower in key.lower() or query_lower in value.lower():
-                        results.append(f"Note '{key}':\n{value}")
+                # 1. FTS5 BM25 match (with prefix matching per token)
+                try:
+                    fts_expr = " OR ".join(f'"{t}"*' for t in tokens)
+                    fts_rows = conn.execute(
+                        "SELECT key, value, bm25(notes_fts) AS rank FROM notes_fts "
+                        "WHERE notes_fts MATCH ? ORDER BY rank ASC LIMIT 10",
+                        (fts_expr,),
+                    ).fetchall()
+                    for idx, (k, v, _) in enumerate(fts_rows):
+                        # Higher score for better FTS rank
+                        scored_notes[str(k)] = (10.0 - idx * 0.5, str(v or ""))
+                except Exception:
+                    pass
 
+                # 2. Tokenized multi-keyword scoring across all notes (catches path slashes, substrings, etc.)
+                query_lower = clean_query.lower()
+                rows = conn.execute("SELECT key, value FROM notes").fetchall()
+                for k, v in rows:
+                    key_str = str(k or "")
+                    val_str = str(v or "")
+                    k_low = key_str.lower()
+                    v_low = val_str.lower()
+
+                    score = 0.0
+                    if query_lower in k_low:
+                        score += 6.0
+                    if query_lower in v_low:
+                        score += 4.0
+                    for tok in tokens:
+                        if tok in k_low:
+                            score += 2.0
+                        if tok in v_low:
+                            score += 1.0
+
+                    if score > 0:
+                        prev_score = scored_notes.get(key_str, (0.0, val_str))[0]
+                        scored_notes[key_str] = (prev_score + score, val_str)
         finally:
             conn.close()
-        if not results:
-            return "" # Return empty string so GlobalSearch skips this component
+
+        if not scored_notes:
+            return ""
+
+        ranked = sorted(
+            scored_notes.items(),
+            key=lambda kv: (kv[1][0], kv[0]),
+            reverse=True,
+        )[:5]
+
+        results = []
+        for key, (_, value) in ranked:
+            snippet = self._extract_snippet(value, tokens, max_chars=600)
+            results.append(f"Note '{key}':\n{snippet}")
         return "\n\n".join(results)
 
     # --- Tool Implementations ---
@@ -155,6 +238,11 @@ class StructuredNotesComponent(BaseComponent):
                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value", 
                     (key, value)
                 )
+                try:
+                    conn.execute("DELETE FROM notes_fts WHERE key = ?", (key,))
+                    conn.execute("INSERT INTO notes_fts (key, value) VALUES (?, ?)", (key, value))
+                except Exception:
+                    pass
         finally:
             conn.close()
         return f"Success: Note '{key}' saved."
@@ -165,6 +253,10 @@ class StructuredNotesComponent(BaseComponent):
         try:
             with conn:
                 conn.execute("DELETE FROM notes WHERE key = ?", (key,))
+                try:
+                    conn.execute("DELETE FROM notes_fts WHERE key = ?", (key,))
+                except Exception:
+                    pass
         finally:
             conn.close()
         return f"Success: Note '{key}' deleted if it existed."
@@ -186,6 +278,10 @@ class StructuredNotesComponent(BaseComponent):
                     
                 # Perform the rename
                 conn.execute("UPDATE notes SET key = ? WHERE key = ?", (new_key, old_key))
+                try:
+                    conn.execute("UPDATE notes_fts SET key = ? WHERE key = ?", (new_key, old_key))
+                except Exception:
+                    pass
         finally:
             conn.close()
             

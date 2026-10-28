@@ -5,7 +5,7 @@ import requests
 from datetime import datetime
 from typing import List, Callable, Dict, Any
 from qdrant_client import QdrantClient
-from qdrant_client.models import VectorParams, Distance, PointStruct
+from qdrant_client.models import VectorParams, Distance, PointStruct, PointIdsList
 from src.components.base import BaseComponent
 from src.utils.config import load_config
 from src.utils.metrics import MetricSpan
@@ -165,6 +165,7 @@ class VectorMemoryComponent(BaseComponent):
         chunks = self._chunk_text(content)
         timestamp = datetime.utcnow().isoformat() + "Z"
         extra_metadata = dict(kwargs.get("metadata") or {})
+        extra_metadata.setdefault("memory_type", "deliberate")
         agent_thread_id = getattr(getattr(self, "agent", None), "thread_id", None)
         agent_name = getattr(getattr(self, "agent", None), "name", None) or getattr(self, "agent_name", "Thunk")
         thread_id = getattr(getattr(self, "agent", None), "thread_id", None) or getattr(self, "thread_id", "main") or "main"
@@ -194,6 +195,18 @@ class VectorMemoryComponent(BaseComponent):
                                     **extra_metadata,
                                 }
                                 point_id = str(uuid.uuid4())
+                                if hasattr(self._client, "search"):
+                                    try:
+                                        existing = self._client.search(
+                                            collection_name=self.collection,
+                                            query_vector=vector,
+                                            limit=1,
+                                            score_threshold=0.95,
+                                        )
+                                        if existing and float(existing[0].score) >= 0.95:
+                                            point_id = str(existing[0].id)
+                                    except Exception:
+                                        pass
                                 points.append(PointStruct(id=point_id, vector=vector, payload=payload))
 
                     with span.subtimer("db_save_ms"):
@@ -358,3 +371,75 @@ class VectorMemoryComponent(BaseComponent):
             
         except Exception as e:
             return f"Error dumping semantic memory: {str(e)}"
+
+    def find_neighbors_by_id(
+        self, point_id: str, top_k: int = 5, score_threshold: float = 0.88
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieves the embedding vector for `point_id` from Qdrant and returns up to `top_k`
+        nearest neighbors with cosine similarity >= `score_threshold` (excluding `point_id` itself).
+        """
+        if not self._client:
+            self._client = QdrantClient(host=self.host, port=self.port)
+
+        records = self._client.retrieve(
+            collection_name=self.collection,
+            ids=[point_id],
+            with_payload=True,
+            with_vectors=True,
+        )
+        if not records or getattr(records[0], "vector", None) is None:
+            return []
+
+        vec = records[0].vector
+        hits = self._client.search(
+            collection_name=self.collection,
+            query_vector=vec,
+            limit=top_k + 1,
+            score_threshold=score_threshold,
+        )
+
+        neighbors: List[Dict[str, Any]] = []
+        for hit in hits:
+            if str(hit.id) == str(point_id):
+                continue
+            payload = dict(hit.payload or {})
+            neighbors.append(
+                {
+                    "id": str(hit.id),
+                    "content": payload.get("text", ""),
+                    "metadata": payload,
+                    "score": float(hit.score),
+                }
+            )
+            if len(neighbors) >= top_k:
+                break
+        return neighbors
+
+    def delete_points(self, point_ids: List[str]) -> None:
+        """Deletes the specified point IDs from Qdrant."""
+        if not point_ids:
+            return
+        if not self._client:
+            self._client = QdrantClient(host=self.host, port=self.port)
+        self._client.delete(
+            collection_name=self.collection,
+            points_selector=PointIdsList(points=[str(pid) for pid in point_ids]),
+        )
+
+    def upsert_point(self, point_id: str, content: str, metadata: Dict[str, Any] = None) -> None:
+        """Embeds `content` and upserts `point_id` in place in Qdrant."""
+        if not self._client:
+            self._client = QdrantClient(host=self.host, port=self.port)
+        vector = self._get_embedding(content)
+        timestamp = datetime.utcnow().isoformat() + "Z"
+        payload = {
+            "text": content,
+            "timestamp": timestamp,
+            "memory_type": "deliberate",
+            **dict(metadata or {}),
+        }
+        self._client.upsert(
+            collection_name=self.collection,
+            points=[PointStruct(id=str(point_id), vector=vector, payload=payload)],
+        )

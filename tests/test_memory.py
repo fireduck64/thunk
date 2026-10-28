@@ -270,20 +270,11 @@ async def test_tiered_memory_transactional_compaction_and_fatal_exit():
         assert len(failing_agent.messages) == 3
         assert mem._get_last_compacted_id() == 0
 
-        # 2. VectorMemory consolidation failure -> exits with code 1, messages and last_compacted_id untouched
-        failing_vm_agent = DummyAgent(DummyCompletions(should_fail=False), VectorMemoryComponent(should_fail=True))
-        with pytest.raises(SystemExit) as exc_info:
-            await mem._compress_memory(failing_vm_agent)
-        assert exc_info.value.code == 1
-        assert len(failing_vm_agent.messages) == 3
-        assert mem._get_last_compacted_id() == 0
-
-        # 3. Successful compaction -> saves to VectorMemory, updates SQLite summary + last_compacted_id, then evicts messages
-        good_vm = VectorMemoryComponent(should_fail=False)
+        # 2. Successful compaction -> never writes to VectorMemory (decoupled per WP1), updates SQLite summary + last_compacted_id, then evicts messages
+        good_vm = VectorMemoryComponent(should_fail=True)
         good_agent = DummyAgent(DummyCompletions(should_fail=False, summary_text="Compacted summary!"), good_vm)
         await mem._compress_memory(good_agent)
-        assert len(good_vm.saved) == 1
-        assert good_vm.saved[0].startswith("Consolidated Memory Block:\nSummary: Compacted summary!")
+        assert len(good_vm.saved) == 0
         assert mem._get_last_compacted_id() == 102
         assert "Compacted summary!" in mem._get_core_summary()
         assert len(good_agent.messages) == 1

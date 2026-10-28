@@ -25,6 +25,7 @@ from src.components.vector_memory import VectorMemoryComponent
 from src.components.global_search import GlobalSearchComponent
 from src.components.subconscious import SubconsciousRecallComponent
 from src.components.spreading_activation import SpreadingActivationComponent
+from src.components.memory_gardener import MemoryGardenerComponent
 from src.components.file_reader import FileReaderComponent
 from src.components.oracle import OracleComponent
 from src.components.speaker import SpeakerComponent
@@ -82,7 +83,6 @@ def _register_thread_components(
     agent.register_component(
         TieredMemoryComponent(thread_id=thread_id, tokenizer=shared_tokenizer)
     )
-    agent.register_component(CriticComponent(frequency=8))
 
     if enabled_components is not None:
         requested = {str(c).strip().lower() for c in enabled_components}
@@ -93,6 +93,18 @@ def _register_thread_components(
         if requested is None:
             return True
         return any(a.lower() in requested for a in aliases)
+
+    critic_enabled_cfg = config.get("critic", {}).get("enabled", False)
+    if (requested is not None and _wants("critic", "criticcomponent")) or (
+        requested is None and critic_enabled_cfg
+    ):
+        agent.register_component(CriticComponent(frequency=8))
+
+    if _wants("memory_gardener", "memorygardenercomponent") and (
+        sub_mode == "spreading_activation" or sa_enabled
+    ):
+        if requested is not None or thread_id in ("main", "mind"):
+            agent.register_component(MemoryGardenerComponent(thread_id=thread_id))
 
     if _wants("tasks", "task_queue", "taskqueuecomponent"):
         agent.register_component(TaskQueueComponent())

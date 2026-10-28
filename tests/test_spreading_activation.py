@@ -74,11 +74,11 @@ async def test_cold_start_vacuum_filling_and_steady_state_fetch():
     assert len(sa.layer_1_pool) == 32
     assert payload_1["content"].startswith("[Subconscious Recall Triggered by below message:]")
 
-    # Turn 2: Pool is full (32 items -> requests 0 + 8 = 8)
-    assert sa.compute_fetch_count() == 8
+    # Turn 2: Pool is full (32 items -> requests max(0 + 8, 8 * 2) = 16)
+    assert sa.compute_fetch_count() == 16
     payload_2 = {"content": "Second user turn"}
     await sa.on_event("before_user_message_added", payload_2)
-    assert dummy_vm.requested_limits[1] == 8
+    assert dummy_vm.requested_limits[1] == 16
     assert len(sa.layer_1_pool) == 32
 
 
@@ -245,4 +245,144 @@ async def test_layer_1_pool_sqlite_persistence_and_reload():
     sa2 = SpreadingActivationComponent(layer_1_pool_size=8, layer_0_promotion_count=2)
     assert set(sa2.layer_1_pool.keys()) == {"sql-1", "sql-2", "sql-3"}
     assert sa2.layer_1_pool["sql-1"].content == "Persisted memory alpha"
+
+
+@pytest.mark.asyncio
+async def test_memory_gardener_notes_fts_and_garden_migrate(tmp_path):
+    """Verifies MemoryGardenerComponent (fast path & LLM path), StructuredNotesComponent FTS5/multi-keyword search, and scripts/garden_migrate.py."""
+    from src.components.memory_gardener import MemoryGardenerComponent
+    from src.components.notes import StructuredNotesComponent
+
+    # 1. Test candidate snippet cap at 1,200 chars in SpreadingActivationComponent
+    sa = SpreadingActivationComponent(
+        layer_1_pool_size=8,
+        layer_0_promotion_count=2,
+        db_path=str(tmp_path / "gardener_test.db"),
+        persist=True,
+        thread_id="mind",
+    )
+    long_text = "A" * 2000
+    sa.layer_1_pool["id_long"] = Layer1Item(id="id_long", content=long_text, hits=2, age=0, last_similarity=0.9)
+    formatted = sa._format_promoted_candidates([sa.layer_1_pool["id_long"]], {"id_long"})
+    assert "...[truncated]..." in formatted
+    assert "A" * 1300 not in formatted
+
+    # 2. Test MemoryGardenerComponent Fast Path (sim >= 0.95) and LLM Path (0.88 <= sim < 0.95)
+    sa.layer_1_pool = {
+        "m1": Layer1Item(id="m1", content="Short version of thought", hits=2, age=1, last_similarity=0.9),
+        "m2": Layer1Item(id="m2", content="Longer more detailed version of the exact same thought", hits=1, age=0, last_similarity=0.88),
+        "m3": Layer1Item(id="m3", content="Overlapping note A on Cosmere", hits=1, age=2, last_similarity=0.85),
+        "m4": Layer1Item(id="m4", content="Overlapping note B on Cosmere", hits=2, age=1, last_similarity=0.84),
+    }
+    sa._save_pool_to_db()
+
+    class MockVectorComp:
+        def __init__(self):
+            self.deleted = []
+            self.upserted = []
+
+        def find_neighbors_by_id(self, point_id: str, top_k: int = 5, score_threshold: float = 0.88):
+            if point_id == "m1":
+                return [{"id": "m2", "content": "Longer more detailed version of the exact same thought", "score": 0.97}]
+            if point_id == "m4":
+                return [{"id": "m3", "content": "Overlapping note A on Cosmere", "score": 0.90}]
+            return []
+
+        def upsert_point(self, point_id: str, content: str, metadata=None):
+            self.upserted.append((point_id, content))
+
+        def delete_points(self, point_ids):
+            self.deleted.extend(point_ids)
+
+    mock_vc = MockVectorComp()
+    gardener = MemoryGardenerComponent(
+        thread_id="mind",
+        spreading_comp=sa,
+        vector_comp=mock_vc,
+    )
+
+    # Pass 1: Fast path merges m1 + m2 without LLM call
+    res1 = await gardener.run_gardening_pass()
+    assert res1["status"] == "fast_merged"
+    assert res1["target_id"] == "m1"
+    assert res1["deleted_ids"] == ["m2"]
+    assert "m2" not in sa.layer_1_pool
+    assert sa.layer_1_pool["m1"].content == "Longer more detailed version of the exact same thought"
+    assert sa.layer_1_pool["m1"].hits == 3  # max(2, 1) + 1
+    assert sa.layer_1_pool["m1"].groomed_at > 0
+
+    # Pass 2: LLM path merges m4 + m3 via mocked _ask_llm_to_merge
+    async def mock_ask_llm(target, neighbors, span):
+        return {"should_merge": True, "merged_content": "Merged Cosmere synthesis (A + B)"}
+
+    gardener._ask_llm_to_merge = mock_ask_llm
+    res2 = await gardener.run_gardening_pass()
+    assert res2["status"] == "llm_merged"
+    assert res2["target_id"] == "m4"
+    assert "m3" not in sa.layer_1_pool
+    assert sa.layer_1_pool["m4"].content == "Merged Cosmere synthesis (A + B)"
+    assert sa.layer_1_pool["m4"].hits == 3  # 2 + 1
+
+    # 3. Test StructuredNotesComponent multi-keyword search + contextual snippet
+    notes = StructuredNotesComponent(db_path=str(tmp_path / "notes_fts.db"))
+    notes.put_note("books/earthsea/ged", "Sparrowhawk (Ged) confronted the shadow on the Dry Land with Cob.")
+    notes.put_note("physics/amaterasu", "Ultra-high-energy cosmic ray 244 EeV pointing toward the Local Void.")
+    search_out = notes.execute_search("Ged Cob Dry Land")
+    assert "books/earthsea/ged" in search_out
+    assert "Sparrowhawk" in search_out
+
+    # 4. Test scripts/garden_migrate.py (migrate_agent_memory)
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("garden_migrate", "scripts/garden_migrate.py")
+    mig_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mig_mod)
+
+    class FakePoint:
+        def __init__(self, pid, text, vec, ts="2026-10-27T00:00:00Z"):
+            self.id = pid
+            self.payload = {"text": text, "timestamp": ts}
+            self.vector = vec
+
+    class FakeQdrant:
+        def __init__(self, points):
+            self.points = list(points)
+            self.deleted_ids = []
+            self.tagged_ids = []
+
+        def scroll(self, collection_name, limit=250, offset=None, with_payload=True, with_vectors=True):
+            if offset is not None:
+                return [], None
+            return self.points, None
+
+        def delete(self, collection_name, points_selector):
+            self.deleted_ids.extend(points_selector.points)
+
+        def set_payload(self, collection_name, payload, points):
+            self.tagged_ids.extend(points)
+
+    fake_q = FakeQdrant(
+        [
+            FakePoint("cmb-1", "Consolidated Memory Block:\nSummary: old", [1.0, 0.0, 0.0]),
+            FakePoint("delib-1", "Shorter deliberate insight", [0.0, 1.0, 0.0]),
+            FakePoint("delib-2", "Longer and richer deliberate insight on the same vector", [0.0, 0.99, 0.05]),
+            FakePoint("delib-3", "Orthogonal distinct deliberate insight", [0.0, 0.0, 1.0]),
+        ]
+    )
+    backup_file = str(tmp_path / "backup.jsonl")
+    stats = mig_mod.migrate_agent_memory(
+        client=fake_q,
+        collection_name="test_agent_memory",
+        sqlite_db_path=str(tmp_path / "gardener_test.db"),
+        backup_path=backup_file,
+        dedup_threshold=0.92,
+        dry_run=False,
+    )
+    assert stats["total_before"] == 4
+    assert stats["consolidated_purged"] == 1
+    assert stats["deliberate_duplicates_purged"] == 1
+    assert stats["surviving_deliberate"] == 2
+    assert set(fake_q.deleted_ids) == {"cmb-1", "delib-1"}
+    assert set(fake_q.tagged_ids) == {"delib-2", "delib-3"}
+
 

@@ -112,7 +112,9 @@ async def test_sqlite_thread_id_isolation_tiered_and_spreading_activation(tmp_pa
 
         reader_mem.low_watermark = 2
         await reader_mem._compress_memory(DummyCompressAgent())
-        assert captured_meta == [{"thread_id": "reader"}]
+        # Per WP1, TieredMemoryComponent no longer writes Consolidated Memory Blocks to VectorMemoryComponent
+        assert captured_meta == []
+        assert reader_mem._get_core_summary() == "New reader summary"
 
         # SpreadingActivationComponent isolation on the same DB file
         sa_social = SpreadingActivationComponent(db_path=db_path, persist=True, thread_id="social")
