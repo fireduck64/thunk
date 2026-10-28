@@ -52,6 +52,31 @@ def test_embeddings_and_vector_memory():
         dump_res = vm.dump_semantic_memory(limit=10, offset=0)
         assert "Tomb of Horrors" in dump_res
         assert "Bazel" in dump_res
+
+        # 5. Test JSONL dump script (with vectors and metadata)
+        import importlib.util
+        import io
+        import json
+
+        spec = importlib.util.spec_from_file_location(
+            "dump_vector_db_json", "scripts/dump-vector-db-json.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        buf = io.StringIO()
+        q_client = QdrantClient(host=cfg["vectordb"]["host"], port=cfg["vectordb"]["port"])
+        count = mod.dump_collection_jsonl(q_client, collection, out_stream=buf)
+        assert count == 2
+        lines = [json.loads(line) for line in buf.getvalue().strip().splitlines()]
+        assert len(lines) == 2
+        for rec in lines:
+            assert rec["collection"] == collection
+            assert isinstance(rec["id"], str)
+            assert isinstance(rec["timestamp"], str)
+            assert isinstance(rec["text"], str) and len(rec["text"]) > 0
+            assert isinstance(rec["payload"], dict)
+            assert isinstance(rec["vector"], list) and len(rec["vector"]) == 768
     finally:
         _delete_test_collection(collection)
 
