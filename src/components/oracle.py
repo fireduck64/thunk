@@ -69,6 +69,8 @@ class OracleComponent(BaseComponent):
                 usage_meta = getattr(response, "usage_metadata", None)
                 req_tok = getattr(usage_meta, "prompt_token_count", None) if usage_meta else None
                 resp_tok = getattr(usage_meta, "candidates_token_count", None) if usage_meta else None
+                cached_tok = getattr(usage_meta, "cached_content_token_count", None) if usage_meta else None
+                thought_tok = getattr(usage_meta, "thoughts_token_count", None) if usage_meta else None
                 if req_tok is None:
                     req_tok = count_tokens(query, agent=agent_obj)
                 if resp_tok is None:
@@ -76,6 +78,10 @@ class OracleComponent(BaseComponent):
 
                 span.inc("request_tokens", req_tok)
                 span.inc("response_tokens", resp_tok)
+                if cached_tok is not None:
+                    span.inc("cached_tokens", int(cached_tok))
+                if thought_tok is not None:
+                    span.inc("thinking_tokens", int(thought_tok))
                 span.inc("response_bytes", len(text.encode("utf-8")))
                 return text
             except Exception as e:

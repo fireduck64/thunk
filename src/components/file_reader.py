@@ -852,9 +852,6 @@ class FileReaderComponent(BaseComponent):
         self.current_index = chunk
         self._save_state()
 
-        if hasattr(self, "agent") and self.agent:
-            self.agent.rebuild_system_prompt()
-
         if chunk < total_chunks:
             next_hint = (
                 f"Call read_next_chunk() to read chunk {chunk + 1}/{total_chunks}, "
@@ -914,9 +911,6 @@ class FileReaderComponent(BaseComponent):
         self.current_book_label = label
         self.current_index = page_number
         self._save_state()
-
-        if hasattr(self, "agent") and self.agent:
-            self.agent.rebuild_system_prompt()
 
         if page_number < total_pages:
             next_hint = (
@@ -988,9 +982,6 @@ class FileReaderComponent(BaseComponent):
         self.current_book_label = rel_path
         self.current_index = chunk
         self._save_state()
-
-        if hasattr(self, "agent") and self.agent:
-            self.agent.rebuild_system_prompt()
 
         if chunk < total_chunks:
             next_hint = (
@@ -1103,7 +1094,6 @@ class FileReaderComponent(BaseComponent):
 
                 if hasattr(self, "agent") and self.agent is not None:
                     self.agent.pending_tool_images.append(data_url)
-                    self.agent.rebuild_system_prompt()
 
                 return (
                     f"Rendered page {page_number}/{total_pages} of '{label}' from library '{resolved_lib}' "

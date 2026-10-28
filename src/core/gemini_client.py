@@ -344,11 +344,17 @@ class GeminiOpenAIClientAdapter:
             if usage_meta is not None:
                 p_tok = getattr(usage_meta, "prompt_token_count", None)
                 c_tok = getattr(usage_meta, "candidates_token_count", None)
-                if p_tok is not None or c_tok is not None:
+                cached_tok = getattr(usage_meta, "cached_content_token_count", None)
+                thought_tok = getattr(usage_meta, "thoughts_token_count", None)
+                if p_tok is not None or c_tok is not None or cached_tok is not None or thought_tok is not None:
                     usage_dict = {
                         "prompt_tokens": int(p_tok or 0),
                         "completion_tokens": int(c_tok or 0),
                     }
+                    if cached_tok is not None:
+                        usage_dict["cached_tokens"] = int(cached_tok)
+                    if thought_tok is not None:
+                        usage_dict["thinking_tokens"] = int(thought_tok)
 
             candidates = getattr(chunk, "candidates", None) or []
             if not candidates:

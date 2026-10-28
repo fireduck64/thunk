@@ -64,10 +64,6 @@ class TaskQueueComponent(BaseComponent):
                 task_id = cursor.lastrowid
         finally:
             conn.close()
-        # Tell the agent core to update its prompt since the queue changed
-        if hasattr(self, 'agent') and self.agent:
-            self.agent.rebuild_system_prompt()
-            
         return f"Task added successfully (ID: {task_id}, Priority {priority})."
 
     def pop_highest_priority_task(self) -> str:
@@ -79,10 +75,6 @@ class TaskQueueComponent(BaseComponent):
                 row = cursor.fetchone()
                 if row:
                     conn.execute("DELETE FROM task_queue WHERE id = ?", (row[0],))
-
-                    if hasattr(self, 'agent') and self.agent:
-                        self.agent.rebuild_system_prompt()
-
                     return f"Popped Task (ID: {row[0]}, Priority {row[1]}): {row[2]}"
                 return "The task queue is empty."
 
@@ -102,10 +94,6 @@ class TaskQueueComponent(BaseComponent):
                 if not row:
                     return f"Error: Task with ID {task_id} not found."
                 conn.execute("DELETE FROM task_queue WHERE id = ?", (task_id,))
-
-                if hasattr(self, 'agent') and self.agent:
-                    self.agent.rebuild_system_prompt()
-
                 return f"Deleted Task (ID: {row[0]}, Priority {row[1]}): {row[2]}"
         finally:
             conn.close()

@@ -627,7 +627,12 @@ class TieredMemoryComponent(BaseComponent):
                 )
                 sys.exit(1)
 
-            span.inc("response_tokens", count_tokens(new_summary, tokenizer=self.tokenizer))
+            usage = getattr(agent, "last_usage", None) or {}
+            if usage.get("cached_tokens") is not None:
+                span.inc("cached_tokens", int(usage["cached_tokens"]))
+            if usage.get("thinking_tokens") is not None:
+                span.inc("thinking_tokens", int(usage["thinking_tokens"]))
+            span.inc("response_tokens", usage.get("completion_tokens") or count_tokens(new_summary, tokenizer=self.tokenizer))
             span.inc("response_bytes", len(new_summary.encode("utf-8")))
 
             # Atomically save the new summary, append to history, and advance last_compacted_id

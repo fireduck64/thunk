@@ -205,6 +205,8 @@ async def test_gemini_provider_adapter_streaming_and_thought_signatures():
     class DummyUsageMeta:
         prompt_token_count = 321
         candidates_token_count = 45
+        cached_content_token_count = 280
+        thoughts_token_count = 112
 
     sig_part = types.Part(
         function_call=types.FunctionCall(name="read_file", args={"library": "ebook", "filepath": "MrDarcy.epub"}),
@@ -278,7 +280,12 @@ async def test_gemini_provider_adapter_streaming_and_thought_signatures():
     assert tc.function.name == "read_file"
     assert json.loads(tc.function.arguments) == {"library": "ebook", "filepath": "MrDarcy.epub"}
     assert agent.last_finish_reason == "tool_calls"
-    assert agent.last_usage == {"prompt_tokens": 321, "completion_tokens": 45}
+    assert agent.last_usage == {
+        "prompt_tokens": 321,
+        "completion_tokens": 45,
+        "cached_tokens": 280,
+        "thinking_tokens": 112,
+    }
 
     # Verify next turn preserves the exact Gemini Part with thought_signature
     messages.append({"role": "assistant", "content": msg.content, "tool_calls": msg.tool_calls})

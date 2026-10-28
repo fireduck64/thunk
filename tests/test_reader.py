@@ -349,5 +349,12 @@ def test_file_reader_and_discord_shared_workspace_routing(tmp_path):
     assert "Loaded image 'shared/joint_chart.png' from library 'workspace' (500x400px)" in img_res
     assert len(agent.pending_tool_images) == 1
 
+    # 4. Verify system prompt (messages[0]) stays static across read_file / read_next_chunk to preserve prefix caching
+    agent.messages = [{"role": "system", "content": agent._build_system_prompt()}]
+    sys_before = agent.messages[0]["content"]
+    fr.read_file("workspace", "shared/joint_report.txt", chunk=1)
+    assert agent.messages[0]["content"] == sys_before
+
+
 
 

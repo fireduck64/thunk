@@ -78,6 +78,7 @@ Depending on the operation, entries may include the following optional top-level
 
 **Standard `counters` keys:**
 - `request_tokens`, `response_tokens` — Input and output token counts (from endpoint usage metadata if provided, or computed via the shared `AutoTokenizer`).
+- `cached_tokens`, `thinking_tokens` — Number of prompt tokens served from the provider's prefix cache (`cached_content_token_count`) and internal reasoning tokens generated (`thoughts_token_count`), when reported by the provider.
 - `request_bytes`, `response_bytes` — UTF-8 byte lengths of the request and response payloads.
 - `request_messages` — Number of messages in the LLM context window for `agent_turn`.
 - `tool_calls` — Number of tool calls emitted by the assistant in `agent_turn`.

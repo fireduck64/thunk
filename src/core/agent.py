@@ -362,11 +362,23 @@ class AgentCore:
             if chunk_usage is not None:
                 p_tok = getattr(chunk_usage, "prompt_tokens", None)
                 c_tok = getattr(chunk_usage, "completion_tokens", None)
+                cached_tok = getattr(chunk_usage, "cached_tokens", None)
+                thought_tok = getattr(chunk_usage, "thinking_tokens", None)
                 if isinstance(chunk_usage, dict):
                     p_tok = chunk_usage.get("prompt_tokens")
                     c_tok = chunk_usage.get("completion_tokens")
+                    cached_tok = chunk_usage.get("cached_tokens")
+                    thought_tok = chunk_usage.get("thinking_tokens")
+                else:
+                    details = getattr(chunk_usage, "prompt_tokens_details", None)
+                    if details is not None and cached_tok is None:
+                        cached_tok = getattr(details, "cached_tokens", None)
                 if p_tok is not None or c_tok is not None:
                     usage_dict = {"prompt_tokens": p_tok, "completion_tokens": c_tok}
+                    if cached_tok is not None:
+                        usage_dict["cached_tokens"] = int(cached_tok)
+                    if thought_tok is not None:
+                        usage_dict["thinking_tokens"] = int(thought_tok)
 
             if not chunk.choices:
                 continue
@@ -610,6 +622,10 @@ class AgentCore:
 
             llm_span.inc("request_tokens", req_tok)
             llm_span.inc("response_tokens", resp_tok)
+            if usage.get("cached_tokens") is not None:
+                llm_span.inc("cached_tokens", int(usage["cached_tokens"]))
+            if usage.get("thinking_tokens") is not None:
+                llm_span.inc("thinking_tokens", int(usage["thinking_tokens"]))
             llm_span.inc("response_bytes", len(resp_text_for_tok.encode("utf-8")))
             llm_span.inc("tool_calls", len(message.tool_calls or []))
             llm_span.set_field("finish_reason", self.last_finish_reason or "stop")
