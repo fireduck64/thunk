@@ -7,7 +7,7 @@ from openai import AsyncOpenAI
 
 from src.components.base import BaseComponent
 from src.utils.config import load_config
-from src.utils.metrics import MetricSpan, count_tokens, infer_exec_location
+from src.utils.metrics import MetricSpan, count_tokens, extract_chunk_usage, infer_exec_location
 
 
 class MemoryGardenerComponent(BaseComponent):
@@ -233,9 +233,14 @@ class MemoryGardenerComponent(BaseComponent):
                 temperature=0.2,
                 max_tokens=self.max_output_tokens,
                 stream=True,
+                stream_options={"include_usage": True},
             )
             resp_text = ""
+            usage = None
             async for chunk in stream:
+                parsed_usage = extract_chunk_usage(chunk)
+                if parsed_usage is not None:
+                    usage = parsed_usage
                 if (
                     chunk.choices
                     and chunk.choices[0].delta
@@ -243,7 +248,14 @@ class MemoryGardenerComponent(BaseComponent):
                 ):
                     resp_text += chunk.choices[0].delta.content
 
-        span.inc("response_tokens", count_tokens(resp_text))
+        if usage:
+            if usage.get("prompt_tokens"):
+                span.set_counter("request_tokens", int(usage["prompt_tokens"]))
+            if usage.get("cached_tokens") is not None:
+                span.set_counter("cached_tokens", int(usage["cached_tokens"]))
+            if usage.get("thinking_tokens") is not None:
+                span.set_counter("thinking_tokens", int(usage["thinking_tokens"]))
+        span.inc("response_tokens", (usage or {}).get("completion_tokens") or count_tokens(resp_text))
         span.inc("response_bytes", len(resp_text.encode("utf-8")))
         return self._parse_merge_json(resp_text)
 

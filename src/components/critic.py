@@ -106,10 +106,18 @@ class CriticComponent(BaseComponent):
                         max_tokens=self.max_output_tokens,
                         extra_headers={"X-Agent-ID": f"{agent_name}-{thread_id}-critic"},
                         stream=True,
+                        stream_options={"include_usage": True},
                     )
                     message = await self.agent._accumulate_stream(response_stream)
                 feeling = (message.content or "").strip()
-                span.inc("response_tokens", count_tokens(feeling, agent=self.agent))
+                usage = getattr(self.agent, "last_usage", None) or {}
+                if usage.get("prompt_tokens"):
+                    span.set_counter("request_tokens", int(usage["prompt_tokens"]))
+                if usage.get("cached_tokens") is not None:
+                    span.set_counter("cached_tokens", int(usage["cached_tokens"]))
+                if usage.get("thinking_tokens") is not None:
+                    span.set_counter("thinking_tokens", int(usage["thinking_tokens"]))
+                span.inc("response_tokens", usage.get("completion_tokens") or count_tokens(feeling, agent=self.agent))
                 span.inc("response_bytes", len(feeling.encode("utf-8")))
 
                 print(f"[Critic Feeling]: {feeling}\n")

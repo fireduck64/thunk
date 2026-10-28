@@ -12,7 +12,7 @@ from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMe
 from src.core.events import EventBus
 from src.core.gemini_client import GeminiOpenAIClientAdapter
 from src.utils.config import load_config
-from src.utils.metrics import MetricSpan, count_tokens, infer_exec_location
+from src.utils.metrics import MetricSpan, count_tokens, extract_chunk_usage, infer_exec_location
 from src.components.base import BaseComponent
 from src.utils.schema import function_to_schema
 
@@ -358,27 +358,9 @@ class AgentCore:
         usage_dict = None
         
         async for chunk in stream:
-            chunk_usage = getattr(chunk, "usage", None)
-            if chunk_usage is not None:
-                p_tok = getattr(chunk_usage, "prompt_tokens", None)
-                c_tok = getattr(chunk_usage, "completion_tokens", None)
-                cached_tok = getattr(chunk_usage, "cached_tokens", None)
-                thought_tok = getattr(chunk_usage, "thinking_tokens", None)
-                if isinstance(chunk_usage, dict):
-                    p_tok = chunk_usage.get("prompt_tokens")
-                    c_tok = chunk_usage.get("completion_tokens")
-                    cached_tok = chunk_usage.get("cached_tokens")
-                    thought_tok = chunk_usage.get("thinking_tokens")
-                else:
-                    details = getattr(chunk_usage, "prompt_tokens_details", None)
-                    if details is not None and cached_tok is None:
-                        cached_tok = getattr(details, "cached_tokens", None)
-                if p_tok is not None or c_tok is not None:
-                    usage_dict = {"prompt_tokens": p_tok, "completion_tokens": c_tok}
-                    if cached_tok is not None:
-                        usage_dict["cached_tokens"] = int(cached_tok)
-                    if thought_tok is not None:
-                        usage_dict["thinking_tokens"] = int(thought_tok)
+            parsed_usage = extract_chunk_usage(chunk)
+            if parsed_usage is not None:
+                usage_dict = parsed_usage
 
             if not chunk.choices:
                 continue
@@ -582,6 +564,7 @@ class AgentCore:
                             tool_choice="auto" if self.tools else "none",
                             max_tokens=self.max_output_tokens,
                             stream=True,
+                            stream_options={"include_usage": True},
                         )
                         message = await self._accumulate_stream(response_stream)
                     break

@@ -600,6 +600,7 @@ class TieredMemoryComponent(BaseComponent):
                             max_tokens=self.max_summary_tokens,
                             extra_headers={"X-Agent-ID": f"{agent_name}-{thread_id}-memory"},
                             stream=True,
+                            stream_options={"include_usage": True},
                         )
                         message = await agent._accumulate_stream(response_stream)
                     candidate_summary = (message.content or "").strip()
@@ -628,10 +629,12 @@ class TieredMemoryComponent(BaseComponent):
                 sys.exit(1)
 
             usage = getattr(agent, "last_usage", None) or {}
+            if usage.get("prompt_tokens"):
+                span.set_counter("request_tokens", int(usage["prompt_tokens"]))
             if usage.get("cached_tokens") is not None:
-                span.inc("cached_tokens", int(usage["cached_tokens"]))
+                span.set_counter("cached_tokens", int(usage["cached_tokens"]))
             if usage.get("thinking_tokens") is not None:
-                span.inc("thinking_tokens", int(usage["thinking_tokens"]))
+                span.set_counter("thinking_tokens", int(usage["thinking_tokens"]))
             span.inc("response_tokens", usage.get("completion_tokens") or count_tokens(new_summary, tokenizer=self.tokenizer))
             span.inc("response_bytes", len(new_summary.encode("utf-8")))
 

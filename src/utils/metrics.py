@@ -93,6 +93,44 @@ def infer_exec_location(api_url: Optional[str] = None, default: str = "local") -
     return default
 
 
+def extract_chunk_usage(chunk: Any) -> Optional[Dict[str, int]]:
+    """
+    Extracts token usage (prompt_tokens, completion_tokens, cached_tokens, thinking_tokens)
+    from an OpenAI/Ollama or Gemini streaming chunk if present.
+    """
+    chunk_usage = getattr(chunk, "usage", None)
+    if chunk_usage is None:
+        return None
+    p_tok = getattr(chunk_usage, "prompt_tokens", None)
+    c_tok = getattr(chunk_usage, "completion_tokens", None)
+    cached_tok = getattr(chunk_usage, "cached_tokens", None)
+    thought_tok = getattr(chunk_usage, "thinking_tokens", None)
+    if isinstance(chunk_usage, dict):
+        p_tok = chunk_usage.get("prompt_tokens")
+        c_tok = chunk_usage.get("completion_tokens")
+        cached_tok = chunk_usage.get("cached_tokens")
+        thought_tok = chunk_usage.get("thinking_tokens")
+        if cached_tok is None and isinstance(chunk_usage.get("prompt_tokens_details"), dict):
+            cached_tok = chunk_usage["prompt_tokens_details"].get("cached_tokens")
+    else:
+        details = getattr(chunk_usage, "prompt_tokens_details", None)
+        if details is not None and cached_tok is None:
+            cached_tok = getattr(details, "cached_tokens", None)
+
+    if p_tok is None and c_tok is None and cached_tok is None and thought_tok is None:
+        return None
+
+    out: Dict[str, int] = {
+        "prompt_tokens": int(p_tok or 0),
+        "completion_tokens": int(c_tok or 0),
+    }
+    if cached_tok is not None:
+        out["cached_tokens"] = int(cached_tok)
+    if thought_tok is not None:
+        out["thinking_tokens"] = int(thought_tok)
+    return out
+
+
 def format_rfc3339_ms(dt: Optional[datetime] = None) -> str:
     """Formats a UTC datetime as RFC 3339 with millisecond precision (e.g. 2026-10-26T20:24:15.123Z)."""
     now = dt.astimezone(timezone.utc) if dt is not None else datetime.now(timezone.utc)
@@ -196,6 +234,10 @@ class MetricSpan:
     def inc(self, name: str, amount: int = 1) -> None:
         """Accumulates an integer count into a named counter."""
         self.counters[name] = int(self.counters.get(name, 0) + int(amount))
+
+    def set_counter(self, name: str, value: int) -> None:
+        """Sets a named counter to an exact integer value."""
+        self.counters[name] = int(value)
 
     def set_field(self, key: str, value: Any) -> None:
         """Sets an optional field on the metric record."""

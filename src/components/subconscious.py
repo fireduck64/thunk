@@ -4,7 +4,7 @@ import httpx
 from openai import AsyncOpenAI
 from src.components.base import BaseComponent
 from src.utils.config import load_config
-from src.utils.metrics import MetricSpan, count_tokens, infer_exec_location
+from src.utils.metrics import MetricSpan, count_tokens, extract_chunk_usage, infer_exec_location
 
 class SubconsciousRecallComponent(BaseComponent):
     """
@@ -56,11 +56,16 @@ class SubconsciousRecallComponent(BaseComponent):
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
             max_tokens=self.max_output_tokens,
-            stream=True
+            stream=True,
+            stream_options={"include_usage": True},
         )
 
         content = ""
+        self.last_usage = None
         async for chunk in stream:
+            parsed_usage = extract_chunk_usage(chunk)
+            if parsed_usage is not None:
+                self.last_usage = parsed_usage
             if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
                 content += chunk.choices[0].delta.content
 
@@ -145,7 +150,17 @@ class SubconsciousRecallComponent(BaseComponent):
                     print(f"[Subconscious Warning] Synthesis failed ({e}); falling back to raw recall.")
                     subconscious_thoughts = combined_raw
 
-                span.inc("response_tokens", count_tokens(subconscious_thoughts, agent=agent_obj))
+                usage = getattr(self, "last_usage", None) or {}
+                if usage.get("prompt_tokens"):
+                    span.set_counter("request_tokens", int(usage["prompt_tokens"]))
+                if usage.get("cached_tokens") is not None:
+                    span.set_counter("cached_tokens", int(usage["cached_tokens"]))
+                if usage.get("thinking_tokens") is not None:
+                    span.set_counter("thinking_tokens", int(usage["thinking_tokens"]))
+                span.inc(
+                    "response_tokens",
+                    usage.get("completion_tokens") or count_tokens(subconscious_thoughts, agent=agent_obj),
+                )
                 span.inc("response_bytes", len((subconscious_thoughts or "").encode("utf-8")))
 
                 if subconscious_thoughts.strip():

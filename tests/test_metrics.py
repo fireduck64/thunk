@@ -393,4 +393,62 @@ def test_gemini_convert_messages_post_compaction_function_call_and_multi_tool_gr
     assert contents[2].parts[1].function_response.name == "suspend_until_next_event"
 
 
+@pytest.mark.asyncio
+async def test_openai_ollama_stream_options_and_cached_tokens_metric(tmp_path, monkeypatch):
+    """Verifies AgentCore passes stream_options={'include_usage': True} and logs prompt_tokens_details.cached_tokens."""
+    from src.core.agent import AgentCore
+    from src.utils import metrics as metrics_mod
+
+    metrics_dir = str(tmp_path / "ollama_cache_metrics")
+    monkeypatch.setattr(metrics_mod, "resolve_metrics_dir", lambda explicit=None: explicit or metrics_dir)
+
+    agent = AgentCore(thread_id="mind", provider="openai", model_name="gemma4:31b")
+    captured_kwargs = {}
+
+    class DummyDetails:
+        cached_tokens = 1213
+
+    class DummyUsage:
+        prompt_tokens = 1219
+        completion_tokens = 18
+        prompt_tokens_details = DummyDetails()
+
+    class DummyDelta:
+        content = "Cached response."
+        tool_calls = None
+
+    class DummyChoice:
+        delta = DummyDelta()
+        finish_reason = "stop"
+
+    class DummyChunk:
+        def __init__(self, choices, usage=None):
+            self.choices = choices
+            self.usage = usage
+
+    class DummyCompletions:
+        async def create(self, **kwargs):
+            captured_kwargs.update(kwargs)
+
+            async def _gen():
+                yield DummyChunk([DummyChoice()])
+                yield DummyChunk([], usage=DummyUsage())
+
+            return _gen()
+
+    monkeypatch.setattr(agent.client.chat, "completions", DummyCompletions())
+    msg = await agent._call_llm_with_retries([{"role": "user", "content": "Hello"}])
+    assert msg.content == "Cached response."
+    assert captured_kwargs.get("stream_options") == {"include_usage": True}
+
+    files = os.listdir(metrics_dir)
+    assert len(files) == 1
+    with open(os.path.join(metrics_dir, files[0]), "r", encoding="utf-8") as f:
+        rec = json.loads(f.readline())
+    assert rec["counters"]["request_tokens"] == 1219
+    assert rec["counters"]["response_tokens"] == 18
+    assert rec["counters"]["cached_tokens"] == 1213
+
+
+
 
