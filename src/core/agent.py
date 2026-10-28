@@ -1,6 +1,7 @@
 import asyncio
 import json
 import inspect
+import sys
 import time
 import httpx
 from openai import AsyncOpenAI
@@ -56,6 +57,8 @@ class AgentCore:
 
         self.max_output_tokens = int(llm_cfg.get("max_output_tokens", 16384))
         self.min_turn_interval_sec = float(llm_cfg.get("min_turn_interval_sec", 0.0))
+        self.max_retries = int(llm_cfg.get("max_retries", 5))
+        self.retry_base_delay = float(llm_cfg.get("retry_base_delay", 2.0))
         self.debug_stream = self.config.get("debug", {}).get("stream_output", False)
         self.last_finish_reason = None
         self.last_ttft_ms = None
@@ -315,6 +318,83 @@ class AgentCore:
             tool_calls=tool_calls if tool_calls else None
         )
 
+    async def _call_llm_with_retries(self, wire_messages: list[dict]) -> ChatCompletionMessage:
+        """
+        Calls the configured LLM with exponential backoff up to self.max_retries.
+        Records metrics via MetricSpan and exits the process (sys.exit(1)) if all attempts fail.
+        """
+        exec_loc = getattr(self, "exec_location", None) or infer_exec_location(
+            self.config.get("llm", {}).get("api_url")
+        )
+        with MetricSpan(
+            operation="llm_call",
+            agent=self.name,
+            thread=self.thread_id,
+            component="core",
+            type="agent_turn",
+            model=self.model,
+            exec_location=exec_loc,
+        ) as llm_span:
+            req_bytes = len(json.dumps(wire_messages, default=str).encode("utf-8"))
+            llm_span.inc("request_messages", len(wire_messages))
+            llm_span.inc("request_bytes", req_bytes)
+
+            message = None
+            for attempt in range(self.max_retries):
+                try:
+                    with llm_span.subtimer("llm_call_ms"):
+                        response_stream = await self.client.chat.completions.create(
+                            model=self.model,
+                            messages=wire_messages,
+                            tools=self.tools if self.tools else None,
+                            tool_choice="auto" if self.tools else "none",
+                            max_tokens=self.max_output_tokens,
+                            stream=True,
+                        )
+                        message = await self._accumulate_stream(response_stream)
+                    break
+                except Exception as e:
+                    print(
+                        f"[Core ERROR] LLM call attempt {attempt + 1}/{self.max_retries} failed: {e}",
+                        flush=True,
+                    )
+                    if attempt + 1 < self.max_retries:
+                        llm_span.inc("retries", 1)
+                        delay = self.retry_base_delay * (2 ** attempt)
+                        if delay > 0:
+                            await asyncio.sleep(delay)
+
+            if message is None:
+                llm_span.fail()
+                llm_span.set_field("finish_reason", "error")
+                llm_span.finish()
+                print(
+                    f"[Core FATAL] All {self.max_retries} LLM call attempts failed. Exiting process.",
+                    flush=True,
+                )
+                sys.exit(1)
+
+            if self.last_ttft_ms is not None:
+                llm_span.add_timer("ttft_ms", self.last_ttft_ms)
+
+            usage = self.last_usage or {}
+            req_tok = usage.get("prompt_tokens")
+            if req_tok is None:
+                req_tok = count_tokens(wire_messages, agent=self)
+            resp_text_for_tok = (message.content or "") + (
+                str(message.tool_calls) if message.tool_calls else ""
+            )
+            resp_tok = usage.get("completion_tokens")
+            if resp_tok is None:
+                resp_tok = count_tokens(resp_text_for_tok, agent=self)
+
+            llm_span.inc("request_tokens", req_tok)
+            llm_span.inc("response_tokens", resp_tok)
+            llm_span.inc("response_bytes", len(resp_text_for_tok.encode("utf-8")))
+            llm_span.inc("tool_calls", len(message.tool_calls or []))
+            llm_span.set_field("finish_reason", self.last_finish_reason or "stop")
+            return message
+
     async def start(self):
         """The main continuous thinking loop."""
         self._build_tools()
@@ -352,54 +432,7 @@ class AgentCore:
                 await self.event_bus.publish("before_llm_call", {"agent": self, "messages": self.messages})
                 
                 wire_messages = self._prepare_llm_messages()
-
-                # 1. Prompt the LLM using a stream to keep Nginx alive
-                exec_loc = getattr(self, "exec_location", None) or infer_exec_location(
-                    self.config.get("llm", {}).get("api_url")
-                )
-                with MetricSpan(
-                    operation="llm_call",
-                    agent=self.name,
-                    thread=self.thread_id,
-                    component="core",
-                    type="agent_turn",
-                    model=self.model,
-                    exec_location=exec_loc,
-                ) as llm_span:
-                    req_bytes = len(json.dumps(wire_messages, default=str).encode("utf-8"))
-                    llm_span.inc("request_messages", len(wire_messages))
-                    llm_span.inc("request_bytes", req_bytes)
-
-                    with llm_span.subtimer("llm_call_ms"):
-                        response_stream = await self.client.chat.completions.create(
-                            model=self.model,
-                            messages=wire_messages,
-                            tools=self.tools if self.tools else None,
-                            tool_choice="auto" if self.tools else "none",
-                            max_tokens=self.max_output_tokens,
-                            stream=True,
-                        )
-                        message = await self._accumulate_stream(response_stream)
-
-                    if self.last_ttft_ms is not None:
-                        llm_span.add_timer("ttft_ms", self.last_ttft_ms)
-
-                    usage = self.last_usage or {}
-                    req_tok = usage.get("prompt_tokens")
-                    if req_tok is None:
-                        req_tok = count_tokens(wire_messages, agent=self)
-                    resp_text_for_tok = (message.content or "") + (
-                        str(message.tool_calls) if message.tool_calls else ""
-                    )
-                    resp_tok = usage.get("completion_tokens")
-                    if resp_tok is None:
-                        resp_tok = count_tokens(resp_text_for_tok, agent=self)
-
-                    llm_span.inc("request_tokens", req_tok)
-                    llm_span.inc("response_tokens", resp_tok)
-                    llm_span.inc("response_bytes", len(resp_text_for_tok.encode("utf-8")))
-                    llm_span.inc("tool_calls", len(message.tool_calls or []))
-                    llm_span.set_field("finish_reason", self.last_finish_reason or "stop")
+                message = await self._call_llm_with_retries(wire_messages)
 
                 # Clear transient base64 images now that the LLM has seen them on this call
                 self._clear_ephemeral_images()

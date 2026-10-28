@@ -292,3 +292,45 @@ async def test_gemini_provider_adapter_streaming_and_thought_signatures():
         for p in (turn.parts or [])
     )
 
+
+@pytest.mark.asyncio
+async def test_agent_core_llm_retries_and_fail_fast_exit(tmp_path, monkeypatch):
+    """Verifies AgentCore._call_llm_with_retries retries with backoff and exits with code 1 when quota/API fails."""
+    from src.core.agent import AgentCore
+    from src.utils import metrics as metrics_mod
+
+    metrics_dir = str(tmp_path / "fail_fast_metrics")
+    monkeypatch.setattr(metrics_mod, "resolve_metrics_dir", lambda explicit=None: explicit or metrics_dir)
+
+    agent = AgentCore(thread_id="social", provider="gemini", model_name="gemini-4-argon")
+    agent.max_retries = 3
+    agent.retry_base_delay = 0.0
+
+    attempts = {"count": 0}
+
+    class FailingCompletions:
+        async def create(self, **kwargs):
+            attempts["count"] += 1
+            raise RuntimeError("429 RESOURCE_EXHAUSTED: Quota exceeded for gemini-4-argon")
+
+    monkeypatch.setattr(agent.client.chat, "completions", FailingCompletions())
+
+    with pytest.raises(SystemExit) as exc_info:
+        await agent._call_llm_with_retries([{"role": "user", "content": "Hello"}])
+
+    assert exc_info.value.code == 1
+    assert attempts["count"] == 3
+
+    files = os.listdir(metrics_dir)
+    assert len(files) == 1
+    with open(os.path.join(metrics_dir, files[0]), "r", encoding="utf-8") as f:
+        rec = json.loads(f.readline())
+
+    assert rec["operation"] == "llm_call"
+    assert rec["type"] == "agent_turn"
+    assert rec["exec_location"] == "cloud"
+    assert rec["error"] == 1
+    assert rec["finish_reason"] == "error"
+    assert rec["counters"]["retries"] == 2
+
+
