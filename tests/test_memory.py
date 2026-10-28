@@ -347,6 +347,89 @@ async def test_drain_inbox_batches_subconscious_recall():
     assert agent.messages[3]["content"] == "Msg 3 (arrived during synthesis)"
 
 
+@pytest.mark.asyncio
+async def test_archival_log_tool_call_persistence_and_wire_normalization(tmp_path):
+    """Verifies TieredMemoryComponent persists/restores tool_calls + tool_call_id and AgentCore.normalize_wire_messages enforces turn order."""
+    from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall, Function
+    from src.core.agent import AgentCore
+
+    db_path = str(tmp_path / "tool_persist.db")
+
+    class FastDummyTok:
+        def encode(self, text: str):
+            return (text or "").split()
+
+        def decode(self, tokens):
+            return " ".join(tokens)
+
+    mem = TieredMemoryComponent(db_path=db_path, thread_id="social", tokenizer=FastDummyTok())
+    try:
+        user_msg = {"role": "user", "content": "Check my notes."}
+        asst_msg = {
+            "role": "assistant",
+            "tool_calls": [
+                ChatCompletionMessageToolCall(
+                    id="tc_notes_1",
+                    type="function",
+                    function=Function(name="list_note_keys", arguments='{"path": ""}'),
+                )
+            ],
+        }
+        tool_msg = {
+            "role": "tool",
+            "tool_call_id": "tc_notes_1",
+            "name": "list_note_keys",
+            "content": "[{'type': 'note', 'name': 'sticky'}]",
+        }
+
+        await mem.on_event("message_added", {"message": user_msg})
+        await mem.on_event("message_added", {"message": asst_msg})
+        await mem.on_event("message_added", {"message": tool_msg})
+        mem._set_last_compacted_id(user_msg["_db_id"] - 1)
+
+        class DummyAgent:
+            def __init__(self):
+                self.messages = [{"role": "system", "content": "You are TestAgent."}]
+
+        restored_agent = DummyAgent()
+        mem._restore_working_memory(restored_agent)
+
+        assert len(restored_agent.messages) == 4
+        assert restored_agent.messages[1]["role"] == "user"
+        assert restored_agent.messages[2]["role"] == "assistant"
+        assert len(restored_agent.messages[2]["tool_calls"]) == 1
+        assert restored_agent.messages[2]["tool_calls"][0].id == "tc_notes_1"
+        assert restored_agent.messages[2]["tool_calls"][0].function.name == "list_note_keys"
+        assert restored_agent.messages[3]["role"] == "tool"
+        assert restored_agent.messages[3]["tool_call_id"] == "tc_notes_1"
+        assert restored_agent.messages[3]["name"] == "list_note_keys"
+
+        # Verify AgentCore.normalize_wire_messages handles orphaned legacy tool messages, leading assistant turns, and mid-stream system notices
+        raw_messy = [
+            {"role": "system", "content": "Primary system prompt"},
+            {"role": "assistant", "content": "Leading assistant monologue after compaction"},
+            {"role": "assistant", "content": "Second consecutive assistant monologue"},
+            {"role": "tool", "content": "Legacy orphaned tool output without tool_call_id"},
+            {"role": "system", "content": "[Internal Feeling]: Stay grounded."},
+            restored_agent.messages[2],
+            restored_agent.messages[3],
+        ]
+        wire = AgentCore.normalize_wire_messages(raw_messy)
+        assert wire[0] == {"role": "system", "content": "Primary system prompt"}
+        assert wire[1] == {"role": "user", "content": "[Continuing from Core Summary]"}
+        assert wire[2] == {"role": "assistant", "content": "Leading assistant monologue after compaction"}
+        assert wire[3] == {"role": "user", "content": "[Continue]"}
+        assert wire[4] == {"role": "assistant", "content": "Second consecutive assistant monologue"}
+        assert wire[5]["role"] == "user"
+        assert "[Tool Result from tool]:" in wire[5]["content"]
+        assert wire[6] == {"role": "user", "content": "[System Notice]\n[Internal Feeling]: Stay grounded."}
+        assert wire[7]["role"] == "assistant" and len(wire[7]["tool_calls"]) == 1
+        assert wire[8]["role"] == "tool" and wire[8]["tool_call_id"] == "tc_notes_1"
+    finally:
+        mem._lock_file.close()
+
+
+
 
 
 

@@ -154,38 +154,24 @@ class GeminiOpenAIClientAdapter:
         self, messages: List[Dict[str, Any]]
     ) -> Tuple[Optional[str], List[types.Content]]:
         """
-        Converts OpenAI-format messages into (system_instruction, List[types.Content]).
-        Enforces Gemini's strict turn ordering rules:
-        1. Every model turn (especially one with function_call parts) is immediately preceded
-           by a user turn or a function_response turn (never at index 0 or after another model turn).
-        2. Native function_call parts are only emitted when all tool_calls in that assistant turn
-           have cached Gemini Part objects (with thought_signature) AND have matching role='tool'
-           responses immediately following them.
-        3. Consecutive function_response parts for a multi-tool turn are grouped into a single
-           Content(role='user') turn.
+        Converts normalized wire messages into (system_instruction, List[types.Content]).
+        Turn ordering and assistant<->tool pairing are normalized once by AgentCore.normalize_wire_messages().
         """
+        from src.core.agent import AgentCore
+
+        normalized = AgentCore.normalize_wire_messages(messages)
         system_blocks: List[str] = []
         contents: List[types.Content] = []
         active_gemini_tc_ids: set[str] = set()
 
-        for idx, msg in enumerate(messages):
+        for msg in normalized:
             role = msg.get("role", "user")
             raw_content = msg.get("content")
             text_str, image_parts = self._extract_text_and_image_parts(raw_content)
 
             if role == "system":
-                if idx == 0:
-                    if text_str.strip():
-                        system_blocks.append(text_str.strip())
-                else:
-                    # Mid-conversation system notice (e.g., Critic feeling or transient presence footer)
-                    if text_str.strip():
-                        contents.append(
-                            types.Content(
-                                role="user",
-                                parts=[types.Part.from_text(text=f"[System Notice]\n{text_str}")],
-                            )
-                        )
+                if text_str.strip():
+                    system_blocks.append(text_str.strip())
                 continue
 
             if role == "user":
@@ -202,46 +188,22 @@ class GeminiOpenAIClientAdapter:
                 if text_str:
                     parts.append(types.Part.from_text(text=text_str))
                 tool_calls = msg.get("tool_calls") or []
-
-                # Verify whether all tool calls in this turn have cached Gemini parts AND matching following tool results
-                use_native_fc = False
-                if tool_calls:
-                    following_tool_ids: set[str] = set()
-                    look_idx = idx + 1
-                    while look_idx < len(messages) and messages[look_idx].get("role") == "tool":
-                        tid_val = str(messages[look_idx].get("tool_call_id") or "")
-                        if tid_val:
-                            following_tool_ids.add(tid_val)
-                        look_idx += 1
-
-                    tc_ids = [self._extract_tc_fields(tc)[0] for tc in tool_calls]
-                    if all(
-                        tid and tid in self._gemini_part_cache and tid in following_tool_ids
-                        for tid in tc_ids
-                    ):
-                        use_native_fc = True
+                tc_ids = [self._extract_tc_fields(tc)[0] for tc in tool_calls]
+                all_cached_in_gemini = bool(tc_ids) and all(tid in self._gemini_part_cache for tid in tc_ids)
 
                 for tc in tool_calls:
                     tc_id, fn_name, args_dict = self._extract_tc_fields(tc)
-                    if use_native_fc:
+                    if all_cached_in_gemini:
                         parts.append(self._gemini_part_cache[tc_id])
                         active_gemini_tc_ids.add(tc_id)
                     else:
+                        # Valid tool call from an earlier Ollama/SQLite turn (no Gemini thought_signature)
                         parts.append(
                             types.Part.from_text(
                                 text=f"[Called tool {fn_name}({json.dumps(args_dict)})]"
                             )
                         )
-
                 if parts:
-                    # Ensure a model turn (especially with function_call) always follows a user/function_response turn
-                    if not contents or contents[-1].role != "user":
-                        contents.append(
-                            types.Content(
-                                role="user",
-                                parts=[types.Part.from_text(text="[Continuing from Core Summary]")],
-                            )
-                        )
                     contents.append(types.Content(role="model", parts=parts))
                 continue
 
@@ -253,7 +215,6 @@ class GeminiOpenAIClientAdapter:
                         name=fn_name,
                         response={"result": text_str},
                     )
-                    # Group consecutive function_response parts into a single Content(role="user") turn
                     if (
                         contents
                         and contents[-1].role == "user"

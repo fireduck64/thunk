@@ -7,6 +7,7 @@ import sys
 import time
 import json
 from typing import List, Dict, Callable, Any
+from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall, Function
 from transformers import AutoTokenizer
 from src.components.base import BaseComponent
 from src.utils.config import load_config
@@ -99,10 +100,16 @@ class TieredMemoryComponent(BaseComponent):
                         role TEXT, 
                         content TEXT, 
                         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        thread_id TEXT NOT NULL DEFAULT 'main'
+                        thread_id TEXT NOT NULL DEFAULT 'main',
+                        tool_calls TEXT,
+                        tool_call_id TEXT,
+                        name TEXT
                     )
                 """)
                 self._ensure_column(conn, "archival_log", "thread_id", "TEXT NOT NULL DEFAULT 'main'")
+                self._ensure_column(conn, "archival_log", "tool_calls", "TEXT")
+                self._ensure_column(conn, "archival_log", "tool_call_id", "TEXT")
+                self._ensure_column(conn, "archival_log", "name", "TEXT")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_archival_log_thread_id ON archival_log(thread_id, id)")
 
                 conn.execute("""
@@ -267,12 +274,37 @@ class TieredMemoryComponent(BaseComponent):
         elif event_name == "message_added":
             msg = payload["message"]
             role = msg.get("role", "unknown")
-            
-            # Tools sometimes return complex objects or we want to save the raw JSON
-            content = msg.get("content", "")
-            if not content and "tool_calls" in msg:
-                # Need to handle pydantic/OpenAI objects safely for logging
-                content = f"[Tool Calls Requested]"
+            content = msg.get("content") or ""
+
+            tool_calls_json = None
+            raw_tcs = msg.get("tool_calls")
+            if raw_tcs:
+                serialized_tcs = []
+                for tc in raw_tcs:
+                    if isinstance(tc, dict):
+                        fn = tc.get("function") or {}
+                        serialized_tcs.append(
+                            {
+                                "id": str(tc.get("id") or ""),
+                                "name": str(fn.get("name") or tc.get("name") or ""),
+                                "arguments": str(fn.get("arguments") if "function" in tc else tc.get("arguments") or "{}"),
+                            }
+                        )
+                    else:
+                        fn = getattr(tc, "function", None)
+                        serialized_tcs.append(
+                            {
+                                "id": str(getattr(tc, "id", "") or ""),
+                                "name": str(getattr(fn, "name", "") if fn else ""),
+                                "arguments": str(getattr(fn, "arguments", "{}") if fn else "{}"),
+                            }
+                        )
+                tool_calls_json = json.dumps(serialized_tcs)
+                if not content:
+                    content = "[Tool Calls Requested]"
+
+            tool_call_id = str(msg.get("tool_call_id")) if msg.get("tool_call_id") else None
+            tool_name = str(msg.get("name")) if msg.get("name") else None
                 
             saved = False
             for attempt in range(self.max_retries):
@@ -281,8 +313,8 @@ class TieredMemoryComponent(BaseComponent):
                     conn = self._connect_db()
                     with conn:
                         cursor = conn.execute(
-                            "INSERT INTO archival_log (role, content, thread_id) VALUES (?, ?, ?)", 
-                            (role, str(content), self.thread_id)
+                            "INSERT INTO archival_log (role, content, thread_id, tool_calls, tool_call_id, name) VALUES (?, ?, ?, ?, ?, ?)", 
+                            (role, str(content), self.thread_id, tool_calls_json, tool_call_id, tool_name)
                         )
                         msg["_db_id"] = cursor.lastrowid
                     saved = True
@@ -325,6 +357,57 @@ class TieredMemoryComponent(BaseComponent):
             if total_tokens > self.high_watermark:
                 print(f"[Memory WARNING] Context window is {total_tokens} tokens, exceeding {self.high_watermark}, but no further messages can be compressed.")
 
+    @staticmethod
+    def _row_to_restored_message(
+        row_id: int,
+        role: str,
+        content: str,
+        tool_calls_json: Any = None,
+        tool_call_id: Any = None,
+        tool_name: Any = None,
+    ) -> Dict[str, Any]:
+        if content == "[Tool Calls Requested]" and not tool_calls_json:
+            return {}
+        if not content and not tool_calls_json:
+            return {}
+
+        msg: Dict[str, Any] = {"role": role, "_db_id": row_id}
+        if content and content != "[Tool Calls Requested]":
+            msg["content"] = content
+        elif role != "assistant":
+            msg["content"] = content or ""
+
+        if tool_calls_json and role == "assistant":
+            try:
+                parsed_tcs = json.loads(tool_calls_json)
+                reconstructed = []
+                for idx, tc in enumerate(parsed_tcs):
+                    reconstructed.append(
+                        ChatCompletionMessageToolCall(
+                            id=str(tc.get("id") or f"restored_tc_{row_id}_{idx}"),
+                            type="function",
+                            function=Function(
+                                name=str(tc.get("name") or "tool"),
+                                arguments=str(tc.get("arguments") or "{}"),
+                            ),
+                        )
+                    )
+                if reconstructed:
+                    msg["tool_calls"] = reconstructed
+            except Exception:
+                if "content" not in msg:
+                    return {}
+
+        if role == "tool":
+            if tool_call_id:
+                msg["tool_call_id"] = str(tool_call_id)
+            if tool_name:
+                msg["name"] = str(tool_name)
+
+        if "content" not in msg and "tool_calls" not in msg:
+            return {}
+        return msg
+
     def _restore_working_memory(self, agent: Any):
         """
         On startup, re-populates the agent's short-term context window (Tier 1 memory)
@@ -340,14 +423,16 @@ class TieredMemoryComponent(BaseComponent):
                 if last_compacted_id == 0:
                     # Legacy fallback: fetch a chunk of recent messages for this thread
                     cursor = conn.execute(
-                        "SELECT id, role, content FROM archival_log WHERE thread_id = ? ORDER BY id DESC LIMIT 500",
+                        "SELECT id, role, content, tool_calls, tool_call_id, name "
+                        "FROM archival_log WHERE thread_id = ? ORDER BY id DESC LIMIT 500",
                         (self.thread_id,),
                     )
                     rows = cursor.fetchall()
                 else:
                     # Modern restore: load everything for this thread since the last successful compaction
                     cursor = conn.execute(
-                        "SELECT id, role, content FROM archival_log WHERE thread_id = ? AND id > ? ORDER BY id ASC",
+                        "SELECT id, role, content, tool_calls, tool_call_id, name "
+                        "FROM archival_log WHERE thread_id = ? AND id > ? ORDER BY id ASC",
                         (self.thread_id, last_compacted_id)
                     )
                     rows = cursor.fetchall()
@@ -363,11 +448,10 @@ class TieredMemoryComponent(BaseComponent):
         
         if last_compacted_id == 0:
             # Legacy fallback: restore backwards until low_watermark
-            for row_id, role, content in rows:
-                if content == "[Tool Calls Requested]" or not content:
+            for row_id, role, content, tc_json, tc_id, t_name in rows:
+                msg = self._row_to_restored_message(row_id, role, content, tc_json, tc_id, t_name)
+                if not msg:
                     continue
-                    
-                msg = {"role": role, "content": content, "_db_id": row_id}
                 msg_tokens = self._count_tokens([msg])
                 
                 if current_tokens + msg_tokens > self.low_watermark:
@@ -383,11 +467,10 @@ class TieredMemoryComponent(BaseComponent):
                 first_restored_id = messages_to_restore[0]["_db_id"]
                 self._set_last_compacted_id(first_restored_id - 1)
         else:
-            for row_id, role, content in rows:
-                if content == "[Tool Calls Requested]" or not content:
+            for row_id, role, content, tc_json, tc_id, t_name in rows:
+                msg = self._row_to_restored_message(row_id, role, content, tc_json, tc_id, t_name)
+                if not msg:
                     continue
-                    
-                msg = {"role": role, "content": content, "_db_id": row_id}
                 messages_to_restore.append(msg)
                 current_tokens += self._count_tokens([msg])
                 

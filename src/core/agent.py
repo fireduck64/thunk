@@ -118,21 +118,132 @@ class AgentCore:
                 self.tools.append(schema)
                 self.tool_map[func.__name__] = func
 
-    def _prepare_llm_messages(self) -> list[dict]:
-        """Builds the wire-format messages list, expanding any transient `_images` into OpenAI image_url parts."""
-        wire_messages = []
-        for msg in self.messages:
+    @staticmethod
+    def _extract_tc_tuple(tc: dict | object) -> tuple[str, str, str]:
+        if isinstance(tc, dict):
+            tc_id = str(tc.get("id") or "")
+            fn = tc.get("function") or {}
+            name = str(fn.get("name") or tc.get("name") or "tool")
+            args = str(fn.get("arguments") if "function" in tc else tc.get("arguments") or "{}")
+        else:
+            tc_id = str(getattr(tc, "id", "") or "")
+            fn = getattr(tc, "function", None)
+            name = str(getattr(fn, "name", "tool") if fn else "tool")
+            args = str(getattr(fn, "arguments", "{}") if fn else "{}")
+        return tc_id, name, args
+
+    @classmethod
+    def normalize_wire_messages(cls, raw_messages: list[dict]) -> list[dict]:
+        """
+        Normalizes working memory messages into a clean, strictly ordered wire format
+        for both OpenAI/Ollama and Gemini:
+        1. Expands transient `_images` into image_url content parts and strips private `_*` keys.
+        2. Converts mid-conversation `system` notices into `user` context blocks.
+        3. Validates `assistant (tool_calls)` <-> `tool` pairing, converting any legacy
+           orphaned tool calls or tool results into clean text blocks.
+        4. Guarantees the first turn after `system` is `role='user'` and prevents
+           consecutive `assistant` turns without an intervening `user` or `tool` turn.
+        """
+        if not raw_messages:
+            return []
+
+        valid_tool_call_ids: set[str] = set()
+        valid_assistant_indices: set[int] = set()
+
+        for idx, msg in enumerate(raw_messages):
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                following_ids: set[str] = set()
+                look = idx + 1
+                while look < len(raw_messages) and raw_messages[look].get("role") == "tool":
+                    tid = str(raw_messages[look].get("tool_call_id") or "")
+                    if tid:
+                        following_ids.add(tid)
+                    look += 1
+                tc_ids = [cls._extract_tc_tuple(tc)[0] for tc in msg.get("tool_calls") or []]
+                if tc_ids and all(tid and tid in following_ids for tid in tc_ids):
+                    valid_assistant_indices.add(idx)
+                    valid_tool_call_ids.update(tc_ids)
+
+        wire_messages: list[dict] = []
+        for idx, msg in enumerate(raw_messages):
+            role = msg.get("role", "user")
+            content = msg.get("content")
             images = msg.get("_images")
+
+            # 1. Keep primary system prompt at index 0; convert mid-stream system notices to user turns
+            if role == "system":
+                if idx == 0 and not wire_messages:
+                    wire_messages.append({"role": "system", "content": content or ""})
+                elif content and str(content).strip():
+                    text_val = str(content).strip()
+                    if not text_val.startswith("[System Notice]"):
+                        text_val = f"[System Notice]\n{text_val}"
+                    wire_messages.append({"role": "user", "content": text_val})
+                continue
+
+            # 2. Assistant turn
+            if role == "assistant":
+                tcs = msg.get("tool_calls") or []
+                if tcs and idx not in valid_assistant_indices:
+                    tc_lines = [
+                        f"[Called tool {name}({args})]"
+                        for _, name, args in (cls._extract_tc_tuple(tc) for tc in tcs)
+                    ]
+                    combined_text = "\n".join(([str(content)] if content else []) + tc_lines)
+                    out_msg = {"role": "assistant", "content": combined_text}
+                else:
+                    out_msg = {k: v for k, v in msg.items() if not k.startswith("_")}
+
+                # Guarantee every assistant turn follows a user or tool turn
+                has_non_system = any(m.get("role") != "system" for m in wire_messages)
+                if not has_non_system:
+                    wire_messages.append({"role": "user", "content": "[Continuing from Core Summary]"})
+                elif wire_messages[-1].get("role") == "assistant":
+                    wire_messages.append({"role": "user", "content": "[Continue]"})
+
+                wire_messages.append(out_msg)
+                continue
+
+            # 3. Tool result turn
+            if role == "tool":
+                tc_id = str(msg.get("tool_call_id") or "")
+                fn_name = str(msg.get("name") or "tool")
+                if tc_id and tc_id in valid_tool_call_ids:
+                    out_msg = {k: v for k, v in msg.items() if not k.startswith("_")}
+                    if images:
+                        content_parts = [{"type": "text", "text": str(content or "")}]
+                        for img_url in images:
+                            content_parts.append({"type": "image_url", "image_url": {"url": img_url}})
+                        out_msg["content"] = content_parts
+                    wire_messages.append(out_msg)
+                else:
+                    # Orphaned tool result from a legacy SQLite restore without tool_call_id
+                    fallback_text = f"[Tool Result from {fn_name}]:\n{content or ''}"
+                    if images:
+                        content_parts = [{"type": "text", "text": fallback_text}]
+                        for img_url in images:
+                            content_parts.append({"type": "image_url", "image_url": {"url": img_url}})
+                        wire_messages.append({"role": "user", "content": content_parts})
+                    else:
+                        wire_messages.append({"role": "user", "content": fallback_text})
+                continue
+
+            # 4. Standard user turn
             if images:
-                content_parts = [{"type": "text", "text": msg.get("content") or ""}]
+                content_parts = [{"type": "text", "text": str(content or "")}]
                 for img_url in images:
                     content_parts.append({"type": "image_url", "image_url": {"url": img_url}})
-                wire_msg = {k: v for k, v in msg.items() if not k.startswith("_")}
-                wire_msg["content"] = content_parts
-                wire_messages.append(wire_msg)
+                out_msg = {k: v for k, v in msg.items() if not k.startswith("_")}
+                out_msg["content"] = content_parts
+                wire_messages.append(out_msg)
             else:
                 wire_messages.append({k: v for k, v in msg.items() if not k.startswith("_")})
+
         return wire_messages
+
+    def _prepare_llm_messages(self) -> list[dict]:
+        """Builds the normalized wire-format messages list for the LLM."""
+        return self.normalize_wire_messages(self.messages)
 
     def _clear_ephemeral_images(self) -> None:
         """Strips transient base64 `_images` and transient presence footers from working memory after they have been sent to the LLM once."""
