@@ -29,6 +29,8 @@ services:
       - ./data/thunk/workspace:/home/agent/workspace:rw
       - ./data/shared/workspace:/home/agent/workspace/shared:rw
       - ./data/thunk/mind_ro:/home/agent/mind:ro
+      - ./data/thunk/logs:/home/agent/logs:ro
+      - ./data/thunk/metrics:/home/agent/metrics:ro
 
   wisp-workspace:
     build:
@@ -51,6 +53,8 @@ services:
       - ./data/wisp/workspace:/home/agent/workspace:rw
       - ./data/shared/workspace:/home/agent/workspace/shared:rw
       - ./data/wisp/mind_ro:/home/agent/mind:ro
+      - ./data/wisp/logs:/home/agent/logs:ro
+      - ./data/wisp/metrics:/home/agent/metrics:ro
 
   # We can add Ollama here later if needed, though running it natively on the host 
   # is usually easier for GPU access.
