@@ -3,6 +3,7 @@ import json
 import inspect
 import sys
 import time
+import uuid
 import httpx
 from openai import AsyncOpenAI
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
@@ -139,33 +140,34 @@ class AgentCore:
         for both OpenAI/Ollama and Gemini:
         1. Expands transient `_images` into image_url content parts and strips private `_*` keys.
         2. Converts mid-conversation `system` notices into `user` context blocks.
-        3. Validates `assistant (tool_calls)` <-> `tool` pairing, converting any legacy
-           orphaned tool calls or tool results into clean text blocks.
+        3. Guarantees every `assistant (tool_calls)` turn has a complete, ordered sequence of
+           matching `role='tool'` results (synthesizing results for any tool calls interrupted
+           by shutdown/restart, such as `suspend_until_next_event`), and converts any legacy
+           orphaned `role='tool'` rows into `role='user'` blocks.
         4. Guarantees the first turn after `system` is `role='user'` and prevents
            consecutive `assistant` turns without an intervening `user` or `tool` turn.
         """
         if not raw_messages:
             return []
 
-        valid_tool_call_ids: set[str] = set()
-        valid_assistant_indices: set[int] = set()
-
-        for idx, msg in enumerate(raw_messages):
-            if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                following_ids: set[str] = set()
-                look = idx + 1
-                while look < len(raw_messages) and raw_messages[look].get("role") == "tool":
-                    tid = str(raw_messages[look].get("tool_call_id") or "")
-                    if tid:
-                        following_ids.add(tid)
-                    look += 1
-                tc_ids = [cls._extract_tc_tuple(tc)[0] for tc in msg.get("tool_calls") or []]
-                if tc_ids and all(tid and tid in following_ids for tid in tc_ids):
-                    valid_assistant_indices.add(idx)
-                    valid_tool_call_ids.update(tc_ids)
+        def _format_tool_or_user_msg(msg_dict: dict, default_role: str = "user") -> dict:
+            out = {k: v for k, v in msg_dict.items() if not k.startswith("_")}
+            out["role"] = msg_dict.get("role", default_role)
+            imgs = msg_dict.get("_images")
+            if imgs:
+                parts = [{"type": "text", "text": str(msg_dict.get("content") or "")}]
+                for img_url in imgs:
+                    parts.append({"type": "image_url", "image_url": {"url": img_url}})
+                out["content"] = parts
+            return out
 
         wire_messages: list[dict] = []
+        consumed_tool_indices: set[int] = set()
+
         for idx, msg in enumerate(raw_messages):
+            if idx in consumed_tool_indices:
+                continue
+
             role = msg.get("role", "user")
             content = msg.get("content")
             images = msg.get("_images")
@@ -183,16 +185,7 @@ class AgentCore:
 
             # 2. Assistant turn
             if role == "assistant":
-                tcs = msg.get("tool_calls") or []
-                if tcs and idx not in valid_assistant_indices:
-                    tc_lines = [
-                        f"[Called tool {name}({args})]"
-                        for _, name, args in (cls._extract_tc_tuple(tc) for tc in tcs)
-                    ]
-                    combined_text = "\n".join(([str(content)] if content else []) + tc_lines)
-                    out_msg = {"role": "assistant", "content": combined_text}
-                else:
-                    out_msg = {k: v for k, v in msg.items() if not k.startswith("_")}
+                out_msg = {k: v for k, v in msg.items() if not k.startswith("_")}
 
                 # Guarantee every assistant turn follows a user or tool turn
                 has_non_system = any(m.get("role") != "system" for m in wire_messages)
@@ -202,42 +195,55 @@ class AgentCore:
                     wire_messages.append({"role": "user", "content": "[Continue]"})
 
                 wire_messages.append(out_msg)
+
+                tcs = msg.get("tool_calls") or []
+                if tcs:
+                    # Collect contiguous role='tool' messages immediately following this assistant turn
+                    following_tools_by_id: dict[str, tuple[int, dict]] = {}
+                    look = idx + 1
+                    while look < len(raw_messages) and raw_messages[look].get("role") == "tool":
+                        tid = str(raw_messages[look].get("tool_call_id") or "")
+                        if tid and tid not in following_tools_by_id:
+                            following_tools_by_id[tid] = (look, raw_messages[look])
+                        look += 1
+
+                    for tc in tcs:
+                        tc_id, tc_name, _ = cls._extract_tc_tuple(tc)
+                        if tc_id and tc_id in following_tools_by_id:
+                            t_idx, t_msg = following_tools_by_id[tc_id]
+                            consumed_tool_indices.add(t_idx)
+                            wire_messages.append(_format_tool_or_user_msg(t_msg, default_role="tool"))
+                        else:
+                            synth_text = (
+                                "You were woken up by a new event or message."
+                                if tc_name == "suspend_until_next_event"
+                                else "[Tool execution interrupted by session restart.]"
+                            )
+                            wire_messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tc_id or f"synth_tc_{idx}",
+                                    "name": tc_name,
+                                    "content": synth_text,
+                                }
+                            )
                 continue
 
-            # 3. Tool result turn
+            # 3. Orphaned tool result turn (not paired with a preceding assistant tool_calls turn)
             if role == "tool":
-                tc_id = str(msg.get("tool_call_id") or "")
                 fn_name = str(msg.get("name") or "tool")
-                if tc_id and tc_id in valid_tool_call_ids:
-                    out_msg = {k: v for k, v in msg.items() if not k.startswith("_")}
-                    if images:
-                        content_parts = [{"type": "text", "text": str(content or "")}]
-                        for img_url in images:
-                            content_parts.append({"type": "image_url", "image_url": {"url": img_url}})
-                        out_msg["content"] = content_parts
-                    wire_messages.append(out_msg)
+                fallback_text = f"[Tool Result from {fn_name}]:\n{content or ''}"
+                if images:
+                    content_parts = [{"type": "text", "text": fallback_text}]
+                    for img_url in images:
+                        content_parts.append({"type": "image_url", "image_url": {"url": img_url}})
+                    wire_messages.append({"role": "user", "content": content_parts})
                 else:
-                    # Orphaned tool result from a legacy SQLite restore without tool_call_id
-                    fallback_text = f"[Tool Result from {fn_name}]:\n{content or ''}"
-                    if images:
-                        content_parts = [{"type": "text", "text": fallback_text}]
-                        for img_url in images:
-                            content_parts.append({"type": "image_url", "image_url": {"url": img_url}})
-                        wire_messages.append({"role": "user", "content": content_parts})
-                    else:
-                        wire_messages.append({"role": "user", "content": fallback_text})
+                    wire_messages.append({"role": "user", "content": fallback_text})
                 continue
 
             # 4. Standard user turn
-            if images:
-                content_parts = [{"type": "text", "text": str(content or "")}]
-                for img_url in images:
-                    content_parts.append({"type": "image_url", "image_url": {"url": img_url}})
-                out_msg = {k: v for k, v in msg.items() if not k.startswith("_")}
-                out_msg["content"] = content_parts
-                wire_messages.append(out_msg)
-            else:
-                wire_messages.append({k: v for k, v in msg.items() if not k.startswith("_")})
+            wire_messages.append(_format_tool_or_user_msg(msg, default_role="user"))
 
         return wire_messages
 
@@ -386,8 +392,11 @@ class AgentCore:
                         tool_calls_dict[idx] = {
                             "id": tc.id,
                             "type": "function",
-                            "function": {"name": tc.function.name, "arguments": ""}
+                            "function": {"name": tc.function.name, "arguments": ""},
+                            "thought_signature": getattr(tc, "thought_signature", None),
                         }
+                    if getattr(tc, "thought_signature", None) and not tool_calls_dict[idx].get("thought_signature"):
+                        tool_calls_dict[idx]["thought_signature"] = getattr(tc, "thought_signature", None)
                     if tc.function.arguments:
                         tool_calls_dict[idx]["function"]["arguments"] += tc.function.arguments
 
@@ -409,25 +418,125 @@ class AgentCore:
                     except Exception:
                         print(f"\n[Core Warning] Dropping truncated tool call '{tc_data['function']['name']}' due to max_output_tokens limit.")
                         continue
-                tool_calls.append(
-                    ChatCompletionMessageToolCall(
-                        id=tc_data["id"],
-                        type="function",
-                        function=Function(
-                            name=tc_data["function"]["name"], 
-                            arguments=tc_data["function"]["arguments"]
-                        )
+                tc_obj = ChatCompletionMessageToolCall(
+                    id=tc_data["id"],
+                    type="function",
+                    function=Function(
+                        name=tc_data["function"]["name"], 
+                        arguments=tc_data["function"]["arguments"]
                     )
                 )
+                if tc_data.get("thought_signature"):
+                    tc_obj._thought_signature = tc_data["thought_signature"]
+                tool_calls.append(tc_obj)
 
         if self.debug_stream and content:
             print() # Print a final newline after the stream finishes
+
+        if not tool_calls and content and "[Called tool " in content:
+            content, recovered_tcs = self._recover_text_tool_calls(content)
+            if recovered_tcs:
+                tool_calls = recovered_tcs
 
         return ChatCompletionMessage(
             role="assistant",
             content=content if content else None,
             tool_calls=tool_calls if tool_calls else None
         )
+
+    def _recover_text_tool_calls(self, content: str) -> tuple[str, list[ChatCompletionMessageToolCall]]:
+        """
+        Safety net: if a model emits literal `[Called tool <name>(<json_args>)]` in its text content
+        instead of a structured tool call, parse and promote matching tool invocations into real
+        ChatCompletionMessageToolCall objects and strip them from `content`.
+        """
+        marker = "[Called tool "
+        recovered: list[ChatCompletionMessageToolCall] = []
+        spans_to_remove: list[tuple[int, int]] = []
+        pos = 0
+        n = len(content)
+
+        while True:
+            start = content.find(marker, pos)
+            if start == -1:
+                break
+            paren_open = content.find("(", start + len(marker))
+            if paren_open == -1:
+                pos = start + len(marker)
+                continue
+            fn_name = content[start + len(marker) : paren_open].strip()
+            if not fn_name or (self.tool_map and fn_name not in self.tool_map):
+                pos = paren_open + 1
+                continue
+
+            # Scan forward for balanced JSON object inside `(...)` followed by `]`
+            depth = 0
+            in_str = False
+            escape = False
+            end_span = -1
+            args_str = None
+            for i in range(paren_open + 1, n):
+                ch = content[i]
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\":
+                    escape = True
+                    continue
+                if ch == '"':
+                    in_str = not in_str
+                    continue
+                if in_str:
+                    continue
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0 and i + 2 <= n and content[i + 1 : i + 3] == ")]":
+                        candidate = content[paren_open + 1 : i + 1].strip()
+                        try:
+                            parsed = json.loads(candidate)
+                            if isinstance(parsed, dict):
+                                args_str = candidate
+                                end_span = i + 3
+                                break
+                        except Exception:
+                            pass
+                elif depth == 0 and ch == ")" and i + 1 < n and content[i + 1] == "]":
+                    candidate = content[paren_open + 1 : i].strip() or "{}"
+                    try:
+                        parsed = json.loads(candidate)
+                        if isinstance(parsed, dict):
+                            args_str = candidate
+                            end_span = i + 2
+                            break
+                    except Exception:
+                        pass
+
+            if end_span != -1 and args_str is not None:
+                recovered.append(
+                    ChatCompletionMessageToolCall(
+                        id=f"recovered_tc_{uuid.uuid4().hex[:10]}",
+                        type="function",
+                        function=Function(name=fn_name, arguments=args_str),
+                    )
+                )
+                spans_to_remove.append((start, end_span))
+                pos = end_span
+            else:
+                pos = paren_open + 1
+
+        if not recovered:
+            return content, []
+
+        cleaned_parts: list[str] = []
+        last_idx = 0
+        for s, e in spans_to_remove:
+            cleaned_parts.append(content[last_idx:s])
+            last_idx = e
+        cleaned_parts.append(content[last_idx:])
+        cleaned_content = "".join(cleaned_parts).strip()
+        return cleaned_content, recovered
 
     async def _call_llm_with_retries(self, wire_messages: list[dict]) -> ChatCompletionMessage:
         """

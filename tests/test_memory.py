@@ -365,15 +365,15 @@ async def test_archival_log_tool_call_persistence_and_wire_normalization(tmp_pat
     mem = TieredMemoryComponent(db_path=db_path, thread_id="social", tokenizer=FastDummyTok())
     try:
         user_msg = {"role": "user", "content": "Check my notes."}
+        tc_with_sig = ChatCompletionMessageToolCall(
+            id="tc_notes_1",
+            type="function",
+            function=Function(name="list_note_keys", arguments='{"path": ""}'),
+        )
+        tc_with_sig._thought_signature = "c2lnX2J5dGVz"  # base64("sig_bytes")
         asst_msg = {
             "role": "assistant",
-            "tool_calls": [
-                ChatCompletionMessageToolCall(
-                    id="tc_notes_1",
-                    type="function",
-                    function=Function(name="list_note_keys", arguments='{"path": ""}'),
-                )
-            ],
+            "tool_calls": [tc_with_sig],
         }
         tool_msg = {
             "role": "tool",
@@ -400,11 +400,47 @@ async def test_archival_log_tool_call_persistence_and_wire_normalization(tmp_pat
         assert len(restored_agent.messages[2]["tool_calls"]) == 1
         assert restored_agent.messages[2]["tool_calls"][0].id == "tc_notes_1"
         assert restored_agent.messages[2]["tool_calls"][0].function.name == "list_note_keys"
+        assert getattr(restored_agent.messages[2]["tool_calls"][0], "_thought_signature", None) == "c2lnX2J5dGVz"
         assert restored_agent.messages[3]["role"] == "tool"
         assert restored_agent.messages[3]["tool_call_id"] == "tc_notes_1"
         assert restored_agent.messages[3]["name"] == "list_note_keys"
 
-        # Verify AgentCore.normalize_wire_messages handles orphaned legacy tool messages, leading assistant turns, and mid-stream system notices
+        # Verify GeminiOpenAIClientAdapter reconstructs native function_call + thought_signature from SQLite restore
+        from src.core.gemini_client import GeminiOpenAIClientAdapter
+        adapter = GeminiOpenAIClientAdapter(api_key="test_key")
+        _, gemini_contents = adapter._convert_messages(restored_agent.messages)
+        assert gemini_contents[1].role == "model"
+        assert gemini_contents[1].parts[0].function_call.name == "list_note_keys"
+        assert gemini_contents[1].parts[0].thought_signature == b"sig_bytes"
+        assert gemini_contents[2].role == "user"
+        assert gemini_contents[2].parts[0].function_response.name == "list_note_keys"
+
+        # Verify signature-less historical tool calls never put "[Called tool ...]" inside role="model"
+        no_sig_tc = ChatCompletionMessageToolCall(
+            id="tc_legacy_1",
+            type="function",
+            function=Function(name="read_next_chunk", arguments="{}"),
+        )
+        _, legacy_contents = adapter._convert_messages(
+            [
+                {"role": "system", "content": "Sys"},
+                {"role": "user", "content": "Read."},
+                {"role": "assistant", "tool_calls": [no_sig_tc]},
+                {"role": "tool", "tool_call_id": "tc_legacy_1", "name": "read_next_chunk", "content": "Chunk 1 text"},
+            ]
+        )
+        for c in legacy_contents:
+            if c.role == "model":
+                for p in c.parts or []:
+                    assert "[Called tool " not in (getattr(p, "text", None) or "")
+
+        # Verify AgentCore.normalize_wire_messages handles orphaned legacy tool messages, leading assistant turns,
+        # mid-stream system notices, and interrupted suspend_until_next_event tool calls
+        interrupted_suspend_tc = ChatCompletionMessageToolCall(
+            id="tc_suspend_99",
+            type="function",
+            function=Function(name="suspend_until_next_event", arguments="{}"),
+        )
         raw_messy = [
             {"role": "system", "content": "Primary system prompt"},
             {"role": "assistant", "content": "Leading assistant monologue after compaction"},
@@ -413,6 +449,7 @@ async def test_archival_log_tool_call_persistence_and_wire_normalization(tmp_pat
             {"role": "system", "content": "[Internal Feeling]: Stay grounded."},
             restored_agent.messages[2],
             restored_agent.messages[3],
+            {"role": "assistant", "tool_calls": [interrupted_suspend_tc]},
         ]
         wire = AgentCore.normalize_wire_messages(raw_messy)
         assert wire[0] == {"role": "system", "content": "Primary system prompt"}
@@ -425,6 +462,26 @@ async def test_archival_log_tool_call_persistence_and_wire_normalization(tmp_pat
         assert wire[6] == {"role": "user", "content": "[System Notice]\n[Internal Feeling]: Stay grounded."}
         assert wire[7]["role"] == "assistant" and len(wire[7]["tool_calls"]) == 1
         assert wire[8]["role"] == "tool" and wire[8]["tool_call_id"] == "tc_notes_1"
+        assert wire[9]["role"] == "assistant" and wire[9]["tool_calls"][0].id == "tc_suspend_99"
+        assert wire[10] == {
+            "role": "tool",
+            "tool_call_id": "tc_suspend_99",
+            "name": "suspend_until_next_event",
+            "content": "You were woken up by a new event or message.",
+        }
+
+        # Verify AgentCore._recover_text_tool_calls promotes literal "[Called tool ...]" text into real tool_calls
+        dummy_core = object.__new__(AgentCore)
+        dummy_core.tool_map = {"list_files": lambda **kw: None, "list_tasks": lambda **kw: None}
+        cleaned_text, recovered_tcs = dummy_core._recover_text_tool_calls(
+            'Thinking...[Called tool list_files({"library": "ebook"})][Called tool list_tasks({})]'
+        )
+        assert cleaned_text == "Thinking..."
+        assert len(recovered_tcs) == 2
+        assert recovered_tcs[0].function.name == "list_files"
+        assert recovered_tcs[0].function.arguments == '{"library": "ebook"}'
+        assert recovered_tcs[1].function.name == "list_tasks"
+        assert recovered_tcs[1].function.arguments == "{}"
     finally:
         mem._lock_file.close()
 

@@ -19,6 +19,7 @@ class _DeltaToolCall:
     index: int
     id: str
     function: _DeltaFunction
+    thought_signature: Optional[str] = None
 
 
 @dataclass
@@ -128,17 +129,19 @@ class GeminiOpenAIClientAdapter:
         return str(raw_content), []
 
     @staticmethod
-    def _extract_tc_fields(tc: Any) -> Tuple[str, str, Dict[str, Any]]:
+    def _extract_tc_fields(tc: Any) -> Tuple[str, str, Dict[str, Any], Optional[str]]:
         if isinstance(tc, dict):
             tc_id = str(tc.get("id") or "")
             fn = tc.get("function") or {}
             name = str(fn.get("name") or tc.get("name") or "")
             raw_args = fn.get("arguments") if "function" in tc else tc.get("arguments")
+            sig_b64 = tc.get("thought_signature") or tc.get("_thought_signature")
         else:
             tc_id = str(getattr(tc, "id", "") or "")
             fn = getattr(tc, "function", None)
             name = str(getattr(fn, "name", "") if fn else "")
             raw_args = getattr(fn, "arguments", "{}") if fn else "{}"
+            sig_b64 = getattr(tc, "_thought_signature", None) or getattr(tc, "thought_signature", None)
 
         if isinstance(raw_args, dict):
             args_dict = raw_args
@@ -148,7 +151,7 @@ class GeminiOpenAIClientAdapter:
                 args_dict = parsed if isinstance(parsed, dict) else {"value": parsed}
             except Exception:
                 args_dict = {"raw_arguments": str(raw_args or "")}
-        return tc_id, name, args_dict
+        return tc_id, name, args_dict, (str(sig_b64) if sig_b64 else None)
 
     def _convert_messages(
         self, messages: List[Dict[str, Any]]
@@ -163,6 +166,7 @@ class GeminiOpenAIClientAdapter:
         system_blocks: List[str] = []
         contents: List[types.Content] = []
         active_gemini_tc_ids: set[str] = set()
+        legacy_tc_args: Dict[str, str] = {}
 
         for msg in normalized:
             role = msg.get("role", "user")
@@ -188,22 +192,45 @@ class GeminiOpenAIClientAdapter:
                 if text_str:
                     parts.append(types.Part.from_text(text=text_str))
                 tool_calls = msg.get("tool_calls") or []
-                tc_ids = [self._extract_tc_fields(tc)[0] for tc in tool_calls]
-                all_cached_in_gemini = bool(tc_ids) and all(tid in self._gemini_part_cache for tid in tc_ids)
+                extracted_tcs = [self._extract_tc_fields(tc) for tc in tool_calls]
+                has_gemini_turn = bool(extracted_tcs) and any(
+                    (tid in self._gemini_part_cache) or bool(sig_b64)
+                    for tid, _, _, sig_b64 in extracted_tcs
+                )
 
-                for tc in tool_calls:
-                    tc_id, fn_name, args_dict = self._extract_tc_fields(tc)
-                    if all_cached_in_gemini:
-                        parts.append(self._gemini_part_cache[tc_id])
+                if has_gemini_turn:
+                    for tc_id, fn_name, args_dict, sig_b64 in extracted_tcs:
+                        if tc_id in self._gemini_part_cache:
+                            parts.append(self._gemini_part_cache[tc_id])
+                        else:
+                            sig_bytes = None
+                            if sig_b64:
+                                try:
+                                    sig_bytes = base64.b64decode(sig_b64)
+                                except Exception:
+                                    sig_bytes = None
+                            part_kwargs: Dict[str, Any] = {
+                                "function_call": types.FunctionCall(name=fn_name, args=args_dict)
+                            }
+                            if sig_bytes is not None:
+                                part_kwargs["thought_signature"] = sig_bytes
+                            reconstructed_part = types.Part(**part_kwargs)
+                            self._gemini_part_cache[tc_id] = reconstructed_part
+                            parts.append(reconstructed_part)
                         active_gemini_tc_ids.add(tc_id)
-                    else:
-                        # Valid tool call from an earlier Ollama/SQLite turn (no Gemini thought_signature)
-                        parts.append(
-                            types.Part.from_text(
-                                text=f"[Called tool {fn_name}({json.dumps(args_dict)})]"
-                            )
-                        )
+                else:
+                    for tc_id, fn_name, args_dict, _ in extracted_tcs:
+                        if tc_id:
+                            legacy_tc_args[tc_id] = json.dumps(args_dict)
+
+                # IMPORTANT: Never emit "[Called tool ...]" inside role="model" when thought_signature
+                # is absent (e.g., pre-signature SQLite rows or Ollama tool calls), as that teaches
+                # the model via few-shot imitation to output literal "[Called tool ...]" text.
                 if parts:
+                    if not contents or contents[-1].role == "model":
+                        contents.append(
+                            types.Content(role="user", parts=[types.Part.from_text(text="[Continue]")])
+                        )
                     contents.append(types.Content(role="model", parts=parts))
                 continue
 
@@ -226,9 +253,15 @@ class GeminiOpenAIClientAdapter:
                     else:
                         contents.append(types.Content(role="user", parts=[fr_part, *image_parts]))
                 else:
+                    args_str = legacy_tc_args.get(tc_id)
+                    header = (
+                        f"[Tool Result from {fn_name}({args_str})]"
+                        if args_str is not None
+                        else f"[Tool Result from {fn_name}]"
+                    )
                     parts = [
                         types.Part.from_text(
-                            text=f"[Tool Result from {fn_name}]:\n{text_str}"
+                            text=f"{header}:\n{text_str}"
                         ),
                         *image_parts,
                     ]
@@ -345,6 +378,13 @@ class GeminiOpenAIClientAdapter:
                     saw_tool_call = True
                     tc_id = f"gemini_tc_{uuid.uuid4().hex[:12]}"
                     self._gemini_part_cache[tc_id] = part
+                    raw_sig = getattr(part, "thought_signature", None)
+                    if isinstance(raw_sig, (bytes, bytearray)):
+                        sig_b64 = base64.b64encode(raw_sig).decode("ascii")
+                    elif isinstance(raw_sig, str) and raw_sig:
+                        sig_b64 = raw_sig
+                    else:
+                        sig_b64 = None
                     args_dict = dict(getattr(fn_call, "args", None) or {})
                     delta = _StreamDelta(
                         content=None,
@@ -356,6 +396,7 @@ class GeminiOpenAIClientAdapter:
                                     name=fn_call.name,
                                     arguments=json.dumps(args_dict),
                                 ),
+                                thought_signature=sig_b64,
                             )
                         ],
                     )

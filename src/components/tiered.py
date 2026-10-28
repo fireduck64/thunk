@@ -283,22 +283,26 @@ class TieredMemoryComponent(BaseComponent):
                 for tc in raw_tcs:
                     if isinstance(tc, dict):
                         fn = tc.get("function") or {}
-                        serialized_tcs.append(
-                            {
-                                "id": str(tc.get("id") or ""),
-                                "name": str(fn.get("name") or tc.get("name") or ""),
-                                "arguments": str(fn.get("arguments") if "function" in tc else tc.get("arguments") or "{}"),
-                            }
-                        )
+                        tc_entry = {
+                            "id": str(tc.get("id") or ""),
+                            "name": str(fn.get("name") or tc.get("name") or ""),
+                            "arguments": str(fn.get("arguments") if "function" in tc else tc.get("arguments") or "{}"),
+                        }
+                        sig = tc.get("thought_signature") or tc.get("_thought_signature")
+                        if sig:
+                            tc_entry["thought_signature"] = str(sig)
+                        serialized_tcs.append(tc_entry)
                     else:
                         fn = getattr(tc, "function", None)
-                        serialized_tcs.append(
-                            {
-                                "id": str(getattr(tc, "id", "") or ""),
-                                "name": str(getattr(fn, "name", "") if fn else ""),
-                                "arguments": str(getattr(fn, "arguments", "{}") if fn else "{}"),
-                            }
-                        )
+                        tc_entry = {
+                            "id": str(getattr(tc, "id", "") or ""),
+                            "name": str(getattr(fn, "name", "") if fn else ""),
+                            "arguments": str(getattr(fn, "arguments", "{}") if fn else "{}"),
+                        }
+                        sig = getattr(tc, "_thought_signature", None) or getattr(tc, "thought_signature", None)
+                        if sig:
+                            tc_entry["thought_signature"] = str(sig)
+                        serialized_tcs.append(tc_entry)
                 tool_calls_json = json.dumps(serialized_tcs)
                 if not content:
                     content = "[Tool Calls Requested]"
@@ -382,16 +386,17 @@ class TieredMemoryComponent(BaseComponent):
                 parsed_tcs = json.loads(tool_calls_json)
                 reconstructed = []
                 for idx, tc in enumerate(parsed_tcs):
-                    reconstructed.append(
-                        ChatCompletionMessageToolCall(
-                            id=str(tc.get("id") or f"restored_tc_{row_id}_{idx}"),
-                            type="function",
-                            function=Function(
-                                name=str(tc.get("name") or "tool"),
-                                arguments=str(tc.get("arguments") or "{}"),
-                            ),
-                        )
+                    tc_obj = ChatCompletionMessageToolCall(
+                        id=str(tc.get("id") or f"restored_tc_{row_id}_{idx}"),
+                        type="function",
+                        function=Function(
+                            name=str(tc.get("name") or "tool"),
+                            arguments=str(tc.get("arguments") or "{}"),
+                        ),
                     )
+                    if tc.get("thought_signature"):
+                        tc_obj._thought_signature = str(tc["thought_signature"])
+                    reconstructed.append(tc_obj)
                 if reconstructed:
                     msg["tool_calls"] = reconstructed
             except Exception:
