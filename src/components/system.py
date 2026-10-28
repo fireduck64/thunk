@@ -105,7 +105,8 @@ class SystemComponent(BaseComponent):
         if not self.agent.inbox.empty():
             return "A new external message arrived in your inbox; skipping suspension."
 
-        print("[System] Agent requested explicit suspension. Waiting for next event...")
+        thread_id = getattr(self.agent, "thread_id", "main")
+        print(f"[System:{thread_id}] Agent requested explicit suspension. Waiting for next event...")
         self.agent.suspended.clear()
         await self.agent.event_bus.publish("agent_suspended", {"agent": self.agent})
         await self.agent.suspended.wait()

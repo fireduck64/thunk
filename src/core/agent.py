@@ -517,18 +517,18 @@ class AgentCore:
             
         # Tell components the agent is starting (e.g. to load their own state)
         await self.event_bus.publish("agent_started", {"agent": self})
-        print(f"[Core] Agent loop started. (Model: {self.model})")
+        print(f"[Core:{self.thread_id}] Agent loop started. (Model: {self.model})")
 
         # Automatically wake the agent up on boot so it can process background tasks
         self.suspended.set()
 
         while True:
-            print("  Agent loop top")
+            print(f"  [Core:{self.thread_id}] Agent loop top")
             # Wait until there's an explicit reason to run (like a user message or un-suspended state)
             await self.suspended.wait()
             # self.suspended.clear() # Clear the flag so it suspends again after processing
 
-            print("  Doing things")
+            print(f"  [Core:{self.thread_id}] Doing things")
                 
             try:
                 # 0. Drain any external messages that arrived while we were mid-turn
@@ -570,14 +570,14 @@ class AgentCore:
                 # 2. Check for Tool Calls
                 if message.tool_calls:
                     for tool_call in message.tool_calls:
-                        print(f"\n[Tool Execution] -> {tool_call.function.name}({tool_call.function.arguments})")
+                        print(f"\n[Tool Execution:{self.thread_id}] -> {tool_call.function.name}({tool_call.function.arguments})")
                         
                         result = await self.execute_tool(
                             name=tool_call.function.name, 
                             args_str=tool_call.function.arguments
                         )
                         
-                        print(f"[Tool Result] -> {result}\n")
+                        print(f"[Tool Result:{self.thread_id}] -> {result}\n")
                         
                         # Add tool result back to the context
                         tool_msg = {
@@ -598,10 +598,10 @@ class AgentCore:
 
                 # 3. Check for standard text output
                 if message.content:
-                    print(f"[Agent Monologue]: {message.content}")
+                    print(f"[Agent Monologue:{self.thread_id}]: {message.content}")
 
                 if self.last_finish_reason == "length":
-                    print(f"[Core Warning] Generation hit max_output_tokens ({self.max_output_tokens}) and was truncated.")
+                    print(f"[Core Warning:{self.thread_id}] Generation hit max_output_tokens ({self.max_output_tokens}) and was truncated.")
                     await self.add_message(
                         "system",
                         f"[System Notice: Your previous generation hit the {self.max_output_tokens}-token output limit and was cut off. "
