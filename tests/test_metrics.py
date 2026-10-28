@@ -187,3 +187,108 @@ async def test_component_llm_call_and_tool_call_metrics_emission(tmp_path, monke
     assert tool_rec["error"] == 0
     assert tool_rec["counters"]["request_bytes"] > 0
     assert tool_rec["counters"]["response_bytes"] > 0
+
+
+@pytest.mark.asyncio
+async def test_gemini_provider_adapter_streaming_and_thought_signatures():
+    """Verifies GeminiOpenAIClientAdapter translates messages/tools/images, streams chunks, and preserves thought_signature."""
+    from google.genai import types
+    from src.core.agent import AgentCore
+    from src.core.gemini_client import GeminiOpenAIClientAdapter
+
+    agent = AgentCore(thread_id="mind", provider="gemini", model_name="gemini-4-argon")
+    assert agent.exec_location == "cloud"
+    assert isinstance(agent.client, GeminiOpenAIClientAdapter)
+
+    captured_calls = []
+
+    class DummyUsageMeta:
+        prompt_token_count = 321
+        candidates_token_count = 45
+
+    sig_part = types.Part(
+        function_call=types.FunctionCall(name="read_file", args={"library": "ebook", "filepath": "MrDarcy.epub"}),
+        thought_signature=b"secret_thought_sig_bytes",
+    )
+    text_part = types.Part.from_text(text="Let me open Pride and Prejudice.")
+
+    class DummyGemChunk:
+        def __init__(self, parts):
+            self.candidates = [
+                types.Candidate(
+                    content=types.Content(role="model", parts=parts),
+                    finish_reason=types.FinishReason.STOP,
+                )
+            ]
+            self.usage_metadata = DummyUsageMeta()
+
+    class DummyAioModels:
+        async def generate_content_stream(self, model, contents, config):
+            captured_calls.append((model, contents, config))
+
+            async def _gen():
+                yield DummyGemChunk([text_part, sig_part])
+
+            return _gen()
+
+    class DummyGenaiClient:
+        class aio:
+            models = DummyAioModels()
+
+    agent.client._genai_client = DummyGenaiClient()
+
+    # Include a legacy non-Gemini tool call in history to verify safe plain-text fallback
+    messages = [
+        {"role": "system", "content": "You are TestAgent."},
+        {"role": "user", "content": "Check the library."},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "legacy_ollama_tc_1",
+                    "function": {"name": "list_libraries", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "legacy_ollama_tc_1", "name": "list_libraries", "content": "- ebook"},
+    ]
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Reads a file",
+                "parameters": {"type": "object", "properties": {"library": {"type": "string"}}},
+            },
+        }
+    ]
+
+    stream = await agent.client.chat.completions.create(
+        model="gemini-4-argon",
+        messages=messages,
+        tools=tools,
+        max_tokens=4096,
+        stream=True,
+    )
+    msg = await agent._accumulate_stream(stream)
+
+    assert msg.content == "Let me open Pride and Prejudice."
+    assert len(msg.tool_calls) == 1
+    tc = msg.tool_calls[0]
+    assert tc.function.name == "read_file"
+    assert json.loads(tc.function.arguments) == {"library": "ebook", "filepath": "MrDarcy.epub"}
+    assert agent.last_finish_reason == "tool_calls"
+    assert agent.last_usage == {"prompt_tokens": 321, "completion_tokens": 45}
+
+    # Verify next turn preserves the exact Gemini Part with thought_signature
+    messages.append({"role": "assistant", "content": msg.content, "tool_calls": msg.tool_calls})
+    messages.append({"role": "tool", "tool_call_id": tc.id, "name": "read_file", "content": "Chapter 1 text"})
+
+    _, converted_contents = agent.client._convert_messages(messages)
+    model_turns = [c for c in converted_contents if c.role == "model"]
+    assert any(
+        p.thought_signature == b"secret_thought_sig_bytes"
+        for turn in model_turns
+        for p in (turn.parts or [])
+    )
+

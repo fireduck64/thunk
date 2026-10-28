@@ -80,7 +80,11 @@ class CriticComponent(BaseComponent):
 
         agent_name = getattr(self.agent, "name", None) or self.config.get("agent", {}).get("name", "Thunk")
         thread_id = getattr(self.agent, "thread_id", None) or "main"
-        exec_loc = infer_exec_location(self.config.get("llm", {}).get("api_url"))
+        exec_loc = getattr(self.agent, "exec_location", None) or (
+            "cloud"
+            if self.config.get("llm", {}).get("provider", "").strip().lower() == "gemini"
+            else infer_exec_location(self.config.get("llm", {}).get("api_url"))
+        )
 
         with MetricSpan(
             operation="llm_call",

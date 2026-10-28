@@ -8,13 +8,14 @@ from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall, Function
 
 from src.core.events import EventBus
+from src.core.gemini_client import GeminiOpenAIClientAdapter
 from src.utils.config import load_config
 from src.utils.metrics import MetricSpan, count_tokens, infer_exec_location
 from src.components.base import BaseComponent
 from src.utils.schema import function_to_schema
 
 class AgentCore:
-    def __init__(self, thread_id: str = "main"):
+    def __init__(self, thread_id: str = "main", provider: str = None, model_name: str = None):
         self.config = load_config()
         self.thread_id = (thread_id or "main").strip() or "main"
         agent_cfg = self.config.get("agent", {})
@@ -24,18 +25,37 @@ class AgentCore:
 
         self.event_bus = EventBus()
         self.components: list[BaseComponent] = []
-        
-        # Initialize OpenAI Client (Compatible with standard endpoints and Ollama)
-        # We disable the local client timeout entirely (timeout=None) 
-        # and rely on the streaming keep-alive to bypass Nginx timeouts.
-        self.client = AsyncOpenAI(
-            base_url=self.config["llm"]["api_url"],
-            api_key=self.config["llm"]["api_key"],
-            default_headers={"X-Agent-ID": f"{self.name}-{self.thread_id}-core"},
-            timeout=httpx.Timeout(None)
-        )
-        self.model = self.config["llm"]["model_name"]
-        self.max_output_tokens = int(self.config.get("llm", {}).get("max_output_tokens", 16384))
+
+        llm_cfg = self.config.get("llm", {})
+        self.provider = (provider or llm_cfg.get("provider", "openai")).strip().lower()
+        self.model = (model_name or llm_cfg.get("model_name", "gemma4:31b")).strip()
+        default_headers = {"X-Agent-ID": f"{self.name}-{self.thread_id}-core"}
+
+        if self.provider == "gemini":
+            gemini_key = (
+                llm_cfg.get("gemini_api_key")
+                or self.config.get("oracle", {}).get("gemini_api_key")
+                or llm_cfg.get("api_key")
+            )
+            self.client = GeminiOpenAIClientAdapter(
+                api_key=gemini_key,
+                default_headers=default_headers,
+            )
+            self.exec_location = "cloud"
+        else:
+            # Initialize OpenAI Client (Compatible with standard endpoints and Ollama)
+            # We disable the local client timeout entirely (timeout=None)
+            # and rely on the streaming keep-alive to bypass Nginx timeouts.
+            self.client = AsyncOpenAI(
+                base_url=llm_cfg["api_url"],
+                api_key=llm_cfg["api_key"],
+                default_headers=default_headers,
+                timeout=httpx.Timeout(None),
+            )
+            self.exec_location = infer_exec_location(llm_cfg.get("api_url"))
+
+        self.max_output_tokens = int(llm_cfg.get("max_output_tokens", 16384))
+        self.min_turn_interval_sec = float(llm_cfg.get("min_turn_interval_sec", 0.0))
         self.debug_stream = self.config.get("debug", {}).get("stream_output", False)
         self.last_finish_reason = None
         self.last_ttft_ms = None
@@ -334,7 +354,9 @@ class AgentCore:
                 wire_messages = self._prepare_llm_messages()
 
                 # 1. Prompt the LLM using a stream to keep Nginx alive
-                exec_loc = infer_exec_location(self.config.get("llm", {}).get("api_url"))
+                exec_loc = getattr(self, "exec_location", None) or infer_exec_location(
+                    self.config.get("llm", {}).get("api_url")
+                )
                 with MetricSpan(
                     operation="llm_call",
                     agent=self.name,

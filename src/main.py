@@ -175,7 +175,11 @@ async def main():
         enabled_components = t_cfg.get("components", None)
         adapters = [str(a).strip().lower() for a in t_cfg.get("adapters", [])]
 
-        agent = AgentCore(thread_id=thread_id)
+        agent = AgentCore(
+            thread_id=thread_id,
+            provider=t_cfg.get("provider"),
+            model_name=t_cfg.get("model_name"),
+        )
         registry.register_thread(thread_id, role, core=agent)
         _register_thread_components(
             agent,

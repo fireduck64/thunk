@@ -5,10 +5,13 @@ name = "Thunk"                        # Agent identity injected into the system 
 file_path = "data/thunk/directives.md"# Path to markdown/text file containing core directives & personality (REQUIRED)
 
 [llm]
-# The main agent inference model endpoint (OpenAI-compatible, e.g. Ollama, vLLM, or OpenAI)
+# The main agent inference model endpoint
+# Set provider = "openai" (default) for local Ollama/vLLM/llama.cpp, or provider = "gemini" for Google Gemini Cloud (uses google-genai)
+provider = "openai"
 api_url = "https://ollama-api.example.com/v1"
 api_key = "YOUR_API_KEY_HERE"
-model_name = "llama3"
+model_name = "llama3"                 # When provider = "gemini", set e.g. model_name = "gemini-4-argon"
+# gemini_api_key = ""                 # Optional override; defaults to [oracle].gemini_api_key when provider = "gemini"
 max_output_tokens = 16384             # Hard token ceiling per LLM completion to prevent runaway loops
 
 [subconscious]

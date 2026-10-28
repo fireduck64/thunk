@@ -465,7 +465,11 @@ class TieredMemoryComponent(BaseComponent):
         new_summary = None
         agent_name = getattr(agent, "name", None) or self.config.get("agent", {}).get("name", "Thunk")
         thread_id = getattr(agent, "thread_id", None) or self.thread_id or "main"
-        exec_loc = infer_exec_location(self.config.get("llm", {}).get("api_url"))
+        exec_loc = getattr(agent, "exec_location", None) or (
+            "cloud"
+            if self.config.get("llm", {}).get("provider", "").strip().lower() == "gemini"
+            else infer_exec_location(self.config.get("llm", {}).get("api_url"))
+        )
 
         with MetricSpan(
             operation="llm_call",
