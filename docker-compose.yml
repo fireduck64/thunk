@@ -27,6 +27,7 @@ services:
       - "no-new-privileges:true"
     volumes:
       - ./data/thunk/workspace:/home/agent/workspace:rw
+      - ./data/shared/workspace:/home/agent/workspace/shared:rw
       - ./data/thunk/mind_ro:/home/agent/mind:ro
 
   wisp-workspace:
@@ -48,6 +49,7 @@ services:
       - "no-new-privileges:true"
     volumes:
       - ./data/wisp/workspace:/home/agent/workspace:rw
+      - ./data/shared/workspace:/home/agent/workspace/shared:rw
       - ./data/wisp/mind_ro:/home/agent/mind:ro
 
   # We can add Ollama here later if needed, though running it natively on the host 
@@ -55,5 +57,6 @@ services:
 
 volumes:
   qdrant_data:
-    # This creates a named docker volume, keeping data out of your project directory
+    name: thunk_qdrant_data
+    external: true
 
