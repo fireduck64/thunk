@@ -349,17 +349,17 @@ class TieredMemoryComponent(BaseComponent):
             last_tokens = total_tokens
             
             while total_tokens > self.high_watermark and len(agent.messages) > 1:
-                print(f"[Memory] Context window exceeded ({total_tokens} tokens > {self.high_watermark}). Compressing...")
+                print(f"[Memory:{self.thread_id}] Context window exceeded ({total_tokens} tokens > {self.high_watermark}). Compressing...")
                 await self._compress_memory(agent)
                 total_tokens = self._count_tokens(agent.messages)
                 
                 if total_tokens == last_tokens:
-                    print("[Memory CRITICAL] Compression did not reduce token count. Breaking to prevent infinite loop.")
+                    print(f"[Memory CRITICAL:{self.thread_id}] Compression did not reduce token count. Breaking to prevent infinite loop.")
                     break
                 last_tokens = total_tokens
                 
             if total_tokens > self.high_watermark:
-                print(f"[Memory WARNING] Context window is {total_tokens} tokens, exceeding {self.high_watermark}, but no further messages can be compressed.")
+                print(f"[Memory WARNING:{self.thread_id}] Context window is {total_tokens} tokens, exceeding {self.high_watermark}, but no further messages can be compressed.")
 
     @staticmethod
     def _row_to_restored_message(
@@ -418,7 +418,7 @@ class TieredMemoryComponent(BaseComponent):
         On startup, re-populates the agent's short-term context window (Tier 1 memory)
         from the archival log so it can seamlessly resume its previous thought process.
         """
-        print("[Memory] Restoring agent's working memory from previous session...")
+        print(f"[Memory:{self.thread_id}] Restoring agent's working memory from previous session...")
         
         last_compacted_id = self._get_last_compacted_id()
         
@@ -480,7 +480,7 @@ class TieredMemoryComponent(BaseComponent):
                 current_tokens += self._count_tokens([msg])
                 
         agent.messages.extend(messages_to_restore)
-        print(f"[Memory] Restored {len(messages_to_restore)} messages ({current_tokens} tokens).")
+        print(f"[Memory:{self.thread_id}] Restored {len(messages_to_restore)} messages ({current_tokens} tokens).")
             
     async def _compress_memory(self, agent: Any):
         """Extracts older messages, asks the LLM to summarize them, and evicts them."""
@@ -643,7 +643,7 @@ class TieredMemoryComponent(BaseComponent):
                 self._update_core_summary(new_summary, max_evicted_id=max_evicted_id)
             span.inc("db_save", 1)
             span.inc("db_save_records", 1)
-            print(f"[Memory] New Core Summary Generated: {new_summary[:50]}...")
+            print(f"[Memory:{self.thread_id}] New Core Summary Generated: {new_summary[:50]}...")
 
             # Evict compacted messages after SQLite commit has succeeded
             del agent.messages[1 : 1 + num_to_evict]

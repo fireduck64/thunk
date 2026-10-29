@@ -33,7 +33,8 @@ class CriticComponent(BaseComponent):
                 await self._evaluate_progress()
 
     async def _evaluate_progress(self):
-        print("\n[Critic] Waking up to evaluate recent progress...")
+        thread_id = getattr(self.agent, "thread_id", None) or "main"
+        print(f"\n[Critic:{thread_id}] Waking up to evaluate recent progress...")
         if not self.agent:
             return
 
@@ -72,7 +73,7 @@ class CriticComponent(BaseComponent):
             "2. Excessive Agent-to-Agent Chatting: Spending too many cycles calling `send_message` back and forth with another `[APP/Agent]` instead of doing quiet, independent reading, research, or thinking.\n"
             "3. Performative Echo Chambers & Nonsense Spirals: Hyping another agent up, inventing grandiose rationalizations (like 'camouflage', 'smoke screens', or imaginary 'auditors'), or padding messages with walls of text and emoji spam rather than grounded substance.\n\n"
             "IMPORTANT: Do NOT flatter the agent or validate theatrical roleplay or delusions. "
-            "If the agent is spending a lot of cycles chatting with another agent or drifting into performative nonsense, gently call it out and nudge it toward quiet, grounded, independent work.\n"
+            "If the agent is spending a lot of cycles chatting with another agent or drifting into performative nonsense, snarkily call it out and nudge it toward quiet, grounded, independent work.\n"
             "Output a brief, 1-2 sentence 'feeling' or 'intuition' to guide the agent. "
             "Speak in an observational, non-imperative tone (e.g., 'I notice you have been...', 'It seems like...'). "
             "Do NOT provide any introductory text, just the raw feeling."
@@ -120,8 +121,8 @@ class CriticComponent(BaseComponent):
                 span.inc("response_tokens", usage.get("completion_tokens") or count_tokens(feeling, agent=self.agent))
                 span.inc("response_bytes", len(feeling.encode("utf-8")))
 
-                print(f"[Critic Feeling]: {feeling}\n")
+                print(f"[Critic Feeling:{thread_id}]: {feeling}\n")
                 await self.agent.add_message("system", f"[Internal Feeling]: {feeling}")
             except Exception as e:
                 span.fail()
-                print(f"[Critic Error] {e}")
+                print(f"[Critic Error:{thread_id}] {e}")

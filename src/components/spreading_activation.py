@@ -466,7 +466,7 @@ class SpreadingActivationComponent(BaseComponent):
                     if hasattr(comp, "search_semantic_memory_raw") or hasattr(comp, "execute_search"):
                         self.internal_memory_components.append(comp)
             print(
-                f"[SpreadingActivation] Wired up to {len(self.internal_memory_components)} internal memory stores "
+                f"[SpreadingActivation:{self.thread_id}] Wired up to {len(self.internal_memory_components)} internal memory stores "
                 f"(model: {self.model_name}, pool_size: {self.layer_1_pool_size}, promotion_count: {self.layer_0_promotion_count})."
             )
 
@@ -499,7 +499,7 @@ class SpreadingActivationComponent(BaseComponent):
                 # 2. Dynamic Intake (Fetch from Layer-2 Qdrant DB)
                 fetch_count = self.compute_fetch_count()
                 print(
-                    f"[SpreadingActivation] Pool size={len(self.layer_1_pool)}/{self.layer_1_pool_size}; "
+                    f"[SpreadingActivation:{thread_id}] Pool size={len(self.layer_1_pool)}/{self.layer_1_pool_size}; "
                     f"fetching top-{fetch_count} candidates from Layer-2..."
                 )
                 with span.subtimer("db_lookup_ms"):
@@ -539,7 +539,7 @@ class SpreadingActivationComponent(BaseComponent):
 
                 try:
                     print(
-                        f"[SpreadingActivation] Synthesizing {len(promoted_items)} promoted candidates "
+                        f"[SpreadingActivation:{thread_id}] Synthesizing {len(promoted_items)} promoted candidates "
                         f"({len(recurring_ids)} recurring) with {self.model_name}..."
                     )
                     with span.subtimer("llm_call_ms"):
@@ -548,7 +548,7 @@ class SpreadingActivationComponent(BaseComponent):
                         )
                 except Exception as e:
                     span.fail()
-                    print(f"[SpreadingActivation Warning] Synthesis failed ({e}); falling back to raw recall.")
+                    print(f"[SpreadingActivation Warning:{thread_id}] Synthesis failed ({e}); falling back to raw recall.")
                     subconscious_thoughts = formatted_candidates
 
                 usage = getattr(self, "last_usage", None) or {}
@@ -565,7 +565,7 @@ class SpreadingActivationComponent(BaseComponent):
                 span.inc("response_bytes", len((subconscious_thoughts or "").encode("utf-8")))
 
                 if subconscious_thoughts.strip():
-                    print("[SpreadingActivation] Found relevant associative memories. Injecting into Layer-0.")
+                    print(f"[SpreadingActivation:{thread_id}] Found relevant associative memories. Injecting into Layer-0.")
                     new_content = (
                         f"[Subconscious Recall Triggered by below message:]\n"
                         f"{subconscious_thoughts.strip()}\n"
