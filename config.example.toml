@@ -27,7 +27,7 @@ layer_1_pool_size = 32                # Maximum number of memories held in the s
 layer_0_promotion_count = 8           # Number of candidates promoted from Layer-1 to synthesis on each turn
 
 [critic]
-frequency = 8
+frequency = 16
 max_output_tokens = 1024
 
 [tokenizer]

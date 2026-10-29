@@ -94,11 +94,11 @@ def _register_thread_components(
             return True
         return any(a.lower() in requested for a in aliases)
 
-    critic_enabled_cfg = config.get("critic", {}).get("enabled", False)
+    critic_enabled_cfg = config.get("critic", {}).get("enabled", True)
     if (requested is not None and _wants("critic", "criticcomponent")) or (
         requested is None and critic_enabled_cfg
     ):
-        agent.register_component(CriticComponent(frequency=8))
+        agent.register_component(CriticComponent())
 
     if _wants("memory_gardener", "memorygardenercomponent") and (
         sub_mode == "spreading_activation" or sa_enabled

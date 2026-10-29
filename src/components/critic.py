@@ -16,7 +16,7 @@ class CriticComponent(BaseComponent):
         if frequency is not None:
             self.frequency = int(frequency)
         else:
-            self.frequency = int(critic_cfg.get("frequency", 8))
+            self.frequency = int(critic_cfg.get("frequency", 16))
         self.max_output_tokens = int(critic_cfg.get("max_output_tokens", 1024))
         self.action_count = 0
         self.needs_evaluation = False
