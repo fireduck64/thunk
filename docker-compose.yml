@@ -67,6 +67,7 @@ services:
       - ./data/thunk/mind_ro:/home/agent/mind:ro
       - ./data/thunk/logs:/home/agent/logs:ro
       - ./data/thunk/metrics:/home/agent/metrics:ro
+      - ./data/thunk/ssh:/home/agent/.ssh:rw
 
   wisp-workspace:
     build:
@@ -103,6 +104,7 @@ services:
       - ./data/wisp/mind_ro:/home/agent/mind:ro
       - ./data/wisp/logs:/home/agent/logs:ro
       - ./data/wisp/metrics:/home/agent/metrics:ro
+      - ./data/wisp/ssh:/home/agent/.ssh:rw
 
   # We can add Ollama here later if needed, though running it natively on the host 
   # is usually easier for GPU access.
