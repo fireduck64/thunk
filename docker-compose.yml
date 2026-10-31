@@ -12,7 +12,7 @@ services:
     restart: unless-stopped
     command: >
       sh -c "apk add --no-cache tinyproxy socat &&
-             socat TCP-LISTEN:22,fork,reuseaddr TCP4:spark.1209k.com:22 &
+             (socat TCP-LISTEN:22,fork,reuseaddr TCP4:spark.1209k.com:22 &) &&
              exec tinyproxy -d -c /etc/tinyproxy/tinyproxy.conf"
     volumes:
       - ./proxy/tinyproxy.conf:/etc/tinyproxy/tinyproxy.conf:ro
