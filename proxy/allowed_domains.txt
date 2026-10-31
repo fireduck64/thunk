@@ -1,0 +1,22 @@
+# --- Python (pip) ---
+(^|\.)pypi\.org$
+(^|\.)pythonhosted\.org$
+
+# --- Go Modules (optional, if you want live go get) ---
+(^|\.)golang\.org$
+(^|\.)googleapis\.com$
+
+# --- Space Science Papers & Preprints ---
+(^|\.)arxiv\.org$
+(^|\.)inspirehep\.net$
+(^|\.)adsabs\.harvard\.edu$
+
+# --- Observational Data & Astronomy Archives ---
+(^|\.)gwosc\.org$
+(^|\.)stsci\.edu$
+(^|\.)esa\.int$
+(^|\.)unistra\.fr$
+(^|\.)caltech\.edu$
+(^|\.)nasa\.gov$
+(^|\.)noirlab\.edu$
+(^|\.)sdss\.org$

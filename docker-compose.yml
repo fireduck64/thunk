@@ -1,4 +1,28 @@
+networks:
+  default:
+    driver: bridge
+  jail_net:
+    driver: bridge
+    internal: true   # No gateway to host LAN or internet; can ONLY talk to workspace-proxy
+
 services:
+  workspace-proxy:
+    image: alpine:3.20
+    container_name: workspace-proxy
+    restart: unless-stopped
+    command: >
+      sh -c "apk add --no-cache tinyproxy socat &&
+             socat TCP-LISTEN:22,fork,reuseaddr TCP4:spark.1209k.com:22 &
+             exec tinyproxy -d -c /etc/tinyproxy/tinyproxy.conf"
+    volumes:
+      - ./proxy/tinyproxy.conf:/etc/tinyproxy/tinyproxy.conf:ro
+      - ./proxy/allowed_domains.txt:/etc/tinyproxy/allowed_domains.txt:ro
+    networks:
+      default:
+      jail_net:
+        aliases:
+          - spark-git
+
   vectordb:
     image: qdrant/qdrant:latest
     ports:
@@ -15,12 +39,24 @@ services:
     container_name: thunk-workspace
     command: ["sleep", "infinity"]
     restart: unless-stopped
-    network_mode: "none"
     tmpfs:
       - "/tmp:size=512m"
     mem_limit: 4g
     cpus: 2.0
     pids_limit: 128
+    networks: 
+      - jail_net
+    environment:
+      # Standard proxy env vars respected by curl, wget, pip, requests, urllib, astropy
+      - HTTP_PROXY=http://workspace-proxy:8888
+      - HTTPS_PROXY=http://workspace-proxy:8888
+      - http_proxy=http://workspace-proxy:8888
+      - https_proxy=http://workspace-proxy:8888
+      # Persist any runtime `pip install` packages inside the mounted workspace!
+      - PYTHONUSERBASE=/home/agent/workspace/.local
+      - PIP_USER=1
+      - PIP_BREAK_SYSTEM_PACKAGES=1
+      - PATH=/home/agent/workspace/.local/bin:/home/agent/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     cap_drop:
       - ALL
     security_opt:
@@ -39,12 +75,24 @@ services:
     container_name: wisp-workspace
     command: ["sleep", "infinity"]
     restart: unless-stopped
-    network_mode: "none"
     tmpfs:
       - "/tmp:size=512m"
     mem_limit: 4g
     cpus: 2.0
     pids_limit: 128
+    networks: 
+      - jail_net
+    environment:
+      # Standard proxy env vars respected by curl, wget, pip, requests, urllib, astropy
+      - HTTP_PROXY=http://workspace-proxy:8888
+      - HTTPS_PROXY=http://workspace-proxy:8888
+      - http_proxy=http://workspace-proxy:8888
+      - https_proxy=http://workspace-proxy:8888
+      # Persist any runtime `pip install` packages inside the mounted workspace!
+      - PYTHONUSERBASE=/home/agent/workspace/.local
+      - PIP_USER=1
+      - PIP_BREAK_SYSTEM_PACKAGES=1
+      - PATH=/home/agent/workspace/.local/bin:/home/agent/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     cap_drop:
       - ALL
     security_opt:
