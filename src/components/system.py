@@ -14,7 +14,7 @@ class SystemComponent(BaseComponent):
             "To communicate externally (with the human operator or with peer agents), you MUST use the `send_message` or `react_to_message` tools.\n"
             "If replying to a specific message, set `medium` to match the medium the message arrived on (e.g., 'discord' or 'mqtt'). "
             "On Discord, you can optionally pass `reply_to_message_id` to `send_message` to create a threaded Discord reply to a specific message, "
-            "and you can attach an image or file from any configured library (e.g., `attachment_library='workspace'`, `attachment_path='plot.png'`) to post it to the channel.\n"
+            "and on both Discord and MQTT you can attach an image or file from any configured library (e.g., `attachment_library='workspace'`, `attachment_path='plot.png'`).\n"
             "On MQTT, you can send direct messages to another agent by setting `medium='mqtt'` and `recipient='<agent_name>'` (e.g., `recipient='wisp'` or `recipient='thunk'`). "
             "Use `list_mqtt_agents` to discover available MQTT agents and their status. Incoming `[Via MQTT | System]` messages are unformatted system broadcasts (clock, daily news); incoming `[Via MQTT | DM from <sender>]` messages are direct messages from another agent.\n"
             "You can also use `react_to_message(message_id, emoji)` with a standard Unicode emoji (e.g., '👍', '🔥', '🤔', '⚡') to react to any Discord message.\n"
@@ -61,7 +61,8 @@ class SystemComponent(BaseComponent):
             att_info = f", attached='{payload['attached_file']}'" if payload.get("attached_file") else ""
             return f"Message sent successfully via {medium} (Discord message_id={payload['sent_message_id']}{att_info})."
         if "mqtt_recipient" in payload:
-            return f"Direct message sent successfully via mqtt to '{payload['mqtt_recipient']}' ({payload.get('mqtt_topic')})."
+            att_info = f", attached='{payload['attached_file']}'" if payload.get("attached_file") else ""
+            return f"Direct message sent successfully via mqtt to '{payload['mqtt_recipient']}' ({payload.get('mqtt_topic')}{att_info})."
         return f"Message sent successfully via {medium}."
 
     def list_mqtt_agents(self) -> str:

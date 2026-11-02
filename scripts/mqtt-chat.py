@@ -1,8 +1,11 @@
 #!./venv/bin/python3
 import argparse
 import asyncio
+import base64
 import json
+import mimetypes
 import os
+import shlex
 import sys
 import aiomqtt
 
@@ -21,13 +24,25 @@ def build_presence_payload(user_display: str, status: str, dm_topic: str) -> byt
     ).encode("utf-8")
 
 
-def build_dm_payload(sender_display: str, text: str) -> bytes:
-    return json.dumps(
-        {
-            "sender": sender_display,
-            "text": text,
-        }
-    ).encode("utf-8")
+def build_dm_payload(
+    sender_display: str,
+    text: str,
+    file_path: str = None,
+    file_mime_type: str = None,
+) -> bytes:
+    payload = {
+        "sender": sender_display,
+        "text": text or "",
+    }
+    if file_path:
+        abs_path = os.path.abspath(os.path.expanduser(file_path))
+        with open(abs_path, "rb") as f:
+            raw_bytes = f.read()
+        guessed_mime, _ = mimetypes.guess_type(abs_path)
+        payload["filename"] = os.path.basename(abs_path)
+        payload["file_mime_type"] = file_mime_type or guessed_mime or "application/octet-stream"
+        payload["file_bytes"] = base64.b64encode(raw_bytes).decode("ascii")
+    return json.dumps(payload).encode("utf-8")
 
 
 def resolve_recipient_dm_topic(recipient: str, known_agents: dict, dm_template: str = "{recipient}/agent/dm") -> str:
@@ -83,7 +98,10 @@ async def chat_loop(username: str, initial_recipient: str = None):
 
     print(f"Connecting to MQTT broker at {host}:{port} as agent '{user_display}' (client_id='{client_id}')...")
     print(f"Listening for DMs on '{dm_topic}' and announcing presence on '{presence_topic}'.")
-    print("Commands: '/agents' to list peers, '/to <agent>' to switch recipient, '@<agent> <msg>' for one-off DM, '/quit' to exit.\n")
+    print(
+        "Commands: '/agents' to list peers, '/to <agent>' to switch recipient, "
+        "'/attach <filepath> [caption]' to send a file/image, '@<agent> <msg>' for one-off DM, '/quit' to exit.\n"
+    )
 
     will = aiomqtt.Will(
         topic=presence_topic,
@@ -151,7 +169,13 @@ async def chat_loop(username: str, initial_recipient: str = None):
                             data = json.loads(payload_raw)
                             if isinstance(data, dict):
                                 sender = data.get("sender") or "Unknown"
-                                text = data.get("text") if "text" in data else payload_raw
+                                text = data.get("text", "") if ("text" in data or "file_bytes" in data) else payload_raw
+                                if data.get("file_bytes"):
+                                    fname = data.get("filename") or "attachment"
+                                    fmime = data.get("file_mime_type") or "application/octet-stream"
+                                    b64_len = len(str(data["file_bytes"]))
+                                    att_str = f"[Attached: '{fname}' ({fmime}, ~{b64_len * 3 // 4} bytes)]"
+                                    text = f"{text} {att_str}".strip() if text else att_str
                             else:
                                 sender = "Unknown"
                                 text = payload_raw
@@ -199,6 +223,28 @@ async def chat_loop(username: str, initial_recipient: str = None):
                         print(prompt_str(), end="", flush=True)
                         continue
 
+                    if msg.startswith("/attach "):
+                        rest = msg[len("/attach ") :].strip()
+                        try:
+                            parts = shlex.split(rest)
+                        except ValueError:
+                            parts = rest.split(" ", 1)
+                        if not parts:
+                            print("Usage: /attach <filepath> [caption]")
+                            print(prompt_str(), end="", flush=True)
+                            continue
+                        fpath = parts[0]
+                        caption = " ".join(parts[1:]) if len(parts) > 1 else ""
+                        try:
+                            target_topic = resolve_recipient_dm_topic(state["recipient"], known_agents, dm_template)
+                            payload_bytes = build_dm_payload(user_display, caption, file_path=fpath)
+                            await client.publish(target_topic, payload_bytes, qos=1, retain=False)
+                            print(f"Sent attachment '{os.path.basename(fpath)}' to '{state['recipient']}'.")
+                        except Exception as e:
+                            print(f"Failed to send attachment '{fpath}': {e}")
+                        print(prompt_str(), end="", flush=True)
+                        continue
+
                     target = state["recipient"]
                     body = msg
                     if msg.startswith("@") and " " in msg:
@@ -238,6 +284,26 @@ async def chat_loop(username: str, initial_recipient: str = None):
         sys.exit(0)
 
 
+async def send_one_shot(
+    username: str,
+    recipient: str = None,
+    message: str = "",
+    file_path: str = None,
+    file_mime_type: str = None,
+):
+    config = load_config()
+    mqtt_cfg = config.get("mqtt", {})
+    host = mqtt_cfg.get("host", "localhost")
+    port = int(mqtt_cfg.get("port", 1883))
+    dm_template = mqtt_cfg.get("dm_topic_template", "{recipient}/agent/dm")
+    target = (recipient or config.get("agent", {}).get("name", "thunk")).strip().lstrip("@").lower()
+    target_topic = dm_template.format(recipient=target)
+    payload_bytes = build_dm_payload(username.strip(), message or "", file_path=file_path, file_mime_type=file_mime_type)
+    async with aiomqtt.Client(host, port=port) as client:
+        await client.publish(target_topic, payload_bytes, qos=1, retain=False)
+    print(f"Sent DM to '{target}' on topic '{target_topic}'.")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Interactive peer-agent MQTT chat client following mqtt-standards.md")
     parser.add_argument(
@@ -256,13 +322,44 @@ if __name__ == "__main__":
         default=None,
         help="Initial recipient agent name (defaults to [agent].name from config.toml)",
     )
+    parser.add_argument(
+        "-f",
+        "--file",
+        type=str,
+        default=None,
+        help="Send a one-shot file/image attachment (base64) and exit",
+    )
+    parser.add_argument(
+        "--mime-type",
+        type=str,
+        default=None,
+        help="Explicit MIME type for --file (auto-detected from filename if omitted)",
+    )
+    parser.add_argument(
+        "-m",
+        "--message",
+        type=str,
+        default=None,
+        help="Send a one-shot text message (or caption with --file) and exit",
+    )
     parser.add_argument("-c", "--config", type=str, help="Path to the TOML configuration file")
     args = parser.parse_args()
     if args.config:
         set_config_path(args.config)
 
     try:
-        asyncio.run(chat_loop(username=args.username, initial_recipient=args.recipient))
+        if args.file or args.message is not None:
+            asyncio.run(
+                send_one_shot(
+                    username=args.username,
+                    recipient=args.recipient,
+                    message=args.message or "",
+                    file_path=args.file,
+                    file_mime_type=args.mime_type,
+                )
+            )
+        else:
+            asyncio.run(chat_loop(username=args.username, initial_recipient=args.recipient))
     except KeyboardInterrupt:
         sys.exit(0)
 

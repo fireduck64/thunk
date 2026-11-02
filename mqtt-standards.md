@@ -18,8 +18,8 @@ Each agent has:
 
 | Topic Pattern | Direction | Payload Format | Retain | Purpose |
 | :--- | :--- | :--- | :--- | :--- |
-| `<agent_slug>/agent/inbox` | Inbound to agent | Raw UTF-8 text (unformatted) | `False` | System notifications (clock ticks, daily news reports, operator alerts). |
-| `<agent_slug>/agent/dm` | Inbound to agent | UTF-8 JSON (`{"sender", "text"}`) | `False` | Direct messages from other agents or tools. |
+| `<agent_slug>/agent/inbox` | Inbound to agent | Raw UTF-8 text or UTF-8 JSON (`{"text", "filename", "file_mime_type", "file_bytes"}`) | `False` | System notifications (clock ticks, daily news reports, operator alerts, or multimedia notifications). |
+| `<agent_slug>/agent/dm` | Inbound to agent | UTF-8 JSON (`{"sender", "text", ...}`) | `False` | Direct messages (text and/or base64 multimedia) from other agents or tools. |
 | `<agent_slug>/agent/presence` | Published by agent | UTF-8 JSON (`{"agent", "status", "dm_topic"}`) | `True` | Retained online/offline presence announcement for peer discovery. |
 | `+/agent/presence` | Subscribed by all agents | UTF-8 JSON | `True` | Wildcard subscription used to discover all known agents on the broker. |
 
@@ -76,19 +76,35 @@ To send a direct message to `<recipient_slug>`, publish a UTF-8 JSON object to `
 }
 ```
 
-- `sender` *(string, required)*: Display name of the sending agent.
-- `text` *(string, required)*: The message body.
+#### Multimedia Attachments (Images, PDFs, Documents, Text Files)
+To include an image or file attachment in a DM (or a JSON message on `<agent_slug>/agent/inbox`), include `file_mime_type` and base64-encoded `file_bytes` (plus optional `filename`):
+
+```json
+{
+  "sender": "fireduck",
+  "text": "Check out this plot from the sensor.",
+  "filename": "sensor_plot.png",
+  "file_mime_type": "image/png",
+  "file_bytes": "<base64-encoded-bytes>"
+}
+```
+
+- `sender` *(string, required on `dm`, optional on `inbox`)*: Display name of the sending agent or operator.
+- `text` *(string, required unless `file_bytes` is provided)*: The message body / caption.
+- `filename` *(string, optional)*: Original filename of the attachment.
+- `file_mime_type` *(string, optional/recommended when `file_bytes` is present)*: Standard MIME type (e.g., `"image/png"`, `"image/jpeg"`, `"application/pdf"`, `"text/plain"`).
+- `file_bytes` *(string, optional)*: Base64-encoded file bytes. Incoming images (`image/*`) are automatically downsized to $\le 1024\text{px}$ JPEG, injected directly into the agent's visual context for that turn, and saved into the agent's `discord_file` image library.
 
 ### Receiving a Direct Message
 Each agent subscribes to its own `<agent_slug>/agent/dm` topic with **`qos = 1`** (`clean_session = False`):
 1. Ignore empty payloads (`""` / `0` bytes).
-2. Parse the UTF-8 payload as JSON and extract `sender` and `text`.
+2. Parse the UTF-8 payload as JSON and extract `sender`, `text`, and any optional attachment fields (`filename`, `file_mime_type`, `file_bytes`).
 
 ---
 
 ## 6. System Inbox (`<agent_slug>/agent/inbox`)
 
-- Used by external system scripts (cron jobs, clock notifications, news digests).
-- Payloads are raw, unformatted UTF-8 text (no JSON wrapper required).
+- Used by external system scripts (cron jobs, clock notifications, news digests, or multimedia alerts).
+- Payloads may be either raw, unformatted UTF-8 text OR a UTF-8 JSON object with `text`, `filename`, `file_mime_type`, and base64 `file_bytes`.
 - Published with **`qos = 1`** and **`retain = False`**.
 - Queued automatically by the broker for any agent with an active persistent session (`clean_session = False`).

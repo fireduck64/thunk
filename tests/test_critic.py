@@ -285,6 +285,107 @@ def test_mqtt_chat_script_helpers_and_cli():
     help_out = subprocess.check_output([sys.executable, script_path, "--help"], text=True)
     assert "--user" in help_out
     assert "--recipient" in help_out
+    assert "--file" in help_out
+
+
+@pytest.mark.asyncio
+async def test_mqtt_multimedia_inbound_and_outbound(tmp_path):
+    """Verifies inbound and outbound base64 multimedia MQTT messages (file_mime_type, file_bytes, filename)."""
+    import base64
+    import io
+    import json
+    from PIL import Image
+    from src.core.agent import AgentCore
+    from src.components.system import SystemComponent
+    from src.adapters.mqtt import MQTTAdapter
+
+    agent = AgentCore()
+    sys_comp = SystemComponent()
+    agent.register_component(sys_comp)
+    mqtt_adapter = MQTTAdapter(agent)
+    mqtt_adapter.images_dir = str(tmp_path / "mqtt_images")
+    agent.event_bus.subscribe("send_to_operator", mqtt_adapter._on_send_to_operator)
+
+    published = []
+
+    class DummyMqttClient:
+        async def publish(self, topic, payload, qos=0, retain=False):
+            published.append((topic, payload, qos, retain))
+
+    mqtt_adapter.client = DummyMqttClient()
+
+    # 1. Inbound DM with PNG image attachment (file_mime_type='image/png', file_bytes=base64)
+    buf = io.BytesIO()
+    Image.new("RGB", (600, 400), (180, 60, 90)).save(buf, format="PNG")
+    png_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
+    await mqtt_adapter._handle_message(
+        mqtt_adapter.dm_topic,
+        json.dumps(
+            {
+                "sender": "fireduck",
+                "text": "Look at this sensor plot.",
+                "filename": "sensor_plot.png",
+                "file_mime_type": "image/png",
+                "file_bytes": png_b64,
+            }
+        ),
+        retain=False,
+    )
+
+    queued_item = await agent.inbox.get()
+    assert isinstance(queued_item, dict)
+    assert "[Via MQTT | DM from fireduck] Look at this sensor plot." in queued_item["content"]
+    assert "[Attached Image: 'sensor_plot.png' (600x400px, type: image/png" in queued_item["content"]
+    assert len(queued_item["images"]) == 1
+    assert queued_item["images"][0].startswith("data:image/jpeg;base64,")
+
+    # 2. Inbound system inbox JSON with text attachment
+    txt_b64 = base64.b64encode(b"Telemetry line 1\nTelemetry line 2\n").decode("ascii")
+    await mqtt_adapter._handle_message(
+        mqtt_adapter.inbox_topic,
+        json.dumps(
+            {
+                "text": "Daily telemetry report attached.",
+                "filename": "telemetry.txt",
+                "file_mime_type": "text/plain",
+                "file_bytes": txt_b64,
+            }
+        ),
+        retain=False,
+    )
+    sys_item = await agent.inbox.get()
+    assert "[Via MQTT | System] Daily telemetry report attached." in sys_item
+    assert "[Attached File: 'telemetry.txt' (type: text/plain" in sys_item
+
+    # 3. Outbound send_message via mqtt with attachment_library and attachment_path
+    ws_dir = mqtt_adapter.config["file_reader"]["libraries"]["workspace"]
+    os.makedirs(ws_dir, exist_ok=True)
+    out_img_path = os.path.join(ws_dir, "mqtt_out_chart.png")
+    with open(out_img_path, "wb") as f:
+        f.write(buf.getvalue())
+
+    try:
+        send_res = await sys_comp.send_message(
+            "Sharing chart with Wisp",
+            medium="mqtt",
+            recipient="wisp",
+            attachment_library="workspace",
+            attachment_path="mqtt_out_chart.png",
+        )
+        assert "Direct message sent successfully via mqtt to 'wisp' (wisp/agent/dm, attached='mqtt_out_chart.png')" in send_res
+        assert len(published) == 1
+        topic, payload_bytes, qos, retain = published[0]
+        assert topic == "wisp/agent/dm"
+        sent_obj = json.loads(payload_bytes.decode("utf-8"))
+        assert sent_obj["sender"] == agent.name
+        assert sent_obj["text"] == "Sharing chart with Wisp"
+        assert sent_obj["filename"] == "mqtt_out_chart.png"
+        assert sent_obj["file_mime_type"] == "image/png"
+        assert sent_obj["file_bytes"] == png_b64
+    finally:
+        if os.path.exists(out_img_path):
+            os.remove(out_img_path)
 
 
 @pytest.mark.asyncio
