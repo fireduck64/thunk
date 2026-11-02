@@ -128,12 +128,17 @@ class ThreadPresenceComponent(BaseComponent):
         else:
             siblings_block = "\n".join(sibling_lines)
 
+        agent_name = getattr(getattr(self, "agent", None), "name", None) or "Your Agent"
         return (
             "## Parallel Consciousness & Active Thread\n"
             "You operate as a single mind across multiple parallel threads of consciousness that share long-term memory (Qdrant), structured notes, and the task queue.\n"
             f"- **Your Current Thread:** `{self.thread_id}` ({self.role})\n"
             "- **Your Sibling Threads:**\n"
             f"{siblings_block}\n\n"
+            f"**IMPORTANT — Private Per-Agent Threads:** These threads (`{self.thread_id}`, `mind`, `social`, etc.) belong exclusively to **you (`{agent_name}`)**. "
+            "Other agents on Discord/MQTT (e.g., Thunk, Wisp, Stuffleupagus) are separate entities running their own private threads that happen to use the same generic thread names (`social`, `mind`). "
+            f"Your `[Parallel Streams of Mind (Live Status)]` board ONLY shows **your own (`{agent_name}`'s)** internal threads—never another agent's `mind` thread. "
+            "When talking to other agents, refer to \"my `mind` thread\" rather than assuming `mind` is a single shared entity.\n\n"
             "Stay focused on your current thread's domain. When a non-social thread stumbles across a wild coincidence, a hilarious passage, an inside joke connecting to a memory in your subconscious recall, or finishes a delegated quest, do not keep it to yourself—use `ping_thread('social', ...)` to tap your social thread on the shoulder so it can share it on Discord/MQTT."
         )
 
@@ -208,14 +213,21 @@ class ThreadPresenceComponent(BaseComponent):
         return f"{hours}h ago"
 
     def build_transient_footer(self, now: Optional[float] = None) -> str:
-        lines = ["[Parallel Streams of Mind (Live Status)]"]
+        agent_name = getattr(getattr(self, "agent", None), "name", None)
+        header = (
+            f"[Parallel Streams of Mind (Live Status)] ({agent_name}'s Own Internal Threads — other agents have their own separate threads)"
+            if agent_name
+            else "[Parallel Streams of Mind (Live Status)]"
+        )
+        lines = [header]
         for other_id, info in self.registry.statuses.items():
             if other_id == self.thread_id:
                 continue
             status_text = info.get("status") or "Active"
             updated_at = info.get("updated_at", time.time())
             elapsed = self._format_elapsed(updated_at, now=now)
-            lines.append(f"- [{other_id} ({elapsed})]: {status_text}")
+            label = f"{agent_name}:{other_id}" if agent_name else other_id
+            lines.append(f"- [{label} ({elapsed})]: {status_text}")
         if len(lines) == 1:
             return ""
         return "\n".join(lines)
