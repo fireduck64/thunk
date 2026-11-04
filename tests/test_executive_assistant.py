@@ -326,3 +326,42 @@ async def test_compaction_eviction_filing_clerk(tmp_path):
         assert "Astrophysicist" in all_notes_map["assistant/people/clara"]["summary"]
     finally:
         mem._lock_file.close()
+
+
+def test_dump_notes_script_and_prefix_filtering(tmp_path):
+    """
+    5. Verifies scripts/dump-notes.py dumps notes as JSON/JSONL and filters by prefix ('assistant', 'prompt', etc.).
+    """
+    import os
+    import subprocess
+    import sys
+
+    notes_db = str(tmp_path / "notes.db")
+    notes = StructuredNotesComponent(db_path=notes_db)
+    notes.ensure_seed_prompts()
+    notes.put_note("general/todo", "Buy more tea")
+    notes.assistant_put_note("people/sombus", "Sombus: Operator", "Operator and system architect.")
+
+    script_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scripts", "dump-notes.py"))
+
+    # 1. Full dump
+    full_out = subprocess.check_output([sys.executable, script_path, "-d", notes_db], text=True)
+    full_data = json.loads(full_out)
+    keys = {item["key"] for item in full_data}
+    assert "general/todo" in keys
+    assert "assistant/people/sombus" in keys
+    assert "prompts/assistant_briefing" in keys
+
+    # 2. Filter by 'assistant' (and typo alias 'assistent')
+    for pref in ("assistant", "assistent"):
+        asst_out = subprocess.check_output([sys.executable, script_path, "-d", notes_db, pref], text=True)
+        asst_data = json.loads(asst_out)
+        assert len(asst_data) == 1
+        assert asst_data[0]["key"] == "assistant/people/sombus"
+        assert asst_data[0]["summary"] == "Sombus: Operator"
+
+    # 3. Filter by 'prompt' (matches 'prompts/*')
+    prompt_out = subprocess.check_output([sys.executable, script_path, "-d", notes_db, "prompt"], text=True)
+    prompt_data = json.loads(prompt_out)
+    assert {item["key"] for item in prompt_data} == {"prompts/assistant_briefing", "prompts/assistant_filing"}
+
