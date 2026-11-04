@@ -2,6 +2,9 @@
 (^|\.)pypi\.org$
 (^|\.)pythonhosted\.org$
 
+# --- Git ---
+(^|\.)github\.com$
+
 # --- Go Modules (optional, if you want live go get) ---
 (^|\.)golang\.org$
 (^|\.)googleapis\.com$

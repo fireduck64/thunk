@@ -47,7 +47,7 @@ This directory contains an automatically updated, read-only snapshot of your own
 
 class WorkspaceComponent(BaseComponent):
     """
-    Provides the agent with an isolated, air-gapped Linux container workspace
+    Provides the agent with an isolated, limited network Linux container workspace
     (/home/agent/workspace RW) and a read-only replica of its own SQLite databases
     and skills (/home/agent/mind RO).
     """
@@ -140,7 +140,7 @@ class WorkspaceComponent(BaseComponent):
     def get_system_prompt_addition(self) -> str:
         return (
             "--- LINUX WORKSPACE & MIND MIRROR ---\n"
-            f"You have a persistent, air-gapped Linux workspace at `{self.container_workdir}` (read-write), "
+            f"You have a persistent, limited network Linux workspace at `{self.container_workdir}` (read-write), "
             f"including a cross-agent shared directory at `{self.container_workdir}/shared` (`shared/`), "
             "equipped with Python 3 (numpy, pandas, networkx, sympy, matplotlib), Go, Java, Bazel, C/C++, sqlite3, ripgrep, jq, and standard CLI tools.\n"
             f"You also have a read-only mirror of your own internal SQLite databases (`memory.db`, `notes.db`, `tasks.db`, `reader_state.db`) "

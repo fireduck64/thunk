@@ -62,12 +62,12 @@ services:
     security_opt:
       - "no-new-privileges:true"
     volumes:
+      - thunk_home:/home/agent
       - ./data/thunk/workspace:/home/agent/workspace:rw
       - ./data/shared/workspace:/home/agent/workspace/shared:rw
       - ./data/thunk/mind_ro:/home/agent/mind:ro
       - ./data/thunk/logs:/home/agent/logs:ro
       - ./data/thunk/metrics:/home/agent/metrics:ro
-      - ./data/thunk/ssh:/home/agent/.ssh:rw
 
   wisp-workspace:
     build:
@@ -99,12 +99,12 @@ services:
     security_opt:
       - "no-new-privileges:true"
     volumes:
+      - wisp_home:/home/agent
       - ./data/wisp/workspace:/home/agent/workspace:rw
       - ./data/shared/workspace:/home/agent/workspace/shared:rw
       - ./data/wisp/mind_ro:/home/agent/mind:ro
       - ./data/wisp/logs:/home/agent/logs:ro
       - ./data/wisp/metrics:/home/agent/metrics:ro
-      - ./data/wisp/ssh:/home/agent/.ssh:rw
 
   # We can add Ollama here later if needed, though running it natively on the host 
   # is usually easier for GPU access.
@@ -113,4 +113,7 @@ volumes:
   qdrant_data:
     name: thunk_qdrant_data
     external: true
+  wisp_home:
+  thunk_home:
+
 
