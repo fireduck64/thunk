@@ -302,13 +302,31 @@ async def test_transient_presence_footer_and_cross_thread_pings(tmp_path):
         assert social_core.inbox.empty()
         assert "[Note for social]: Thanks for posting it!" in registry.statuses["reader"]["status"]
 
-        # External user message arrives on social -> clears ping rate limit
+        #External user message arrives on social -> clears ping rate limit
         await social_core.event_bus.publish(
             "before_user_message_added",
             {"content": "[Via Discord | Channel: #general | Author: Sombus [Operator]] Ask reader what page that was on"},
         )
         res4 = await social_presence.ping_thread("reader", "Sombus wants to know what page that was on.")
         assert "Internal ping delivered to thread 'reader'" in res4
+
+        # Verify tool-only turns never set a sticky 'Executing ...' status and refresh updated_at
+        reader_presence.set_thread_status("Analyzing lensing sub-halo residuals")
+        registry.statuses["reader"]["updated_at"] -= 300.0
+        for _ in range(3):
+            await reader_core.event_bus.publish(
+                "after_llm_call",
+                {
+                    "agent": reader_core,
+                    "response": {
+                        "content": None,
+                        "tool_calls": [{"function": {"name": "run_workspace_command"}}],
+                    },
+                },
+            )
+        assert registry.statuses["reader"]["status"] == "Analyzing lensing sub-halo residuals"
+        assert "Executing" not in registry.statuses["reader"]["status"]
+        assert "0s ago" in social_presence.build_transient_footer() or "1s ago" in social_presence.build_transient_footer()
     finally:
         social_mem._lock_file.close()
 

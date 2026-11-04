@@ -67,6 +67,16 @@ class ThreadRegistry:
         entry["status"] = f"Idle / suspended (sleeping — last: {last_active})"
         entry["updated_at"] = time.time()
 
+    def touch_activity(self, thread_id: str) -> None:
+        tid = (thread_id or "main").strip() or "main"
+        entry = self.statuses.get(tid)
+        if not entry:
+            return
+        cur_status = str(entry.get("status") or "")
+        if cur_status.startswith("Idle / suspended (sleeping"):
+            entry["status"] = entry.get("last_active_status") or "Active"
+        entry["updated_at"] = time.time()
+
     def clear_ping_history_for_thread(self, thread_id: str) -> None:
         tid = (thread_id or "main").strip() or "main"
         for pair in list(self.ping_tracker.keys()):
@@ -244,6 +254,7 @@ class ThreadPresenceComponent(BaseComponent):
         entry = self.registry.statuses.get(self.thread_id)
         if not entry:
             return
+        self.registry.touch_activity(self.thread_id)
         entry["turns_since_update"] = int(entry.get("turns_since_update", 0)) + 1
         if entry["turns_since_update"] < self.auto_status_turns:
             return
@@ -266,7 +277,13 @@ class ThreadPresenceComponent(BaseComponent):
                 if isinstance(first_tc, dict)
                 else getattr(getattr(first_tc, "function", None), "name", "tool")
             )
-            snippet = f"Executing {fn_name}(...)"
+            cur_status = str(entry.get("status") or "").strip()
+            if not cur_status or cur_status in ("Initializing...", "Active") or cur_status.startswith("Active — used "):
+                snippet = f"Active — used {fn_name} (contemplating results)"
+            else:
+                entry["turns_since_update"] = 0
+                entry["updated_at"] = time.time()
+                return
 
         if snippet:
             self.registry.update_status(self.thread_id, snippet, reset_turns=True)
@@ -276,6 +293,9 @@ class ThreadPresenceComponent(BaseComponent):
             agent = payload.get("agent") or getattr(self, "agent", None)
             if agent is not None:
                 self.registry.register_thread(self.thread_id, self.role, core=agent)
+
+        elif event_name == "tool_executed":
+            self.registry.touch_activity(self.thread_id)
 
         elif event_name == "before_user_message_added":
             content = str(payload.get("content") or "")
