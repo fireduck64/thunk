@@ -8,7 +8,8 @@ from src.utils.config import load_config
 
 ASSISTANT_GUARD_ERROR = (
     "Error: Notes under 'assistant/' are managed automatically by your Executive Assistant. "
-    "To change how your assistant takes notes or briefs you, edit 'prompts/assistant_briefing' or 'prompts/assistant_filing'."
+    "To change how your assistant takes notes or briefs you, edit 'prompts/assistant_briefing', "
+    "'prompts/assistant_filing', or 'prompts/assistant_compaction'."
 )
 
 DEFAULT_ASSISTANT_BRIEFING_PROMPT = (
@@ -24,13 +25,23 @@ DEFAULT_ASSISTANT_FILING_PROMPT = (
     "You are my Executive Assistant organizing my 'assistant/*' reference notes as older messages leave my active working memory.\n"
     "Review the Evicted Messages and existing 'assistant/*' notes:\n"
     "1. Identify durable facts about people/speakers (e.g. 'assistant/people/<name>'), ongoing projects/terms ('assistant/topics/<slug>'), or unresolved promises.\n"
-    "2. If an entity already has a note in 'assistant/*', merge the new facts into the existing content rather than duplicating it.\n"
+    "2. For existing notes, extract ONLY net-new facts/bullet points that are not already present in the note.\n"
     "3. Ignore transient small talk or routine tool outputs."
+)
+
+DEFAULT_ASSISTANT_COMPACTION_PROMPT = (
+    "You are my Executive Assistant performing background housekeeping on an oversized 'assistant/*' reference dossier.\n"
+    "The note below has accumulated many appended bullet points over time.\n"
+    "1. Consolidate and deduplicate overlapping bullets into a clean, well-organized markdown dossier.\n"
+    "2. Preserve ALL specific names, dates, technical details, biographical facts, inside jokes, and unresolved promises.\n"
+    "3. Remove only redundant phrasing or obsolete transient noise.\n"
+    "4. Output ONLY the compacted markdown content for the note (do not wrap in JSON or code fences)."
 )
 
 DEFAULT_SEED_PROMPTS: Dict[str, str] = {
     "prompts/assistant_briefing": DEFAULT_ASSISTANT_BRIEFING_PROMPT,
     "prompts/assistant_filing": DEFAULT_ASSISTANT_FILING_PROMPT,
+    "prompts/assistant_compaction": DEFAULT_ASSISTANT_COMPACTION_PROMPT,
 }
 
 
@@ -121,18 +132,41 @@ class StructuredNotesComponent(BaseComponent):
         finally:
             conn.close()
 
-    def assistant_put_note(self, key: str, summary: str = "", content: Optional[str] = None) -> str:
+    def resolve_assistant_key(self, key: str) -> str:
         """
-        Internal helper for ExecutiveAssistantComponent to write or update notes under 'assistant/*'.
-        Automatically prefixes 'assistant/' if missing.
+        Ensures 'key' starts with 'assistant/' and resolves it case-insensitively against
+        existing 'assistant/*' notes in SQLite so e.g. 'assistant/people/Wisp' and
+        'assistant/people/wisp' always resolve to the same canonical key.
         """
         clean_key = self._normalize_key(key)
         if not clean_key:
             raise ValueError("Assistant note key cannot be empty.")
-        if clean_key == "assistant":
+        if clean_key.lower() == "assistant":
             raise ValueError("Assistant note key must specify a path under 'assistant/'.")
-        if not clean_key.startswith("assistant/"):
+        if not clean_key.lower().startswith("assistant/"):
             clean_key = f"assistant/{clean_key}"
+        else:
+            clean_key = "assistant/" + clean_key[len("assistant/"):]
+
+        conn = self._connect_db()
+        try:
+            with conn:
+                row = conn.execute(
+                    "SELECT key FROM notes WHERE LOWER(key) = LOWER(?) LIMIT 1",
+                    (clean_key,),
+                ).fetchone()
+                if row and row[0]:
+                    return str(row[0])
+        finally:
+            conn.close()
+        return clean_key
+
+    def assistant_put_note(self, key: str, summary: str = "", content: Optional[str] = None) -> str:
+        """
+        Internal helper for ExecutiveAssistantComponent to write or update notes under 'assistant/*'.
+        Automatically prefixes 'assistant/' if missing and resolves canonical casing.
+        """
+        canonical_key = self.resolve_assistant_key(key)
 
         if content is None:
             note_content = str(summary or "")
@@ -148,16 +182,82 @@ class StructuredNotesComponent(BaseComponent):
                 conn.execute(
                     "INSERT INTO notes (key, value, summary) VALUES (?, ?, ?) "
                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value, summary=excluded.summary",
-                    (clean_key, note_content, note_summary),
+                    (canonical_key, note_content, note_summary),
                 )
                 try:
-                    conn.execute("DELETE FROM notes_fts WHERE key = ?", (clean_key,))
-                    conn.execute("INSERT INTO notes_fts (key, value) VALUES (?, ?)", (clean_key, fts_text))
+                    conn.execute("DELETE FROM notes_fts WHERE key = ?", (canonical_key,))
+                    conn.execute("INSERT INTO notes_fts (key, value) VALUES (?, ?)", (canonical_key, fts_text))
                 except Exception:
                     pass
         finally:
             conn.close()
-        return f"Success: Assistant note '{clean_key}' saved."
+        return f"Success: Assistant note '{canonical_key}' saved."
+
+    def assistant_append_note(self, key: str, summary: str, new_points: List[str]) -> str:
+        """
+        Resolves the canonical 'assistant/*' key case-insensitively and appends net-new
+        markdown bullet points to the existing note content in Python.
+        Returns the resolved canonical key.
+        """
+        canonical_key = self.resolve_assistant_key(key)
+
+        conn = self._connect_db()
+        existing_content: Optional[str] = None
+        existing_summary: str = ""
+        try:
+            with conn:
+                row = conn.execute(
+                    "SELECT value, summary FROM notes WHERE key = ?",
+                    (canonical_key,),
+                ).fetchone()
+                if row is not None:
+                    existing_content = str(row[0] or "")
+                    existing_summary = str(row[1] or "")
+        finally:
+            conn.close()
+
+        existing_lines_norm = set()
+        if existing_content:
+            for line in existing_content.splitlines():
+                stripped = line.strip().lstrip("-* ").strip().lower()
+                if stripped:
+                    existing_lines_norm.add(stripped)
+
+        cleaned_points: List[str] = []
+        for raw_pt in new_points or []:
+            for subline in str(raw_pt or "").splitlines():
+                s = subline.strip()
+                if not s:
+                    continue
+                core = s.lstrip("-* ").strip()
+                if not core:
+                    continue
+                core_low = core.lower()
+                if core_low in existing_lines_norm:
+                    continue
+                existing_lines_norm.add(core_low)
+                bullet = s if (s.startswith("- ") or s.startswith("* ") or s.startswith("#")) else f"- {core}"
+                cleaned_points.append(bullet)
+
+        incoming_summary = (summary or "").strip()
+        if existing_content is not None and existing_content.strip():
+            if cleaned_points:
+                updated_content = existing_content.rstrip() + "\n" + "\n".join(cleaned_points)
+            else:
+                updated_content = existing_content
+            final_summary = incoming_summary if incoming_summary else existing_summary
+        else:
+            updated_content = "\n".join(cleaned_points)
+            if incoming_summary:
+                final_summary = incoming_summary
+            elif cleaned_points:
+                final_summary = cleaned_points[0].lstrip("-*# ").strip()[:120]
+            else:
+                final_summary = ""
+
+        if updated_content.strip() or existing_content is not None:
+            self.assistant_put_note(canonical_key, final_summary, updated_content)
+        return canonical_key
 
     def assistant_get_note(self, key: str) -> Optional[str]:
         """Internal helper for ExecutiveAssistantComponent to read a note (returns None if not found)."""
@@ -166,7 +266,16 @@ class StructuredNotesComponent(BaseComponent):
         try:
             with conn:
                 row = conn.execute("SELECT value FROM notes WHERE key = ?", (clean_key,)).fetchone()
-                return str(row[0]) if row is not None else None
+                if row is not None:
+                    return str(row[0])
+                if clean_key.lower().startswith("assistant/"):
+                    row = conn.execute(
+                        "SELECT value FROM notes WHERE LOWER(key) = LOWER(?) LIMIT 1",
+                        (clean_key,),
+                    ).fetchone()
+                    if row is not None:
+                        return str(row[0])
+                return None
         finally:
             conn.close()
 
@@ -369,6 +478,13 @@ class StructuredNotesComponent(BaseComponent):
                 norm_key = self._normalize_key(key)
                 if norm_key != key:
                     row = conn.execute("SELECT value FROM notes WHERE key = ?", (norm_key,)).fetchone()
+                    if row:
+                        return row[0]
+                if norm_key.lower().startswith("assistant/"):
+                    row = conn.execute(
+                        "SELECT value FROM notes WHERE LOWER(key) = LOWER(?) LIMIT 1",
+                        (norm_key,),
+                    ).fetchone()
                     if row:
                         return row[0]
                 return f"Error: Note with key '{key}' not found."

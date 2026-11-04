@@ -38,6 +38,9 @@ api_key = ""                          # Falls back to [subconscious].api_key or 
 model = "gemma4:e2b"                  # Falls back to [subconscious].model_name or [llm].model_name if empty
 max_candidate_notes = 10
 max_briefing_tokens = 300
+max_note_chars = 2000
+compaction_tool_interval = 20
+compaction_min_interval_sec = 600.0
 
 [tokenizer]
 # HuggingFace model path used strictly for token counting in tiered memory

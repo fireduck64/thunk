@@ -101,6 +101,7 @@ class AgentCore:
         self.event_bus.subscribe("messages_evicted", component.on_event)
         self.event_bus.subscribe("assistant_briefing_injected", component.on_event)
         self.event_bus.subscribe("assistant_notes_updated", component.on_event)
+        self.event_bus.subscribe("assistant_note_compacted", component.on_event)
 
     def _build_system_prompt(self) -> str:
         """Aggregates all component system instructions."""
