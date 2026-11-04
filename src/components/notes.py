@@ -1,9 +1,38 @@
-from typing import List, Callable, Dict, Any
+from typing import List, Callable, Dict, Any, Optional
 import os
 import re
 import sqlite3
 from src.components.base import BaseComponent
 from src.utils.config import load_config
+
+
+ASSISTANT_GUARD_ERROR = (
+    "Error: Notes under 'assistant/' are managed automatically by your Executive Assistant. "
+    "To change how your assistant takes notes or briefs you, edit 'prompts/assistant_briefing' or 'prompts/assistant_filing'."
+)
+
+DEFAULT_ASSISTANT_BRIEFING_PROMPT = (
+    "You are my Executive Assistant preparing a quick briefing before I respond.\n"
+    "Compare the Incoming Event against my Active Context (Core Summary + Recent Messages).\n"
+    "1. ONLY brief me on people, terms, projects, or history that are referenced in the Incoming Event but MISSING from my Active Context.\n"
+    "2. Do NOT repeat things I am already actively discussing.\n"
+    "3. Pull relevant details from 'assistant/*' dossiers and my general notes (who the speaker is, open promises, inside jokes, or factual anchors).\n"
+    "4. Keep it under 4 bullet points. If nothing is missing from my active context, output exactly: NONE"
+)
+
+DEFAULT_ASSISTANT_FILING_PROMPT = (
+    "You are my Executive Assistant organizing my 'assistant/*' reference notes as older messages leave my active working memory.\n"
+    "Review the Evicted Messages and existing 'assistant/*' notes:\n"
+    "1. Identify durable facts about people/speakers (e.g. 'assistant/people/<name>'), ongoing projects/terms ('assistant/topics/<slug>'), or unresolved promises.\n"
+    "2. If an entity already has a note in 'assistant/*', merge the new facts into the existing content rather than duplicating it.\n"
+    "3. Ignore transient small talk or routine tool outputs."
+)
+
+DEFAULT_SEED_PROMPTS: Dict[str, str] = {
+    "prompts/assistant_briefing": DEFAULT_ASSISTANT_BRIEFING_PROMPT,
+    "prompts/assistant_filing": DEFAULT_ASSISTANT_FILING_PROMPT,
+}
+
 
 class StructuredNotesComponent(BaseComponent):
     """
@@ -32,8 +61,11 @@ class StructuredNotesComponent(BaseComponent):
         try:
             with conn:
                 conn.execute(
-                    "CREATE TABLE IF NOT EXISTS notes (key TEXT PRIMARY KEY, value TEXT)"
+                    "CREATE TABLE IF NOT EXISTS notes (key TEXT PRIMARY KEY, value TEXT, summary TEXT DEFAULT '')"
                 )
+                cols = [row[1] for row in conn.execute("PRAGMA table_info(notes)").fetchall()]
+                if "summary" not in cols:
+                    conn.execute("ALTER TABLE notes ADD COLUMN summary TEXT DEFAULT ''")
                 try:
                     conn.execute(
                         "CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(key, value)"
@@ -47,6 +79,117 @@ class StructuredNotesComponent(BaseComponent):
                     pass
         finally:
             conn.close()
+
+    @staticmethod
+    def _normalize_key(key: str) -> str:
+        return (key or "").strip().lstrip("/")
+
+    @classmethod
+    def _is_assistant_key(cls, key: str) -> bool:
+        clean = cls._normalize_key(key)
+        return clean == "assistant" or clean.startswith("assistant/")
+
+    @staticmethod
+    def _derive_summary(content: str, explicit_summary: str = "") -> str:
+        if explicit_summary and explicit_summary.strip():
+            return " ".join(explicit_summary.strip().split())
+        for line in (content or "").splitlines():
+            clean = line.strip().lstrip("#*- ").strip()
+            if clean:
+                return clean[:140] + ("..." if len(clean) > 140 else "")
+        return ""
+
+    def ensure_seed_prompts(self) -> None:
+        """Seeds default prompts under 'prompts/*' if they do not already exist."""
+        conn = self._connect_db()
+        try:
+            with conn:
+                for key, default_val in DEFAULT_SEED_PROMPTS.items():
+                    row = conn.execute("SELECT value FROM notes WHERE key = ?", (key,)).fetchone()
+                    if row is None or not str(row[0] or "").strip():
+                        summary = self._derive_summary(default_val)
+                        conn.execute(
+                            "INSERT INTO notes (key, value, summary) VALUES (?, ?, ?) "
+                            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, summary=excluded.summary",
+                            (key, default_val, summary),
+                        )
+                        try:
+                            conn.execute("DELETE FROM notes_fts WHERE key = ?", (key,))
+                            conn.execute("INSERT INTO notes_fts (key, value) VALUES (?, ?)", (key, default_val))
+                        except Exception:
+                            pass
+        finally:
+            conn.close()
+
+    def assistant_put_note(self, key: str, summary: str = "", content: Optional[str] = None) -> str:
+        """
+        Internal helper for ExecutiveAssistantComponent to write or update notes under 'assistant/*'.
+        Automatically prefixes 'assistant/' if missing.
+        """
+        clean_key = self._normalize_key(key)
+        if not clean_key:
+            raise ValueError("Assistant note key cannot be empty.")
+        if clean_key == "assistant":
+            raise ValueError("Assistant note key must specify a path under 'assistant/'.")
+        if not clean_key.startswith("assistant/"):
+            clean_key = f"assistant/{clean_key}"
+
+        if content is None:
+            note_content = str(summary or "")
+            note_summary = self._derive_summary(note_content)
+        else:
+            note_content = str(content or "")
+            note_summary = self._derive_summary(note_content, explicit_summary=str(summary or ""))
+
+        fts_text = f"{note_summary}\n{note_content}".strip() if note_summary else note_content
+        conn = self._connect_db()
+        try:
+            with conn:
+                conn.execute(
+                    "INSERT INTO notes (key, value, summary) VALUES (?, ?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value, summary=excluded.summary",
+                    (clean_key, note_content, note_summary),
+                )
+                try:
+                    conn.execute("DELETE FROM notes_fts WHERE key = ?", (clean_key,))
+                    conn.execute("INSERT INTO notes_fts (key, value) VALUES (?, ?)", (clean_key, fts_text))
+                except Exception:
+                    pass
+        finally:
+            conn.close()
+        return f"Success: Assistant note '{clean_key}' saved."
+
+    def assistant_get_note(self, key: str) -> Optional[str]:
+        """Internal helper for ExecutiveAssistantComponent to read a note (returns None if not found)."""
+        clean_key = self._normalize_key(key)
+        conn = self._connect_db()
+        try:
+            with conn:
+                row = conn.execute("SELECT value FROM notes WHERE key = ?", (clean_key,)).fetchone()
+                return str(row[0]) if row is not None else None
+        finally:
+            conn.close()
+
+    def get_all_notes(self) -> List[Dict[str, str]]:
+        """Returns all notes with key, summary, and content for candidate scanning."""
+        conn = self._connect_db()
+        try:
+            with conn:
+                cols = [row[1] for row in conn.execute("PRAGMA table_info(notes)").fetchall()]
+                if "summary" in cols:
+                    rows = conn.execute("SELECT key, value, summary FROM notes ORDER BY key ASC").fetchall()
+                else:
+                    rows = [(k, v, "") for k, v in conn.execute("SELECT key, value FROM notes ORDER BY key ASC").fetchall()]
+        finally:
+            conn.close()
+
+        items: List[Dict[str, str]] = []
+        for k, v, s in rows:
+            key_str = str(k or "")
+            val_str = str(v or "")
+            sum_str = self._derive_summary(val_str, explicit_summary=str(s or ""))
+            items.append({"key": key_str, "summary": sum_str, "content": val_str})
+        return items
     def get_system_prompt_addition(self) -> str:
         prompt = (
             "You have access to a Structured Notes system. Treat this like a desk where "
@@ -223,6 +366,11 @@ class StructuredNotesComponent(BaseComponent):
                 row = cursor.fetchone()
                 if row:
                     return row[0]
+                norm_key = self._normalize_key(key)
+                if norm_key != key:
+                    row = conn.execute("SELECT value FROM notes WHERE key = ?", (norm_key,)).fetchone()
+                    if row:
+                        return row[0]
                 return f"Error: Note with key '{key}' not found."
 
         finally:
@@ -230,13 +378,17 @@ class StructuredNotesComponent(BaseComponent):
             
     def put_note(self, key: str, value: str) -> str:
         """Creates or overwrites a note with the given key and value."""
+        if self._is_assistant_key(key):
+            return ASSISTANT_GUARD_ERROR
+
+        summary = self._derive_summary(value)
         conn = self._connect_db()
         try:
             with conn:
                 conn.execute(
-                    "INSERT INTO notes (key, value) VALUES (?, ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value", 
-                    (key, value)
+                    "INSERT INTO notes (key, value, summary) VALUES (?, ?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value, summary=excluded.summary", 
+                    (key, value, summary)
                 )
                 try:
                     conn.execute("DELETE FROM notes_fts WHERE key = ?", (key,))
@@ -247,11 +399,35 @@ class StructuredNotesComponent(BaseComponent):
             conn.close()
         return f"Success: Note '{key}' saved."
 
+    def _reset_seed_prompt_in_db(self, conn: sqlite3.Connection, prompt_key: str) -> None:
+        default_val = DEFAULT_SEED_PROMPTS[prompt_key]
+        summary = self._derive_summary(default_val)
+        conn.execute(
+            "INSERT INTO notes (key, value, summary) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, summary=excluded.summary",
+            (prompt_key, default_val, summary),
+        )
+        try:
+            conn.execute("DELETE FROM notes_fts WHERE key = ?", (prompt_key,))
+            conn.execute("INSERT INTO notes_fts (key, value) VALUES (?, ?)", (prompt_key, default_val))
+        except Exception:
+            pass
+
     def delete_note(self, key: str) -> str:
         """Deletes a note."""
+        if self._is_assistant_key(key):
+            return ASSISTANT_GUARD_ERROR
+
+        norm_key = self._normalize_key(key)
         conn = self._connect_db()
         try:
             with conn:
+                if norm_key in DEFAULT_SEED_PROMPTS:
+                    if key != norm_key:
+                        conn.execute("DELETE FROM notes WHERE key = ?", (key,))
+                    self._reset_seed_prompt_in_db(conn, norm_key)
+                    return f"Notice: Protected prompt note '{norm_key}' cannot be deleted and was reset to factory defaults."
+
                 conn.execute("DELETE FROM notes WHERE key = ?", (key,))
                 try:
                     conn.execute("DELETE FROM notes_fts WHERE key = ?", (key,))
@@ -263,9 +439,19 @@ class StructuredNotesComponent(BaseComponent):
         
     def rename_note(self, old_key: str, new_key: str) -> str:
         """Renames or moves a note from old_key to new_key."""
+        if self._is_assistant_key(old_key) or self._is_assistant_key(new_key):
+            return ASSISTANT_GUARD_ERROR
+
+        norm_old = self._normalize_key(old_key)
         conn = self._connect_db()
         try:
             with conn:
+                if norm_old in DEFAULT_SEED_PROMPTS:
+                    self._reset_seed_prompt_in_db(conn, norm_old)
+                    return (
+                        f"Notice: Protected prompt note '{norm_old}' cannot be moved away and was reset to factory defaults."
+                    )
+
                 # Check if old_key exists
                 cursor = conn.execute("SELECT 1 FROM notes WHERE key = ?", (old_key,))
                 if not cursor.fetchone():

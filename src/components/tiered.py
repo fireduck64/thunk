@@ -648,3 +648,19 @@ class TieredMemoryComponent(BaseComponent):
             # Evict compacted messages after SQLite commit has succeeded
             del agent.messages[1 : 1 + num_to_evict]
             agent.rebuild_system_prompt()
+
+            try:
+                await agent.event_bus.publish(
+                    "messages_evicted",
+                    {
+                        "agent": agent,
+                        "thread_id": self.thread_id,
+                        "messages": messages_to_compress,
+                        "new_summary": new_summary,
+                    },
+                )
+            except Exception as e:
+                print(
+                    f"[Memory Warning:{self.thread_id}] Subscriber error during messages_evicted: {e}",
+                    flush=True,
+                )

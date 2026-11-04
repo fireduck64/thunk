@@ -98,6 +98,9 @@ class AgentCore:
         self.event_bus.subscribe("before_llm_call", component.on_event)
         self.event_bus.subscribe("after_llm_call", component.on_event)
         self.event_bus.subscribe("agent_suspended", component.on_event)
+        self.event_bus.subscribe("messages_evicted", component.on_event)
+        self.event_bus.subscribe("assistant_briefing_injected", component.on_event)
+        self.event_bus.subscribe("assistant_notes_updated", component.on_event)
 
     def _build_system_prompt(self) -> str:
         """Aggregates all component system instructions."""
@@ -252,9 +255,9 @@ class AgentCore:
         return self.normalize_wire_messages(self.messages)
 
     def _clear_ephemeral_images(self) -> None:
-        """Strips transient base64 `_images` and transient presence footers from working memory after they have been sent to the LLM once."""
+        """Strips transient base64 `_images`, transient presence footers, and transient assistant briefings from working memory after they have been sent to the LLM once."""
         for idx in range(len(self.messages) - 1, -1, -1):
-            if self.messages[idx].get("_transient_presence"):
+            if self.messages[idx].get("_transient_presence") or self.messages[idx].get("_transient_briefing"):
                 del self.messages[idx]
             else:
                 self.messages[idx].pop("_images", None)

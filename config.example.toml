@@ -30,6 +30,15 @@ layer_0_promotion_count = 8           # Number of candidates promoted from Layer
 frequency = 16
 max_output_tokens = 1024
 
+[executive_assistant]
+# Automated Chief of Staff / Filing Clerk that maintains 'assistant/*' dossiers and injects '[Assistant Briefing]'
+enabled = false
+api_base = ""                         # Falls back to [subconscious].api_url or [llm].api_url if empty
+api_key = ""                          # Falls back to [subconscious].api_key or [llm].api_key if empty
+model = "gemma4:e2b"                  # Falls back to [subconscious].model_name or [llm].model_name if empty
+max_candidate_notes = 10
+max_briefing_tokens = 300
+
 [tokenizer]
 # HuggingFace model path used strictly for token counting in tiered memory
 model_name = "unsloth/gemma-7b"

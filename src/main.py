@@ -26,6 +26,7 @@ from src.components.global_search import GlobalSearchComponent
 from src.components.subconscious import SubconsciousRecallComponent
 from src.components.spreading_activation import SpreadingActivationComponent
 from src.components.memory_gardener import MemoryGardenerComponent
+from src.components.executive_assistant import ExecutiveAssistantComponent
 from src.components.file_reader import FileReaderComponent
 from src.components.oracle import OracleComponent
 from src.components.speaker import SpeakerComponent
@@ -110,6 +111,14 @@ def _register_thread_components(
         agent.register_component(TaskQueueComponent())
     if _wants("notes", "structured_notes", "structurednotescomponent"):
         agent.register_component(StructuredNotesComponent())
+
+    ea_enabled_cfg = config.get("executive_assistant", {}).get("enabled", False)
+    if (requested is not None and _wants("executive_assistant", "executiveassistantcomponent")) or (
+        ea_enabled_cfg
+        and _wants("notes", "structured_notes", "structurednotescomponent", "executive_assistant", "executiveassistantcomponent")
+    ):
+        agent.register_component(ExecutiveAssistantComponent(thread_id=thread_id, enabled=True))
+
     if _wants("knowledge", "knowledge_base", "knowledgebasecomponent"):
         agent.register_component(KnowledgeBaseComponent(thread_id=thread_id))
     if _wants("vector_memory", "vectormemorycomponent"):
