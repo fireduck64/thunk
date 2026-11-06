@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 import json
 import inspect
 import sys
@@ -618,6 +619,21 @@ class AgentCore:
             llm_span.set_field("finish_reason", self.last_finish_reason or "stop")
             return message
 
+    def build_startup_message(self, now: datetime = None) -> str:
+        """Builds the system startup notification message with current time, main LLM model, and local/cloud execution location."""
+        dt = now or datetime.now()
+        current_time = dt.strftime("%Y-%m-%d %H:%M:%S")
+        day_of_week = dt.strftime("%A")
+        exec_loc = getattr(self, "exec_location", None) or (
+            "cloud"
+            if self.provider == "gemini"
+            else infer_exec_location(self.config.get("llm", {}).get("api_url"))
+        )
+        return (
+            f"[System Startup] Agent startup complete at {current_time} ({day_of_week}) "
+            f"on thread '{self.thread_id}'. Main LLM: {self.model} ({exec_loc}, provider: {self.provider})."
+        )
+
     async def start(self):
         """The main continuous thinking loop."""
         self._build_tools()
@@ -629,7 +645,9 @@ class AgentCore:
             
         # Tell components the agent is starting (e.g. to load their own state)
         await self.event_bus.publish("agent_started", {"agent": self})
-        print(f"[Core:{self.thread_id}] Agent loop started. (Model: {self.model})")
+        startup_msg = self.build_startup_message()
+        await self.add_message("user", startup_msg, publish_event=True)
+        print(f"[Core:{self.thread_id}] Agent loop started. (Model: {self.model}, exec_location: {self.exec_location})")
 
         # Automatically wake the agent up on boot so it can process background tasks
         self.suspended.set()

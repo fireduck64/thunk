@@ -510,3 +510,46 @@ def test_dump_notes_script_and_prefix_filtering(tmp_path):
         "prompts/assistant_filing",
         "prompts/assistant_compaction",
     }
+
+
+@pytest.mark.asyncio
+async def test_agent_startup_message_format_and_assistant_skip(tmp_path):
+    """
+    7. Verifies AgentCore.build_startup_message() includes current time, main LLM model,
+    and local vs cloud execution location, and that ExecutiveAssistantComponent skips briefing on [System Startup].
+    """
+    from datetime import datetime
+
+    fixed_dt = datetime(2026, 11, 6, 14, 30, 0)
+    local_agent = AgentCore(thread_id="mind", provider="openai", model_name="gemma4:31b")
+    local_agent.exec_location = "local"
+    msg_local = local_agent.build_startup_message(now=fixed_dt)
+    assert msg_local.startswith("[System Startup]")
+    assert "2026-11-06 14:30:00 (Friday)" in msg_local
+    assert "thread 'mind'" in msg_local
+    assert "Main LLM: gemma4:31b (local, provider: openai)" in msg_local
+
+    cloud_agent = AgentCore(thread_id="social", provider="gemini", model_name="gemini-3-flash-preview")
+    msg_cloud = cloud_agent.build_startup_message(now=fixed_dt)
+    assert "thread 'social'" in msg_cloud
+    assert "Main LLM: gemini-3-flash-preview (cloud, provider: gemini)" in msg_cloud
+
+    # Verify ExecutiveAssistantComponent skips [System Startup] without making an LLM call
+    notes = StructuredNotesComponent(db_path=str(tmp_path / "notes_startup.db"))
+    notes.assistant_put_note("people/george", "George summary", "George content")
+    assistant = ExecutiveAssistantComponent(enabled=True, notes_comp=notes)
+
+    called = {"count": 0}
+
+    async def should_not_call(**kwargs):
+        called["count"] += 1
+        raise AssertionError("Should not call LLM on [System Startup]")
+
+    assistant.client.chat.completions.create = should_not_call
+    messages = [
+        {"role": "system", "content": "Sys"},
+        {"role": "user", "content": msg_local},
+    ]
+    await assistant.on_event("before_llm_call", {"agent": local_agent, "messages": messages})
+    assert called["count"] == 0
+    assert len(messages) == 2

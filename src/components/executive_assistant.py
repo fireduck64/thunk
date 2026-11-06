@@ -592,7 +592,11 @@ class ExecutiveAssistantComponent(BaseComponent):
 
         raw_incoming = str(last_msg.get("content") or "").strip()
         incoming_event = self._strip_subconscious_prefix(raw_incoming).strip()
-        if not incoming_event or incoming_event.startswith("[System Clock]"):
+        if (
+            not incoming_event
+            or incoming_event.startswith("[System Clock]")
+            or incoming_event.startswith("[System Startup]")
+        ):
             return
 
         sig = (len(non_transient), incoming_event)
@@ -723,7 +727,7 @@ class ExecutiveAssistantComponent(BaseComponent):
                 continue
             role = str(msg.get("role") or "unknown").upper()
             content = self._strip_subconscious_prefix(str(msg.get("content") or "")).strip()
-            if content.startswith("[System Clock]"):
+            if content.startswith("[System Clock]") or content.startswith("[System Startup]"):
                 continue
             if not content and msg.get("tool_calls"):
                 content = "[Called tools]"
