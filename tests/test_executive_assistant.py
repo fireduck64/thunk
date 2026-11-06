@@ -612,7 +612,8 @@ async def test_two_pass_query_fts5_qdrant_fallback_and_audit_log(tmp_path):
 
     async def mock_create(**kwargs):
         captured_calls.append(kwargs)
-        assert kwargs.get("extra_body") == {"think": False}
+        assert kwargs.get("extra_body") == {"think": False, "reasoning_effort": "none"}
+        assert kwargs.get("max_tokens") == 1536
         sys_msg = kwargs["messages"][0]["content"]
         if "indexing assistant" in sys_msg:
             return SimpleNamespace(

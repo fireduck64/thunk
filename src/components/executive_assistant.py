@@ -119,7 +119,7 @@ class ExecutiveAssistantComponent(BaseComponent):
         self.max_briefing_tokens = int(
             max_briefing_tokens
             if max_briefing_tokens is not None
-            else ea_cfg.get("max_briefing_tokens", 500)
+            else ea_cfg.get("max_briefing_tokens", 1536)
         )
         self.max_filing_tokens = int(ea_cfg.get("max_filing_tokens", 2048))
         self.max_note_chars = int(
@@ -290,8 +290,9 @@ class ExecutiveAssistantComponent(BaseComponent):
             raw_resp = await self._call_llm(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                max_tokens=256,
+                max_tokens=1536,
                 span_type="assistant_note_select",
+                disable_thinking=True,
             )
         except Exception as e:
             print(f"[ExecutiveAssistant:{self.thread_id}] Warning during note selection ({purpose}): {e}")
@@ -389,8 +390,9 @@ class ExecutiveAssistantComponent(BaseComponent):
             raw_resp = await self._call_llm(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                max_tokens=256,
+                max_tokens=1536,
                 span_type="assistant_note_select",
+                disable_thinking=True,
             )
         except Exception as e:
             print(f"[ExecutiveAssistant:{self.thread_id}] Warning during briefing target selection: {e}")
@@ -483,6 +485,7 @@ class ExecutiveAssistantComponent(BaseComponent):
         user_prompt: str,
         max_tokens: int,
         span_type: str,
+        disable_thinking: bool = False,
     ) -> str:
         agent_obj = getattr(self, "agent", None)
         agent_name = getattr(agent_obj, "name", None) or self.agent_name
@@ -508,15 +511,20 @@ class ExecutiveAssistantComponent(BaseComponent):
             span.inc("request_bytes", len(req_text.encode("utf-8")))
 
             with span.subtimer("llm_call_ms"):
-                create_call = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    temperature=0.2,
-                    max_tokens=max_tokens,
-                    extra_body={"think": False},
-                    stream=True,
-                    stream_options={"include_usage": True},
-                )
+                create_kwargs: Dict[str, Any] = {
+                    "model": self.model,
+                    "messages": messages,
+                    "temperature": 0.2,
+                    "max_tokens": max_tokens,
+                    "stream": True,
+                    "stream_options": {"include_usage": True},
+                }
+                if disable_thinking:
+                    create_kwargs["extra_body"] = {
+                        "think": False,
+                        "reasoning_effort": "none",
+                    }
+                create_call = self.client.chat.completions.create(**create_kwargs)
                 resp = await create_call if inspect.isawaitable(create_call) else create_call
 
                 content = ""
@@ -961,6 +969,7 @@ class ExecutiveAssistantComponent(BaseComponent):
                 user_prompt=user_prompt,
                 max_tokens=self.max_briefing_tokens,
                 span_type="assistant_briefing",
+                disable_thinking=True,
             )
         except Exception as e:
             print(f"[ExecutiveAssistant:{self.thread_id}] Warning during pre-turn briefing: {e}")

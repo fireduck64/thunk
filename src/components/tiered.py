@@ -630,8 +630,6 @@ class TieredMemoryComponent(BaseComponent):
                             "stream": True,
                             "stream_options": {"include_usage": True},
                         }
-                        if getattr(agent, "provider", "openai") != "gemini":
-                            create_kwargs["extra_body"] = {"think": False}
                         response_stream = await agent.client.chat.completions.create(**create_kwargs)
                         message = await agent._accumulate_stream(response_stream)
                     raw_summary = re.sub(r"<think>.*?</think>", "", message.content or "", flags=re.DOTALL).strip()

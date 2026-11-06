@@ -51,7 +51,7 @@ class MemoryGardenerComponent(BaseComponent):
         )
         self.max_output_tokens = int(
             gardener_cfg.get("max_output_tokens")
-            or sub_cfg.get("max_output_tokens", 1024)
+            or sub_cfg.get("max_output_tokens", 2048)
         )
         self.tool_interval = int(
             gardener_cfg.get("tool_interval", tool_interval)
@@ -304,7 +304,6 @@ class MemoryGardenerComponent(BaseComponent):
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.2,
                 max_tokens=self.max_output_tokens,
-                extra_body={"think": False},
                 stream=True,
                 stream_options={"include_usage": True},
             )

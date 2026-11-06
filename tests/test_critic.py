@@ -24,6 +24,63 @@ async def test_critic_trigger_frequency():
     assert critic.needs_evaluation
 
 
+@pytest.mark.asyncio
+async def test_critic_preserves_agent_last_usage_and_keeps_thinking_on():
+    """
+    Verifies CriticComponent._evaluate_progress() keeps thinking ON (does not pass extra_body={'think': False}),
+    strips <think>...</think> from the feeling, and restores agent.last_usage & agent.last_finish_reason.
+    """
+    from types import SimpleNamespace
+    from src.core.agent import AgentCore
+
+    agent = AgentCore(thread_id="mind", provider="openai", model_name="gemma4:31b")
+    critic = CriticComponent(frequency=1)
+    agent.register_component(critic)
+
+    agent.messages = [
+        {"role": "system", "content": "Sys"},
+        {"role": "user", "content": "Working on lensing residuals."},
+    ]
+    prior_usage = {"prompt_tokens": 27400, "completion_tokens": 120, "cached_tokens": 25000}
+    agent.last_usage = dict(prior_usage)
+    agent.last_finish_reason = "tool_calls"
+
+    captured_kwargs = []
+
+    async def mock_critic_create(**kwargs):
+        captured_kwargs.append(kwargs)
+
+        async def _gen():
+            yield SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content="<think>Evaluating recent turns...</think>I notice you have been making steady progress.",
+                            tool_calls=None,
+                        ),
+                        finish_reason="stop",
+                    )
+                ],
+                usage={"prompt_tokens": 900, "completion_tokens": 25, "thinking_tokens": 40},
+            )
+
+        return _gen()
+
+    agent.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=mock_critic_create))
+    )
+
+    await critic._evaluate_progress()
+
+    assert len(captured_kwargs) == 1
+    assert "extra_body" not in captured_kwargs[0]
+    assert captured_kwargs[0]["max_tokens"] == 1536
+    assert agent.messages[-1]["content"] == "[Internal Feeling]: I notice you have been making steady progress."
+    # Verify agent.last_usage and agent.last_finish_reason were restored
+    assert agent.last_usage == prior_usage
+    assert agent.last_finish_reason == "tool_calls"
+
+
 def test_task_queue_ids_and_delete():
     """Verifies TaskQueueComponent includes task IDs in list_tasks and supports delete_task(task_id)."""
     db_path = load_config()["tasks"]["db_path"]

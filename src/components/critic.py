@@ -18,7 +18,7 @@ class CriticComponent(BaseComponent):
             self.frequency = int(frequency)
         else:
             self.frequency = int(critic_cfg.get("frequency", 16))
-        self.max_output_tokens = int(critic_cfg.get("max_output_tokens", 1024))
+        self.max_output_tokens = int(critic_cfg.get("max_output_tokens", 1536))
         self.action_count = 0
         self.needs_evaluation = False
 
@@ -99,6 +99,8 @@ class CriticComponent(BaseComponent):
         ) as span:
             span.inc("request_tokens", count_tokens(prompt, agent=self.agent))
             span.inc("request_bytes", len(prompt.encode("utf-8")))
+            prev_usage = getattr(self.agent, "last_usage", None)
+            prev_finish_reason = getattr(self.agent, "last_finish_reason", None)
             try:
                 with span.subtimer("llm_call_ms"):
                     create_kwargs: Dict[str, Any] = {
@@ -110,15 +112,13 @@ class CriticComponent(BaseComponent):
                         "stream": True,
                         "stream_options": {"include_usage": True},
                     }
-                    if getattr(self.agent, "provider", "openai") != "gemini":
-                        create_kwargs["extra_body"] = {"think": False}
                     response_stream = await self.agent.client.chat.completions.create(**create_kwargs)
                     message = await self.agent._accumulate_stream(response_stream)
+                usage = getattr(self.agent, "last_usage", None) or {}
                 raw_feeling = re.sub(r"<think>.*?</think>", "", message.content or "", flags=re.DOTALL).strip()
                 if "<think>" in raw_feeling:
                     raw_feeling = raw_feeling.split("<think>", 1)[0].strip()
                 feeling = raw_feeling
-                usage = getattr(self.agent, "last_usage", None) or {}
                 if usage.get("prompt_tokens"):
                     span.set_counter("request_tokens", int(usage["prompt_tokens"]))
                 if usage.get("cached_tokens") is not None:
@@ -134,3 +134,6 @@ class CriticComponent(BaseComponent):
             except Exception as e:
                 span.fail()
                 print(f"[Critic Error:{thread_id}] {e}")
+            finally:
+                self.agent.last_usage = prev_usage
+                self.agent.last_finish_reason = prev_finish_reason

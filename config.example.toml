@@ -28,7 +28,7 @@ layer_0_promotion_count = 8           # Number of candidates promoted from Layer
 
 [critic]
 frequency = 16
-max_output_tokens = 1024
+max_output_tokens = 1536
 
 [executive_assistant]
 # Automated Chief of Staff / Filing Clerk that maintains 'assistant/*' dossiers and injects '[Assistant Briefing]'
@@ -37,7 +37,7 @@ api_base = ""                         # Falls back to [subconscious].api_url or 
 api_key = ""                          # Falls back to [subconscious].api_key or [llm].api_key if empty
 model = "gemma4:e2b"                  # Falls back to [subconscious].model_name or [llm].model_name if empty
 max_candidate_notes = 10
-max_briefing_tokens = 500
+max_briefing_tokens = 1536
 max_note_chars = 2000
 compaction_tool_interval = 20
 compaction_min_interval_sec = 600.0

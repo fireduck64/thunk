@@ -591,7 +591,7 @@ async def test_agent_core_no_tool_circuit_breaker_and_prompt_token_watermark_com
         await mem.on_event("context_window_check", {"agent": mind_agent})
 
         assert len(compaction_kwargs) == 1
-        assert compaction_kwargs[0].get("extra_body") == {"think": False}
+        assert "extra_body" not in compaction_kwargs[0]
         assert mem._get_core_summary() == "Compacted summary via prompt_token_watermark."
         assert len(mind_agent.messages) < 9
     finally:

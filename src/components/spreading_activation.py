@@ -57,7 +57,7 @@ class SpreadingActivationComponent(BaseComponent):
         if "max_output_tokens" in sa_cfg:
             self.max_output_tokens = int(sa_cfg["max_output_tokens"])
         else:
-            self.max_output_tokens = min(int(sub_cfg.get("max_output_tokens", 400)), 400)
+            self.max_output_tokens = int(sub_cfg.get("max_output_tokens", 1536))
 
         if layer_1_pool_size is not None:
             self.layer_1_pool_size = int(layer_1_pool_size)
@@ -391,7 +391,7 @@ class SpreadingActivationComponent(BaseComponent):
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
             max_tokens=self.max_output_tokens,
-            extra_body={"think": False},
+            extra_body={"think": False, "reasoning_effort": "none"},
             stream=True,
             stream_options={"include_usage": True},
         )
