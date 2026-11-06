@@ -1,4 +1,4 @@
-from typing import List, Callable, Dict, Any, Optional
+from typing import List, Callable, Dict, Any, Optional, Tuple
 import os
 import re
 import sqlite3
@@ -77,6 +77,17 @@ class StructuredNotesComponent(BaseComponent):
                 cols = [row[1] for row in conn.execute("PRAGMA table_info(notes)").fetchall()]
                 if "summary" not in cols:
                     conn.execute("ALTER TABLE notes ADD COLUMN summary TEXT DEFAULT ''")
+                try:
+                    missing_rows = conn.execute(
+                        "SELECT key, value FROM notes WHERE summary IS NULL OR summary = ''"
+                    ).fetchall()
+                    if missing_rows:
+                        conn.executemany(
+                            "UPDATE notes SET summary = ? WHERE key = ?",
+                            [(self._derive_summary(str(v or "")), str(k)) for k, v in missing_rows],
+                        )
+                except Exception:
+                    pass
                 try:
                     conn.execute(
                         "CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(key, value)"
@@ -424,6 +435,113 @@ class StructuredNotesComponent(BaseComponent):
             snippet = self._extract_snippet(value, tokens, max_chars=600)
             results.append(f"Note '{key}':\n{snippet}")
         return "\n\n".join(results)
+
+    def search_notes_structured(
+        self,
+        query: str,
+        limit: int = 3,
+        exclude_prefixes: Tuple[str, ...] = ("prompts/", "assistant/"),
+    ) -> List[Dict[str, Any]]:
+        """
+        Searches notes using FTS5 BM25 + tokenized keyword ranking and returns structured note dicts:
+        [{"key": k, "summary": summary, "content": v, "score": score}, ...]
+        Excludes 'sticky' and any key starting with exclude_prefixes.
+        """
+        clean_query = (query or "").strip()
+        if not clean_query or limit <= 0:
+            return []
+
+        tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9_]+", clean_query) if len(t) >= 2]
+        if not tokens:
+            tokens = [clean_query.lower()]
+
+        norm_excludes = tuple(p.lower() for p in (exclude_prefixes or ()))
+
+        def _is_excluded(k: str) -> bool:
+            kl = (k or "").strip().lower()
+            if not kl or kl == "sticky":
+                return True
+            return any(kl.startswith(pref) for pref in norm_excludes)
+
+        scored_notes: Dict[str, Tuple[float, str, str]] = {}
+        conn = self._connect_db()
+        try:
+            with conn:
+                # 1. FTS5 BM25 match
+                try:
+                    fts_expr = " OR ".join(f'"{t}"*' for t in tokens)
+                    fts_rows = conn.execute(
+                        "SELECT key, value, bm25(notes_fts) AS rank FROM notes_fts "
+                        "WHERE notes_fts MATCH ? ORDER BY rank ASC LIMIT 15",
+                        (fts_expr,),
+                    ).fetchall()
+                    for idx, (k, v, _) in enumerate(fts_rows):
+                        key_str = str(k or "")
+                        if _is_excluded(key_str):
+                            continue
+                        scored_notes[key_str] = (10.0 - idx * 0.5, str(v or ""), "")
+                except Exception:
+                    pass
+
+                # 2. Tokenized multi-keyword scoring across notes
+                query_lower = clean_query.lower()
+                cols = [row[1] for row in conn.execute("PRAGMA table_info(notes)").fetchall()]
+                if "summary" in cols:
+                    rows = conn.execute("SELECT key, value, summary FROM notes").fetchall()
+                else:
+                    rows = [(k, v, "") for k, v in conn.execute("SELECT key, value FROM notes").fetchall()]
+
+                for k, v, s in rows:
+                    key_str = str(k or "")
+                    if _is_excluded(key_str):
+                        continue
+                    val_str = str(v or "")
+                    sum_str = str(s or "")
+                    k_low = key_str.lower()
+                    v_low = val_str.lower()
+                    s_low = sum_str.lower()
+
+                    score = 0.0
+                    if query_lower in k_low:
+                        score += 6.0
+                    if query_lower in s_low:
+                        score += 5.0
+                    if query_lower in v_low:
+                        score += 4.0
+                    for tok in tokens:
+                        if tok in k_low:
+                            score += 2.0
+                        if tok in s_low:
+                            score += 1.5
+                        if tok in v_low:
+                            score += 1.0
+
+                    if score > 0 or key_str in scored_notes:
+                        prev_score = scored_notes.get(key_str, (0.0, val_str, sum_str))[0]
+                        scored_notes[key_str] = (prev_score + score, val_str, sum_str)
+        finally:
+            conn.close()
+
+        if not scored_notes:
+            return []
+
+        ranked = sorted(
+            scored_notes.items(),
+            key=lambda kv: (kv[1][0], kv[0]),
+            reverse=True,
+        )[:limit]
+
+        out: List[Dict[str, Any]] = []
+        for key, (score, val_str, sum_str) in ranked:
+            out.append(
+                {
+                    "key": key,
+                    "summary": self._derive_summary(val_str, explicit_summary=sum_str),
+                    "content": val_str,
+                    "score": float(score),
+                }
+            )
+        return out
 
     # --- Tool Implementations ---
 

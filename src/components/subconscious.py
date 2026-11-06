@@ -1,4 +1,5 @@
 import asyncio
+import re
 from typing import Dict, Any
 import httpx
 from openai import AsyncOpenAI
@@ -56,6 +57,7 @@ class SubconsciousRecallComponent(BaseComponent):
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
             max_tokens=self.max_output_tokens,
+            extra_body={"think": False},
             stream=True,
             stream_options={"include_usage": True},
         )
@@ -63,13 +65,15 @@ class SubconsciousRecallComponent(BaseComponent):
         content = ""
         self.last_usage = None
         async for chunk in stream:
-            parsed_usage = extract_chunk_usage(chunk)
+            parsed_usage = extract_chunk_usage(chunk, prev_usage=self.last_usage)
             if parsed_usage is not None:
                 self.last_usage = parsed_usage
             if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
                 content += chunk.choices[0].delta.content
 
-        synthesized = content.strip()
+        synthesized = re.sub(r"<think>.*?</think>", "", content or "", flags=re.DOTALL).strip()
+        if "<think>" in synthesized:
+            synthesized = synthesized.split("<think>", 1)[0].strip()
         if synthesized.upper() == "NONE" or synthesized.upper().startswith("NONE\n"):
             return ""
         return synthesized

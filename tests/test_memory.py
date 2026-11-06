@@ -477,6 +477,127 @@ async def test_archival_log_tool_call_persistence_and_wire_normalization(tmp_pat
         mem._lock_file.close()
 
 
+@pytest.mark.asyncio
+async def test_agent_core_no_tool_circuit_breaker_and_prompt_token_watermark_compaction(tmp_path):
+    """
+    Verifies WP2.1, WP2.2, and WP2.3:
+    - AgentCore._handle_post_turn_loop_control persists _transient_nudge across consecutive no-tool turns
+      and trips the circuit breaker (suspended.clear() + agent_suspended event) at max_no_tool_turns (2 for social, 3 for mind).
+    - Empty finish_reason=='length' generation allows at most 1 retry before tripping the circuit breaker.
+    - TieredMemoryComponent triggers compaction when agent.last_usage['prompt_tokens'] > prompt_token_watermark (24000)
+      even when _count_tokens(agent.messages) < high_watermark, passes extra_body={'think': False}, and terminates cleanly.
+    """
+    from types import SimpleNamespace
+    from openai.types.chat.chat_completion_message import ChatCompletionMessage
+    from src.core.agent import AgentCore
+
+    # 1. Test social thread max_no_tool_turns = 2 circuit breaker & persistent _transient_nudge
+    social_agent = AgentCore(thread_id="social")
+    assert social_agent.max_no_tool_turns == 2
+    social_agent.messages = [{"role": "system", "content": "Sys"}, {"role": "user", "content": "Hi"}]
+    social_agent.suspended.set()
+
+    suspended_events = []
+
+    async def on_suspended(event_name, payload):
+        suspended_events.append(event_name)
+
+    social_agent.event_bus.subscribe("agent_suspended", on_suspended)
+
+    # Turn 1 without tool call -> appends _transient_nudge (1/2) and stays awake
+    social_agent.last_finish_reason = "stop"
+    await social_agent._handle_post_turn_loop_control(
+        ChatCompletionMessage(role="assistant", content="Internal thought 1", tool_calls=None)
+    )
+    assert social_agent.consecutive_no_tool_turns == 1
+    assert social_agent.suspended.is_set() is True
+    assert social_agent.messages[-1].get("_transient_nudge") is True
+    assert "Turn 1/2 without a tool call" in social_agent.messages[-1]["content"]
+
+    # Turn 2 without tool call -> reaches max_no_tool_turns (2/2) -> strips _transient_nudge and suspends
+    await social_agent._handle_post_turn_loop_control(
+        ChatCompletionMessage(role="assistant", content="Internal thought 2", tool_calls=None)
+    )
+    assert social_agent.consecutive_no_tool_turns == 0
+    assert social_agent.suspended.is_set() is False
+    assert all(not m.get("_transient_nudge") for m in social_agent.messages)
+    assert len(suspended_events) == 1
+
+    # 2. Test mind thread finish_reason == "length" with empty content -> 1 retry then circuit breaker
+    mind_agent = AgentCore(thread_id="mind")
+    assert mind_agent.max_no_tool_turns == 3
+    mind_agent.messages = [{"role": "system", "content": "Sys"}, {"role": "user", "content": "Work"}]
+    mind_agent.suspended.set()
+
+    mind_agent.last_finish_reason = "length"
+    await mind_agent._handle_post_turn_loop_control(
+        ChatCompletionMessage(role="assistant", content=None, tool_calls=None)
+    )
+    assert mind_agent.consecutive_length_truncations == 1
+    assert mind_agent.suspended.is_set() is True
+    assert mind_agent.messages[-1].get("_transient_nudge") is True
+    assert "exhausted max_tokens during internal reasoning" in mind_agent.messages[-1]["content"]
+
+    # Second empty length truncation -> immediately trips circuit breaker (on turn 2, before 3)
+    await mind_agent._handle_post_turn_loop_control(
+        ChatCompletionMessage(role="assistant", content="", tool_calls=None)
+    )
+    assert mind_agent.consecutive_length_truncations == 0
+    assert mind_agent.suspended.is_set() is False
+    assert all(not m.get("_transient_nudge") for m in mind_agent.messages)
+
+    # 3. Test TieredMemoryComponent prompt_token_watermark = 24000 trigger + extra_body={'think': False}
+    db_path = str(tmp_path / "watermark_mem.db")
+    mem = TieredMemoryComponent(db_path=db_path, thread_id="mind")
+    try:
+        assert mem.prompt_token_watermark == 24000
+        mem.high_watermark = 32000
+        mem.low_watermark = 16000
+
+        mind_agent = AgentCore(thread_id="mind", provider="openai", model_name="gemma4:31b")
+        mind_agent.messages = [{"role": "system", "content": "System prompt"}]
+        for idx in range(8):
+            mind_agent.messages.append({"role": "user", "content": f"Message {idx} " * 20, "_db_id": idx + 1})
+        # Message token count is well below high_watermark (32000), but provider-reported prompt_tokens is 28500 > 24000
+        assert mem._count_tokens(mind_agent.messages) < mem.high_watermark
+        mind_agent.last_usage = {"prompt_tokens": 28500, "completion_tokens": 50}
+        mind_agent.last_agent_turn_prompt_tokens = 28500
+
+        compaction_kwargs = []
+
+        async def mock_compaction_create(**kwargs):
+            compaction_kwargs.append(kwargs)
+
+            async def _gen():
+                yield SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(
+                                content="<think>internal</think>Compacted summary via prompt_token_watermark.",
+                                tool_calls=None,
+                            ),
+                            finish_reason="stop",
+                        )
+                    ],
+                    usage=None,
+                )
+
+            return _gen()
+
+        mind_agent.client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=mock_compaction_create))
+        )
+
+        await mem.on_event("context_window_check", {"agent": mind_agent})
+
+        assert len(compaction_kwargs) == 1
+        assert compaction_kwargs[0].get("extra_body") == {"think": False}
+        assert mem._get_core_summary() == "Compacted summary via prompt_token_watermark."
+        assert len(mind_agent.messages) < 9
+    finally:
+        mem._lock_file.close()
+
+
 
 
 

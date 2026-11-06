@@ -283,9 +283,9 @@ async def test_memory_gardener_notes_fts_and_garden_migrate(tmp_path):
 
         def find_neighbors_by_id(self, point_id: str, top_k: int = 5, score_threshold: float = 0.88):
             if point_id == "m1":
-                return [{"id": "m2", "content": "Longer more detailed version of the exact same thought", "score": 0.97}]
+                return [{"id": "m2", "content": "Longer more detailed version of the exact same thought", "score": 0.99}]
             if point_id == "m4":
-                return [{"id": "m3", "content": "Overlapping note A on Cosmere", "score": 0.90}]
+                return [{"id": "m3", "content": "Overlapping note A on Cosmere", "score": 0.96}]
             return []
 
         def upsert_point(self, point_id: str, content: str, metadata=None):
@@ -311,7 +311,7 @@ async def test_memory_gardener_notes_fts_and_garden_migrate(tmp_path):
     assert sa.layer_1_pool["m1"].hits == 3  # max(2, 1) + 1
     assert sa.layer_1_pool["m1"].groomed_at > 0
 
-    # Pass 2: LLM path merges m4 + m3 via mocked _ask_llm_to_merge
+    # Pass 2: LLM path merges m4 + m3 via mocked _ask_llm_to_merge (even at 0.96 < 0.985)
     async def mock_ask_llm(target, neighbors, span):
         return {"should_merge": True, "merged_content": "Merged Cosmere synthesis (A + B)"}
 
@@ -322,6 +322,35 @@ async def test_memory_gardener_notes_fts_and_garden_migrate(tmp_path):
     assert "m3" not in sa.layer_1_pool
     assert sa.layer_1_pool["m4"].content == "Merged Cosmere synthesis (A + B)"
     assert sa.layer_1_pool["m4"].hits == 3  # 2 + 1
+
+    # Pass 3: When layer_1_pool has no ungroomed candidates, fall back to rolling Qdrant scroll + stamp groomed_at
+    class ScrollQdrantClient:
+        def __init__(self):
+            self.set_payload_calls = []
+
+        def scroll(self, collection_name, offset=None, limit=10, with_payload=True, with_vectors=False):
+            from types import SimpleNamespace
+
+            pts = [
+                SimpleNamespace(
+                    id="qdrant_pt_1",
+                    payload={"text": "Scrolled memory from Qdrant collection", "groomed_at": 0},
+                )
+            ]
+            return pts, "next_page_token_123"
+
+        def set_payload(self, collection_name, payload, points):
+            self.set_payload_calls.append((collection_name, payload, points))
+
+    mock_vc._client = ScrollQdrantClient()
+    mock_vc.collection_name = "agent_memory"
+    res3 = await gardener.run_gardening_pass()
+    assert res3["status"] == "clean"
+    assert res3["target_id"] == "qdrant_pt_1"
+    assert gardener._qdrant_scroll_offset == "next_page_token_123"
+    assert len(mock_vc._client.set_payload_calls) == 1
+    assert mock_vc._client.set_payload_calls[0][2] == ["qdrant_pt_1"]
+    assert mock_vc._client.set_payload_calls[0][1]["groomed_at"] > 0
 
     # 3. Test StructuredNotesComponent multi-keyword search + contextual snippet
     notes = StructuredNotesComponent(db_path=str(tmp_path / "notes_fts.db"))

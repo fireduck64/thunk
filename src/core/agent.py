@@ -65,6 +65,16 @@ class AgentCore:
         self.last_finish_reason = None
         self.last_ttft_ms = None
         self.last_usage = None
+        self.last_agent_turn_prompt_tokens = 0
+        self.consecutive_no_tool_turns = 0
+        self.consecutive_length_truncations = 0
+        default_max_no_tool = 2 if self.thread_id == "social" else 3
+        self.max_no_tool_turns = int(
+            agent_cfg.get(
+                "max_no_tool_turns",
+                llm_cfg.get("max_no_tool_turns", default_max_no_tool),
+            )
+        )
         
         # State
         self.messages = []
@@ -599,6 +609,8 @@ class AgentCore:
 
             usage = self.last_usage or {}
             req_tok = usage.get("prompt_tokens")
+            if req_tok is not None:
+                self.last_agent_turn_prompt_tokens = int(req_tok)
             if req_tok is None:
                 req_tok = count_tokens(wire_messages, agent=self)
             resp_text_for_tok = (message.content or "") + (
@@ -619,6 +631,93 @@ class AgentCore:
             llm_span.set_field("finish_reason", self.last_finish_reason or "stop")
             return message
 
+    def _strip_transient_nudges(self) -> None:
+        """Removes any transient no-tool / length truncation nudge messages from working memory."""
+        self.messages = [
+            m for m in self.messages if not (isinstance(m, dict) and m.get("_transient_nudge"))
+        ]
+
+    async def _trip_circuit_breaker(self) -> None:
+        """Trips the consecutive no-tool-call / length-truncation circuit breaker and suspends the thread."""
+        self._strip_transient_nudges()
+        self.consecutive_no_tool_turns = 0
+        self.consecutive_length_truncations = 0
+        self.suspended.clear()
+        await self.event_bus.publish("agent_suspended", {"agent": self})
+
+    async def _handle_post_turn_loop_control(self, message: ChatCompletionMessage) -> None:
+        """
+        Applies post-turn loop control for tool vs no-tool turns (WP2.1 & WP2.2):
+        - Resets counters and strips transient nudges when tools are called.
+        - Allows at most 1 retry on empty finish_reason=='length' turns before tripping the circuit breaker.
+        - Persists _transient_nudge across consecutive no-tool turns up to self.max_no_tool_turns before suspending.
+        """
+        if message.tool_calls:
+            self.consecutive_no_tool_turns = 0
+            self.consecutive_length_truncations = 0
+            self._strip_transient_nudges()
+            return
+
+        self.consecutive_no_tool_turns += 1
+        content_stripped = (message.content or "").strip()
+
+        # Case A: finish_reason == "length" with empty visible content and 0 tool calls
+        if self.last_finish_reason == "length" and not content_stripped:
+            self.consecutive_length_truncations += 1
+            print(
+                f"[Core Warning:{self.thread_id}] Empty generation hit max_output_tokens ({self.max_output_tokens}) "
+                f"(truncation streak {self.consecutive_length_truncations}/2)."
+            )
+            if self.consecutive_length_truncations == 1 and self.consecutive_no_tool_turns < self.max_no_tool_turns:
+                self.messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "[System Notice] Your previous response exhausted max_tokens during internal reasoning "
+                            "before emitting any text or tool call. Keep internal thinking brief (<200 tokens) and "
+                            "immediately call a tool (e.g. suspend_until_next_event if done)."
+                        ),
+                        "_transient_nudge": True,
+                    }
+                )
+                self.suspended.set()
+            else:
+                print(
+                    f"[Core CircuitBreaker:{self.thread_id}] Tripping circuit breaker after repeated empty length truncation."
+                )
+                await self._trip_circuit_breaker()
+            return
+
+        self.consecutive_length_truncations = 0
+
+        # Case B: Standard no-tool turn below max_no_tool_turns
+        if self.consecutive_no_tool_turns < self.max_no_tool_turns:
+            nudge_text = (
+                f"[System Notice — Turn {self.consecutive_no_tool_turns}/{self.max_no_tool_turns} without a tool call] "
+                "Your plain-text output is private internal monologue. Nobody on Discord/MQTT can see it unless you "
+                "call send_message or react_to_message. If you have nothing to send or do, call suspend_until_next_event() now."
+            )
+            if self.last_finish_reason == "length":
+                nudge_text = (
+                    f"[System Notice: Your previous generation hit the {self.max_output_tokens}-token output limit and was cut off.]\n"
+                    + nudge_text
+                )
+            self.messages.append(
+                {
+                    "role": "user",
+                    "content": nudge_text,
+                    "_transient_nudge": True,
+                }
+            )
+            self.suspended.set()
+            return
+
+        # Case C: Reached max_no_tool_turns -> trip circuit breaker
+        print(
+            f"[Core CircuitBreaker:{self.thread_id}] Reached {self.consecutive_no_tool_turns}/{self.max_no_tool_turns} "
+            "consecutive turns without a tool call. Suspending thread."
+        )
+        await self._trip_circuit_breaker()
     def build_startup_message(self, now: datetime = None) -> str:
         """Builds the system startup notification message with current time, main LLM model, and local/cloud execution location."""
         dt = now or datetime.now()
@@ -730,18 +829,8 @@ class AgentCore:
                 if message.content:
                     print(f"[Agent Monologue:{self.thread_id}]: {message.content}")
 
-                if self.last_finish_reason == "length":
-                    print(f"[Core Warning:{self.thread_id}] Generation hit max_output_tokens ({self.max_output_tokens}) and was truncated.")
-                    await self.add_message(
-                        "system",
-                        f"[System Notice: Your previous generation hit the {self.max_output_tokens}-token output limit and was cut off. "
-                        "Keep your internal reasoning concise and execute one small step at a time.]"
-                    )
-                    self.suspended.set()
-
-                # Note: We removed the auto-suspension logic here. 
-                # The agent is now expected to explicitly use the `suspend_until_next_event` tool
-                # from the SystemComponent when it is finished working.
+                # 4. Apply post-turn no-tool-call & length-truncation circuit breaker (WP2.1 & WP2.2)
+                await self._handle_post_turn_loop_control(message)
 
             except Exception as e:
                 print(f"[Core Error] LLM Call Failed: {e}")
@@ -761,6 +850,11 @@ class AgentCore:
                 batch.append((item.get("content", ""), list(item.get("images") or [])))
             else:
                 batch.append((str(item), []))
+
+        if batch:
+            self.consecutive_no_tool_turns = 0
+            self.consecutive_length_truncations = 0
+            self._strip_transient_nudges()
 
         non_clock_messages = [
             msg for msg, _ in batch if msg and not msg.startswith("[System Clock]")

@@ -3,6 +3,7 @@ import hashlib
 import inspect
 import json
 import os
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Tuple, Set
@@ -53,9 +54,10 @@ class SpreadingActivationComponent(BaseComponent):
         self.api_url = sa_cfg.get("api_url") or sub_cfg.get("api_url") or llm_cfg.get("api_url")
         self.api_key = sa_cfg.get("api_key") or sub_cfg.get("api_key") or llm_cfg.get("api_key") or "ollama"
         self.model_name = sa_cfg.get("model_name") or sub_cfg.get("model_name", "gemma4:e2b")
-        self.max_output_tokens = int(
-            sa_cfg.get("max_output_tokens") or sub_cfg.get("max_output_tokens", 2048)
-        )
+        if "max_output_tokens" in sa_cfg:
+            self.max_output_tokens = int(sa_cfg["max_output_tokens"])
+        else:
+            self.max_output_tokens = min(int(sub_cfg.get("max_output_tokens", 400)), 400)
 
         if layer_1_pool_size is not None:
             self.layer_1_pool_size = int(layer_1_pool_size)
@@ -95,7 +97,7 @@ class SpreadingActivationComponent(BaseComponent):
             self._load_pool_from_db()
 
     def _connect_db(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=5.0)
+        conn = sqlite3.connect(self.db_path, timeout=15.0)
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA busy_timeout=5000;")
         return conn
@@ -389,6 +391,7 @@ class SpreadingActivationComponent(BaseComponent):
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
             max_tokens=self.max_output_tokens,
+            extra_body={"think": False},
             stream=True,
             stream_options={"include_usage": True},
         )
@@ -396,13 +399,15 @@ class SpreadingActivationComponent(BaseComponent):
         content = ""
         self.last_usage = None
         async for chunk in stream:
-            parsed_usage = extract_chunk_usage(chunk)
+            parsed_usage = extract_chunk_usage(chunk, prev_usage=self.last_usage)
             if parsed_usage is not None:
                 self.last_usage = parsed_usage
             if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
                 content += chunk.choices[0].delta.content
 
-        synthesized = content.strip()
+        synthesized = re.sub(r"<think>.*?</think>", "", content or "", flags=re.DOTALL).strip()
+        if "<think>" in synthesized:
+            synthesized = synthesized.split("<think>", 1)[0].strip()
         if synthesized.upper() == "NONE" or synthesized.upper().startswith("NONE\n"):
             return ""
         return synthesized

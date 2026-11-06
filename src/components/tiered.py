@@ -2,6 +2,7 @@ import asyncio
 import fcntl
 import inspect
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -34,10 +35,12 @@ class TieredMemoryComponent(BaseComponent):
         self._acquire_lock()
         
         tokenizer_model = self.config.get("tokenizer", {}).get("model_name", "unsloth/gemma-7b")
-        self.high_watermark = self.config.get("memory", {}).get("high_watermark", 16000)
-        self.low_watermark = self.config.get("memory", {}).get("low_watermark", 8000)
-        self.max_summarize_tokens = self.config.get("memory", {}).get("max_summarize_tokens", 6000)
-        self.max_summary_tokens = self.config.get("memory", {}).get("max_summary_tokens", 8192)
+        mem_cfg = self.config.get("memory", {})
+        self.high_watermark = mem_cfg.get("high_watermark", 16000)
+        self.low_watermark = mem_cfg.get("low_watermark", 8000)
+        self.prompt_token_watermark = int(mem_cfg.get("prompt_token_watermark", 24000))
+        self.max_summarize_tokens = mem_cfg.get("max_summarize_tokens", 6000)
+        self.max_summary_tokens = mem_cfg.get("max_summary_tokens", 8192)
         self.max_retries = 5
         self.retry_base_delay = 2.0
         
@@ -347,11 +350,31 @@ class TieredMemoryComponent(BaseComponent):
             
             total_tokens = self._count_tokens(agent.messages)
             last_tokens = total_tokens
+            last_prompt_tokens = int(
+                getattr(agent, "last_agent_turn_prompt_tokens", 0)
+                or (getattr(agent, "last_usage", None) or {}).get("prompt_tokens")
+                or 0
+            )
             
-            while total_tokens > self.high_watermark and len(agent.messages) > 1:
-                print(f"[Memory:{self.thread_id}] Context window exceeded ({total_tokens} tokens > {self.high_watermark}). Compressing...")
-                await self._compress_memory(agent)
+            while (
+                total_tokens > self.high_watermark
+                or (last_prompt_tokens > self.prompt_token_watermark and len(agent.messages) > 6)
+            ) and len(agent.messages) > 1:
+                print(
+                    f"[Memory:{self.thread_id}] Context window exceeded "
+                    f"(messages={total_tokens}/{self.high_watermark}, prompt_tokens={last_prompt_tokens}/{self.prompt_token_watermark}). Compressing..."
+                )
+                await self._compress_memory(agent, last_prompt_tokens=last_prompt_tokens)
                 total_tokens = self._count_tokens(agent.messages)
+                removed = max(0, last_tokens - total_tokens)
+                if last_prompt_tokens > 0:
+                    last_prompt_tokens = max(0, last_prompt_tokens - removed)
+                    if total_tokens <= self.high_watermark:
+                        last_prompt_tokens = 0
+                    if hasattr(agent, "last_agent_turn_prompt_tokens"):
+                        agent.last_agent_turn_prompt_tokens = last_prompt_tokens
+                    if isinstance(getattr(agent, "last_usage", None), dict) and "prompt_tokens" in agent.last_usage:
+                        agent.last_usage["prompt_tokens"] = last_prompt_tokens
                 
                 if total_tokens == last_tokens:
                     print(f"[Memory CRITICAL:{self.thread_id}] Compression did not reduce token count. Breaking to prevent infinite loop.")
@@ -482,12 +505,17 @@ class TieredMemoryComponent(BaseComponent):
         agent.messages.extend(messages_to_restore)
         print(f"[Memory:{self.thread_id}] Restored {len(messages_to_restore)} messages ({current_tokens} tokens).")
             
-    async def _compress_memory(self, agent: Any):
+    async def _compress_memory(self, agent: Any, last_prompt_tokens: int = 0):
         """Extracts older messages, asks the LLM to summarize them, and evicts them."""
         # Index 0 is System Prompt. 
         # We want to evict messages starting from index 1 until we drop below low_watermark.
         current_tokens = self._count_tokens(agent.messages)
         target_tokens_to_evict = current_tokens - self.low_watermark
+        if target_tokens_to_evict <= 0 and last_prompt_tokens > self.prompt_token_watermark:
+            target_tokens_to_evict = max(
+                last_prompt_tokens - self.prompt_token_watermark,
+                max(1, current_tokens // 3),
+            )
         
         if target_tokens_to_evict <= 0:
             return
@@ -594,16 +622,22 @@ class TieredMemoryComponent(BaseComponent):
             for attempt in range(self.max_retries):
                 try:
                     with span.subtimer("llm_call_ms"):
-                        response_stream = await agent.client.chat.completions.create(
-                            model=agent.model,
-                            messages=[{"role": "user", "content": prompt}],
-                            max_tokens=self.max_summary_tokens,
-                            extra_headers={"X-Agent-ID": f"{agent_name}-{thread_id}-memory"},
-                            stream=True,
-                            stream_options={"include_usage": True},
-                        )
+                        create_kwargs: Dict[str, Any] = {
+                            "model": agent.model,
+                            "messages": [{"role": "user", "content": prompt}],
+                            "max_tokens": self.max_summary_tokens,
+                            "extra_headers": {"X-Agent-ID": f"{agent_name}-{thread_id}-memory"},
+                            "stream": True,
+                            "stream_options": {"include_usage": True},
+                        }
+                        if getattr(agent, "provider", "openai") != "gemini":
+                            create_kwargs["extra_body"] = {"think": False}
+                        response_stream = await agent.client.chat.completions.create(**create_kwargs)
                         message = await agent._accumulate_stream(response_stream)
-                    candidate_summary = (message.content or "").strip()
+                    raw_summary = re.sub(r"<think>.*?</think>", "", message.content or "", flags=re.DOTALL).strip()
+                    if "<think>" in raw_summary:
+                        raw_summary = raw_summary.split("<think>", 1)[0].strip()
+                    candidate_summary = raw_summary
                     if not candidate_summary:
                         raise ValueError("Refusing to overwrite core_summary with an empty summary.")
                     new_summary = candidate_summary

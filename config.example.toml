@@ -37,7 +37,7 @@ api_base = ""                         # Falls back to [subconscious].api_url or 
 api_key = ""                          # Falls back to [subconscious].api_key or [llm].api_key if empty
 model = "gemma4:e2b"                  # Falls back to [subconscious].model_name or [llm].model_name if empty
 max_candidate_notes = 10
-max_briefing_tokens = 300
+max_briefing_tokens = 500
 max_note_chars = 2000
 compaction_tool_interval = 20
 compaction_min_interval_sec = 600.0
@@ -50,6 +50,7 @@ model_name = "unsloth/gemma-7b"
 # Context window token watermarks and compression limits
 high_watermark = 16000                # Trigger memory compression when working memory exceeds this token count
 low_watermark = 8000                  # Evict messages until working memory drops below this target
+prompt_token_watermark = 24000        # Trigger memory compression when provider-reported prompt_tokens exceeds this ceiling
 max_summarize_tokens = 6000           # Maximum token chunk size sent to the summarizer in a single step
 max_summary_tokens = 8192             # Maximum token length permitted for the persistent core summary
 db_path = "data/thunk/memory.db"      # SQLite database file for archival log, core summary, and compaction state (REQUIRED)

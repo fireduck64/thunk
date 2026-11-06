@@ -1,3 +1,4 @@
+import re
 from typing import Dict, Any
 from src.components.base import BaseComponent
 from src.utils.config import load_config
@@ -100,17 +101,23 @@ class CriticComponent(BaseComponent):
             span.inc("request_bytes", len(prompt.encode("utf-8")))
             try:
                 with span.subtimer("llm_call_ms"):
-                    response_stream = await self.agent.client.chat.completions.create(
-                        model=self.agent.model,
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=0.7,
-                        max_tokens=self.max_output_tokens,
-                        extra_headers={"X-Agent-ID": f"{agent_name}-{thread_id}-critic"},
-                        stream=True,
-                        stream_options={"include_usage": True},
-                    )
+                    create_kwargs: Dict[str, Any] = {
+                        "model": self.agent.model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": 0.7,
+                        "max_tokens": self.max_output_tokens,
+                        "extra_headers": {"X-Agent-ID": f"{agent_name}-{thread_id}-critic"},
+                        "stream": True,
+                        "stream_options": {"include_usage": True},
+                    }
+                    if getattr(self.agent, "provider", "openai") != "gemini":
+                        create_kwargs["extra_body"] = {"think": False}
+                    response_stream = await self.agent.client.chat.completions.create(**create_kwargs)
                     message = await self.agent._accumulate_stream(response_stream)
-                feeling = (message.content or "").strip()
+                raw_feeling = re.sub(r"<think>.*?</think>", "", message.content or "", flags=re.DOTALL).strip()
+                if "<think>" in raw_feeling:
+                    raw_feeling = raw_feeling.split("<think>", 1)[0].strip()
+                feeling = raw_feeling
                 usage = getattr(self.agent, "last_usage", None) or {}
                 if usage.get("prompt_tokens"):
                     span.set_counter("request_tokens", int(usage["prompt_tokens"]))
@@ -121,8 +128,9 @@ class CriticComponent(BaseComponent):
                 span.inc("response_tokens", usage.get("completion_tokens") or count_tokens(feeling, agent=self.agent))
                 span.inc("response_bytes", len(feeling.encode("utf-8")))
 
-                print(f"[Critic Feeling:{thread_id}]: {feeling}\n")
-                await self.agent.add_message("system", f"[Internal Feeling]: {feeling}")
+                if feeling and feeling.upper() not in ("PASS", "NONE"):
+                    print(f"[Critic Feeling:{thread_id}]: {feeling}\n")
+                    await self.agent.add_message("system", f"[Internal Feeling]: {feeling}")
             except Exception as e:
                 span.fail()
                 print(f"[Critic Error:{thread_id}] {e}")

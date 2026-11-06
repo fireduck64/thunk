@@ -1,8 +1,9 @@
 import inspect
 import json
+import os
 import re
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 import httpx
 from openai import AsyncOpenAI
 
@@ -14,7 +15,13 @@ from src.components.notes import (
     StructuredNotesComponent,
 )
 from src.utils.config import load_config
-from src.utils.metrics import MetricSpan, count_tokens, extract_chunk_usage, infer_exec_location
+from src.utils.metrics import (
+    MetricSpan,
+    count_tokens,
+    extract_chunk_usage,
+    infer_exec_location,
+    resolve_metrics_dir,
+)
 
 
 _FILING_JSON_FORMAT_APPENDIX = (
@@ -32,9 +39,10 @@ class ExecutiveAssistantComponent(BaseComponent):
     """
     Automated Chief of Staff / Filing Clerk component.
     Operates strictly in the background (exposing zero tools to the main agent):
-    1. Pre-Turn Briefing (before_llm_call): Uses a fast LLM selector pass over the note directory
-       to identify relevant 'assistant/*' and general notes, then injects a transient '[Assistant Briefing]'
-       block at the bottom of the prompt for entities/topics missing from active Layer-0 context.
+    1. Pre-Turn Briefing (before_llm_call): Uses a Two-Pass Query + FTS5 + Qdrant Fallback
+       pipeline to identify relevant 'assistant/*' dossiers, general notes, and semantic memories,
+       then injects a transient '[Assistant Briefing]' block at the bottom of the prompt for
+       entities/topics missing from active Layer-0 context.
     2. Background Filing Clerk (messages_evicted): Extracts net-new bullet points from messages
        evicted during TieredMemoryComponent compaction and appends them to 'assistant/*' dossiers.
     3. Background Note Compaction: Periodically condenses and deduplicates oversized 'assistant/*'
@@ -52,9 +60,12 @@ class ExecutiveAssistantComponent(BaseComponent):
         max_note_chars: Optional[int] = None,
         compaction_tool_interval: Optional[int] = None,
         compaction_min_interval_sec: Optional[float] = None,
+        qdrant_score_threshold: Optional[float] = None,
+        audit_log_path: Optional[str] = None,
         thread_id: str = "main",
         notes_comp: Optional[StructuredNotesComponent] = None,
         memory_comp: Optional[Any] = None,
+        vector_comp: Optional[Any] = None,
     ):
         self.config = load_config()
         self.agent_name = self.config.get("agent", {}).get("name", "Thunk")
@@ -108,7 +119,7 @@ class ExecutiveAssistantComponent(BaseComponent):
         self.max_briefing_tokens = int(
             max_briefing_tokens
             if max_briefing_tokens is not None
-            else ea_cfg.get("max_briefing_tokens", 300)
+            else ea_cfg.get("max_briefing_tokens", 500)
         )
         self.max_filing_tokens = int(ea_cfg.get("max_filing_tokens", 2048))
         self.max_note_chars = int(
@@ -126,6 +137,16 @@ class ExecutiveAssistantComponent(BaseComponent):
             if compaction_min_interval_sec is not None
             else ea_cfg.get("compaction_min_interval_sec", 600.0)
         )
+        self.qdrant_score_threshold = float(
+            qdrant_score_threshold
+            if qdrant_score_threshold is not None
+            else ea_cfg.get("qdrant_score_threshold", 0.72)
+        )
+        self.audit_log_path = (
+            audit_log_path
+            or ea_cfg.get("audit_log_path")
+            or os.path.join(resolve_metrics_dir(), "ea_briefings.jsonl")
+        )
 
         self.client = AsyncOpenAI(
             base_url=self.api_base,
@@ -138,12 +159,15 @@ class ExecutiveAssistantComponent(BaseComponent):
 
         self.notes_comp: Optional[StructuredNotesComponent] = notes_comp
         self.memory_comp: Optional[Any] = memory_comp
+        self.vector_comp: Optional[Any] = vector_comp
         self.last_usage: Optional[Dict[str, Any]] = None
         self._last_briefed_sig: Optional[Tuple[int, str]] = None
 
         self.tool_counter: int = 0
         self.last_compaction_ts: float = 0.0
         self.pending_note_compaction: bool = False
+        self._pending_audit_record: Optional[Dict[str, Any]] = None
+        self._pending_probe_tokens: Set[str] = set()
 
         if self.notes_comp is not None:
             self.notes_comp.ensure_seed_prompts()
@@ -172,6 +196,8 @@ class ExecutiveAssistantComponent(BaseComponent):
                 self.notes_comp = comp
             elif cname == "TieredMemoryComponent" and self.memory_comp is None:
                 self.memory_comp = comp
+            elif cname in ("VectorMemoryComponent", "SemanticMemoryComponent") and self.vector_comp is None:
+                self.vector_comp = comp
         if self.notes_comp is not None:
             self.notes_comp.ensure_seed_prompts()
 
@@ -203,12 +229,32 @@ class ExecutiveAssistantComponent(BaseComponent):
                 del messages[idx]
 
     @staticmethod
-    def _strip_code_fences(raw_text: str) -> str:
-        clean = (raw_text or "").strip()
+    def _strip_thinking_and_fences(raw_text: str) -> str:
+        clean = re.sub(r"<think>.*?</think>", "", raw_text or "", flags=re.DOTALL).strip()
+        if "<think>" in clean:
+            clean = clean.split("<think>", 1)[0].strip()
         if clean.startswith("```"):
             clean = re.sub(r"^```(?:[a-zA-Z0-9_-]+)?\s*", "", clean)
             clean = re.sub(r"\s*```$", "", clean)
         return clean.strip()
+
+    @classmethod
+    def _strip_code_fences(cls, raw_text: str) -> str:
+        return cls._strip_thinking_and_fences(raw_text)
+
+    def _write_audit_record(self, record: Dict[str, Any]) -> None:
+        if not self.audit_log_path:
+            return
+        try:
+            parent = os.path.dirname(os.path.abspath(self.audit_log_path))
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(self.audit_log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+        except OSError:
+            pass
+        except Exception as e:
+            print(f"[ExecutiveAssistant:{self.thread_id}] Warning writing audit log: {e}")
 
     async def _select_relevant_note_keys(
         self,
@@ -218,7 +264,7 @@ class ExecutiveAssistantComponent(BaseComponent):
     ) -> List[str]:
         """
         Uses a fast LLM selector pass over the compact directory of (key: summary) pairs
-        to choose up to self.max_candidate_notes relevant note keys.
+        to choose up to self.max_candidate_notes relevant note keys (used by compaction filing).
         """
         if not candidate_notes:
             return []
@@ -251,7 +297,7 @@ class ExecutiveAssistantComponent(BaseComponent):
             print(f"[ExecutiveAssistant:{self.thread_id}] Warning during note selection ({purpose}): {e}")
             return []
 
-        clean = self._strip_code_fences(raw_resp)
+        clean = self._strip_thinking_and_fences(raw_resp)
         if not clean or clean.upper() == "NONE":
             return []
 
@@ -271,6 +317,8 @@ class ExecutiveAssistantComponent(BaseComponent):
             val = parsed.get("keys")
             if isinstance(val, list):
                 raw_keys = val
+            elif isinstance(parsed.get("assistant_keys"), list):
+                raw_keys = parsed.get("assistant_keys")
         elif isinstance(parsed, list):
             raw_keys = parsed
 
@@ -299,6 +347,135 @@ class ExecutiveAssistantComponent(BaseComponent):
                     break
 
         return selected
+
+    async def _select_briefing_targets(
+        self,
+        incoming_event: str,
+        active_context_str: str,
+        assistant_notes: List[Dict[str, str]],
+        searchable_notes: Optional[List[Dict[str, str]]] = None,
+    ) -> Tuple[List[str], List[str]]:
+        """
+        Pass 1 of Pre-Turn Briefing: Gap Detection & Query Generation (~1k-2k prompt tokens).
+        Inspects Active Context, Incoming Event, and the compact 'assistant/*' dossier directory,
+        returning (selected_assistant_keys, search_queries).
+        """
+        directory_lines = [
+            f"- {n['key']}: {n.get('summary') or ''}" for n in assistant_notes
+        ]
+        directory_str = (
+            "\n".join(directory_lines)
+            if directory_lines
+            else "(No 'assistant/*' dossiers exist yet)"
+        )
+
+        system_prompt = (
+            "You are an indexing assistant. Given my Active Context (Core Summary + Recent Messages), "
+            "an Incoming Event, and a directory of available 'assistant/*' dossiers, identify people, "
+            "projects, terms, or history mentioned in the Incoming Event that are missing or under-explained "
+            "in my Active Context.\n"
+            "Return ONLY a JSON object with up to 5 relevant 'assistant/*' keys and up to 3 short keyword "
+            "search queries for general notes/memories:\n"
+            '{"assistant_keys": ["assistant/people/fireduck"], "queries": ["pinkcroc", "taravangian"]}\n'
+            'If nothing is missing from my active context, return: {"assistant_keys": [], "queries": []}'
+        )
+        user_prompt = (
+            f"### Active Context (Core Summary + Recent Messages)\n{active_context_str}\n\n"
+            f"### Incoming Event\n{incoming_event}\n\n"
+            f"### Available 'assistant/*' Dossiers\n{directory_str}\n"
+        )
+
+        try:
+            raw_resp = await self._call_llm(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=256,
+                span_type="assistant_note_select",
+            )
+        except Exception as e:
+            print(f"[ExecutiveAssistant:{self.thread_id}] Warning during briefing target selection: {e}")
+            return [], []
+
+        clean = self._strip_thinking_and_fences(raw_resp)
+        if not clean or clean.upper() == "NONE":
+            return [], []
+
+        parsed: Any = None
+        try:
+            parsed = json.loads(clean)
+        except Exception:
+            m = re.search(r"\{.*\}", clean, flags=re.DOTALL)
+            if m:
+                try:
+                    parsed = json.loads(m.group(0))
+                except Exception:
+                    parsed = None
+
+        assistant_lookup: Dict[str, str] = {}
+        for n in assistant_notes:
+            k = n["key"]
+            k_low = k.lower()
+            assistant_lookup[k_low] = k
+            if k_low.startswith("assistant/"):
+                assistant_lookup[k_low[len("assistant/"):]] = k
+
+        searchable_lookup: Dict[str, str] = {}
+        for n in searchable_notes or []:
+            k = n["key"]
+            searchable_lookup[k.lower()] = k
+
+        raw_asst_keys: List[Any] = []
+        raw_queries: List[Any] = []
+
+        if isinstance(parsed, dict):
+            if isinstance(parsed.get("assistant_keys"), list):
+                raw_asst_keys.extend(parsed["assistant_keys"])
+            if isinstance(parsed.get("queries"), list):
+                raw_queries.extend(parsed["queries"])
+            # Backward-compatible support for {"keys": [...]}
+            if isinstance(parsed.get("keys"), list):
+                for rk in parsed["keys"]:
+                    rk_str = str(rk or "").strip().lstrip("/")
+                    rk_low = rk_str.lower()
+                    if rk_low in assistant_lookup:
+                        raw_asst_keys.append(rk_str)
+                    elif rk_low in searchable_lookup:
+                        raw_asst_keys.append(searchable_lookup[rk_low])
+                    elif rk_str:
+                        raw_queries.append(rk_str)
+        elif isinstance(parsed, list):
+            for rk in parsed:
+                rk_str = str(rk or "").strip().lstrip("/")
+                if rk_str.lower() in assistant_lookup:
+                    raw_asst_keys.append(rk_str)
+                elif rk_str:
+                    raw_queries.append(rk_str)
+
+        selected_asst_keys: List[str] = []
+        seen_keys: Set[str] = set()
+        for rk in raw_asst_keys:
+            rk_clean = str(rk or "").strip().lstrip("/").lower()
+            if not rk_clean:
+                continue
+            canonical = assistant_lookup.get(rk_clean) or searchable_lookup.get(rk_clean)
+            if canonical and canonical not in seen_keys:
+                seen_keys.add(canonical)
+                selected_asst_keys.append(canonical)
+                if len(selected_asst_keys) >= 5:
+                    break
+
+        selected_queries: List[str] = []
+        seen_queries: Set[str] = set()
+        for rq in raw_queries:
+            q_clean = str(rq or "").strip()
+            q_low = q_clean.lower()
+            if q_clean and q_low not in seen_queries:
+                seen_queries.add(q_low)
+                selected_queries.append(q_clean)
+                if len(selected_queries) >= 3:
+                    break
+
+        return selected_asst_keys, selected_queries
 
     async def _call_llm(
         self,
@@ -336,6 +513,7 @@ class ExecutiveAssistantComponent(BaseComponent):
                     messages=messages,
                     temperature=0.2,
                     max_tokens=max_tokens,
+                    extra_body={"think": False},
                     stream=True,
                     stream_options={"include_usage": True},
                 )
@@ -345,7 +523,7 @@ class ExecutiveAssistantComponent(BaseComponent):
                 usage = None
                 if hasattr(resp, "__aiter__"):
                     async for chunk in resp:
-                        parsed_usage = extract_chunk_usage(chunk)
+                        parsed_usage = extract_chunk_usage(chunk, prev_usage=usage)
                         if parsed_usage is not None:
                             usage = parsed_usage
                         if (
@@ -363,6 +541,10 @@ class ExecutiveAssistantComponent(BaseComponent):
                 elif isinstance(resp, str):
                     content = resp
 
+            content = re.sub(r"<think>.*?</think>", "", content or "", flags=re.DOTALL).strip()
+            if "<think>" in content:
+                content = content.split("<think>", 1)[0].strip()
+
             self.last_usage = usage
             if usage:
                 if usage.get("prompt_tokens"):
@@ -376,7 +558,7 @@ class ExecutiveAssistantComponent(BaseComponent):
                 (usage or {}).get("completion_tokens") or count_tokens(content, agent=agent_obj),
             )
             span.inc("response_bytes", len((content or "").encode("utf-8")))
-            return (content or "").strip()
+            return content
 
     def _get_core_summary(self) -> str:
         if self.memory_comp is not None and hasattr(self.memory_comp, "_get_core_summary"):
@@ -403,7 +585,7 @@ class ExecutiveAssistantComponent(BaseComponent):
 
     @classmethod
     def _parse_filing_json(cls, raw_text: str) -> List[Dict[str, Any]]:
-        clean = cls._strip_code_fences(raw_text)
+        clean = cls._strip_thinking_and_fences(raw_text)
         if not clean or clean.upper() == "NONE":
             return []
 
@@ -417,6 +599,17 @@ class ExecutiveAssistantComponent(BaseComponent):
                     parsed = json.loads(m.group(0))
                 except Exception:
                     parsed = None
+            if parsed is None:
+                # Repair truncated trailing JSON array/object if cut off mid-stream
+                start_idx = clean.find("{")
+                if start_idx != -1:
+                    fragment = clean[start_idx:]
+                    for suffix in ("]}", '"]}', '"}]}', "}]}", "]"):
+                        try:
+                            parsed = json.loads(fragment + suffix)
+                            break
+                        except Exception:
+                            continue
 
         if isinstance(parsed, dict):
             updates = parsed.get("updates", [])
@@ -519,7 +712,7 @@ class ExecutiveAssistantComponent(BaseComponent):
             print(f"[ExecutiveAssistant:{self.thread_id}] Warning during note compaction pass: {e}")
             return None
 
-        compacted_content = self._strip_code_fences(raw_compacted)
+        compacted_content = self._strip_thinking_and_fences(raw_compacted)
         if (
             not compacted_content
             or compacted_content.upper() == "NONE"
@@ -582,6 +775,7 @@ class ExecutiveAssistantComponent(BaseComponent):
             if isinstance(m, dict)
             and not m.get("_transient_presence")
             and not m.get("_transient_briefing")
+            and not m.get("_transient_nudge")
         ]
         if not non_transient:
             return
@@ -611,20 +805,7 @@ class ExecutiveAssistantComponent(BaseComponent):
             if n["key"] != "sticky" and not n["key"].startswith("prompts/")
         ]
         assistant_notes = [n for n in all_notes if n["key"].startswith("assistant/")]
-        if not searchable_notes:
-            return
-
-        selected_keys = await self._select_relevant_note_keys(
-            context_text=incoming_event,
-            candidate_notes=searchable_notes,
-            purpose="briefing",
-        )
-        if not selected_keys:
-            return
-
-        notes_by_key = {n["key"]: n for n in searchable_notes}
-        candidates = [notes_by_key[k] for k in selected_keys if k in notes_by_key]
-        if not candidates:
+        if not searchable_notes and self.vector_comp is None:
             return
 
         prior_messages = [
@@ -633,6 +814,118 @@ class ExecutiveAssistantComponent(BaseComponent):
         core_summary = self._get_core_summary()
         recent_messages_str = self._format_recent_messages(prior_messages, max_messages=5)
         active_context_str = f"Core Summary:\n{core_summary}\n\nRecent Messages:\n{recent_messages_str}"
+
+        selected_assistant_keys, selected_queries = await self._select_briefing_targets(
+            incoming_event=incoming_event,
+            active_context_str=active_context_str,
+            assistant_notes=assistant_notes,
+            searchable_notes=searchable_notes,
+        )
+
+        fts5_hit_keys: List[str] = []
+        qdrant_hits: List[Dict[str, Any]] = []
+
+        audit_record: Dict[str, Any] = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "agent": getattr(agent, "name", None) or self.agent_name,
+            "thread": getattr(agent, "thread_id", None) or self.thread_id,
+            "incoming_event_preview": incoming_event[:200],
+            "assistant_keys": selected_assistant_keys,
+            "queries": selected_queries,
+            "fts5_hit_keys": fts5_hit_keys,
+            "qdrant_fallback_hits": [],
+            "briefing_injected": False,
+            "briefing_bytes": 0,
+            "briefing_preview": "",
+            "referenced_by_boss": None,
+        }
+
+        if not selected_assistant_keys and not selected_queries:
+            self._write_audit_record(audit_record)
+            return
+
+        notes_by_key = {n["key"]: n for n in searchable_notes}
+        candidates: List[Dict[str, str]] = []
+        seen_candidate_keys: Set[str] = set()
+
+        for ak in selected_assistant_keys:
+            if ak in notes_by_key and ak not in seen_candidate_keys:
+                seen_candidate_keys.add(ak)
+                candidates.append(notes_by_key[ak])
+
+        seen_qdrant_ids: Set[str] = set()
+        qdrant_blocks: List[str] = []
+
+        for q in selected_queries[:3]:
+            fts_hits: List[Dict[str, Any]] = []
+            if hasattr(self.notes_comp, "search_notes_structured"):
+                try:
+                    fts_hits = self.notes_comp.search_notes_structured(q, limit=3)
+                except Exception:
+                    fts_hits = []
+
+            for hit in fts_hits:
+                hk = hit.get("key")
+                if hk and hk not in fts5_hit_keys:
+                    fts5_hit_keys.append(hk)
+                if hk and hk not in seen_candidate_keys and len(candidates) < self.max_candidate_notes:
+                    seen_candidate_keys.add(hk)
+                    candidates.append(
+                        {
+                            "key": hk,
+                            "summary": hit.get("summary") or "",
+                            "content": hit.get("content") or "",
+                        }
+                    )
+
+            if (
+                len(fts_hits) < 2
+                and self.vector_comp is not None
+                and hasattr(self.vector_comp, "search_semantic_memory_raw")
+            ):
+                try:
+                    raw_vec = self.vector_comp.search_semantic_memory_raw(q, num_results=3)
+                    if inspect.isawaitable(raw_vec):
+                        raw_vec = await raw_vec
+                except Exception:
+                    raw_vec = []
+
+                for vhit in raw_vec or []:
+                    if not isinstance(vhit, dict):
+                        continue
+                    vscore = float(vhit.get("score") or 0.0)
+                    vid = str(vhit.get("id") or "")
+                    vcontent = str(vhit.get("content") or vhit.get("text") or "").strip()
+                    if vscore < self.qdrant_score_threshold or not vcontent:
+                        continue
+                    if vid and vid in seen_qdrant_ids:
+                        continue
+                    if vid:
+                        seen_qdrant_ids.add(vid)
+                    vmeta = vhit.get("metadata") or {}
+                    vts = str(vhit.get("timestamp") or vmeta.get("timestamp") or "unknown")
+                    qdrant_hits.append(
+                        {
+                            "id": vid,
+                            "score": vscore,
+                            "content": vcontent,
+                            "timestamp": vts,
+                            "query": q,
+                        }
+                    )
+                    qdrant_blocks.append(
+                        f"--- [Semantic Memory Fallback] (query='{q}', score={vscore:.2f}, saved={vts}) ---\n{vcontent}"
+                    )
+
+        audit_record["fts5_hit_keys"] = fts5_hit_keys
+        audit_record["qdrant_fallback_hits"] = [
+            {"id": h["id"], "score": round(h["score"], 3), "preview": h["content"][:120]}
+            for h in qdrant_hits
+        ]
+
+        if not candidates and not qdrant_blocks:
+            self._write_audit_record(audit_record)
+            return
 
         briefing_instructions = self._get_prompt(
             "prompts/assistant_briefing", DEFAULT_ASSISTANT_BRIEFING_PROMPT
@@ -643,6 +936,7 @@ class ExecutiveAssistantComponent(BaseComponent):
             cand_blocks.append(
                 f"--- Note: {c['key']} (Summary: {c['summary']}) ---\n{c['content']}"
             )
+        cand_blocks.extend(qdrant_blocks)
         candidates_section = "\n\n".join(cand_blocks)
 
         assistant_index_lines = [
@@ -670,10 +964,12 @@ class ExecutiveAssistantComponent(BaseComponent):
             )
         except Exception as e:
             print(f"[ExecutiveAssistant:{self.thread_id}] Warning during pre-turn briefing: {e}")
+            self._write_audit_record(audit_record)
             return
 
         cleaned = (response_text or "").strip()
         if not cleaned or cleaned.upper() == "NONE" or cleaned.upper().startswith("NONE\n"):
+            self._write_audit_record(audit_record)
             return
 
         if cleaned.startswith("[Assistant Briefing]"):
@@ -698,6 +994,21 @@ class ExecutiveAssistantComponent(BaseComponent):
             },
         )
 
+        probe_tokens: Set[str] = set()
+        for k in selected_assistant_keys + fts5_hit_keys:
+            for seg in re.split(r"[/_\-\s]+", k.lower()):
+                if len(seg) >= 3 and seg not in ("assistant", "people", "topics", "notes", "general"):
+                    probe_tokens.add(seg)
+        for q in selected_queries:
+            for tok in re.findall(r"[A-Za-z0-9_]{3,}", q.lower()):
+                probe_tokens.add(tok)
+
+        audit_record["briefing_injected"] = True
+        audit_record["briefing_bytes"] = len(briefing_block.encode("utf-8"))
+        audit_record["briefing_preview"] = briefing_block[:200]
+        self._pending_audit_record = audit_record
+        self._pending_probe_tokens = probe_tokens
+
         if agent is not None and hasattr(agent, "event_bus"):
             try:
                 await agent.event_bus.publish(
@@ -710,6 +1021,45 @@ class ExecutiveAssistantComponent(BaseComponent):
                 )
             except Exception:
                 pass
+
+    def _flush_pending_audit_on_after_llm(self, payload: Dict[str, Any]) -> None:
+        if self._pending_audit_record is None:
+            return
+        record = self._pending_audit_record
+        probe_tokens = self._pending_probe_tokens
+        self._pending_audit_record = None
+        self._pending_probe_tokens = set()
+
+        resp = payload.get("response")
+        agent = payload.get("agent") or getattr(self, "agent", None)
+        out_parts: List[str] = []
+
+        if resp is not None:
+            if isinstance(resp, dict):
+                if resp.get("content"):
+                    out_parts.append(str(resp["content"]))
+                if resp.get("tool_calls"):
+                    out_parts.append(str(resp["tool_calls"]))
+            else:
+                if getattr(resp, "content", None):
+                    out_parts.append(str(resp.content))
+                if getattr(resp, "tool_calls", None):
+                    out_parts.append(str(resp.tool_calls))
+        elif agent is not None and isinstance(getattr(agent, "messages", None), list):
+            for m in reversed(agent.messages):
+                if isinstance(m, dict) and m.get("role") == "assistant":
+                    if m.get("content"):
+                        out_parts.append(str(m["content"]))
+                    if m.get("tool_calls"):
+                        out_parts.append(str(m["tool_calls"]))
+                    break
+
+        assistant_output_lower = "\n".join(out_parts).lower()
+        record["referenced_by_boss"] = bool(
+            probe_tokens
+            and any(tok.lower() in assistant_output_lower for tok in probe_tokens if len(tok) >= 3)
+        )
+        self._write_audit_record(record)
 
     async def _handle_messages_evicted(self, payload: Dict[str, Any]) -> List[str]:
         agent = payload.get("agent") or getattr(self, "agent", None)
@@ -849,5 +1199,6 @@ class ExecutiveAssistantComponent(BaseComponent):
             messages = payload.get("messages")
             if isinstance(messages, list):
                 self._strip_transient_briefing(messages)
+            self._flush_pending_audit_on_after_llm(payload)
         elif event_name == "messages_evicted":
             await self._handle_messages_evicted(payload)

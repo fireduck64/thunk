@@ -74,6 +74,7 @@ class MemoryGardenerComponent(BaseComponent):
         self.tool_counter = 0
         self.last_run_ts = 0.0
         self.pending_garden = False
+        self._qdrant_scroll_offset: Optional[Any] = None
 
     def _discover_components(self) -> None:
         agent_obj = getattr(self, "agent", None)
@@ -108,30 +109,95 @@ class MemoryGardenerComponent(BaseComponent):
                     print(f"[MemoryGardener:{self.thread_id}] Warning during gardening pass: {e}")
 
     def _select_candidate(self, now_ts: int) -> Optional[Any]:
-        if not self.spreading_comp or not self.spreading_comp.layer_1_pool:
+        stale_cutoff = now_ts - 86400
+        if self.spreading_comp and getattr(self.spreading_comp, "layer_1_pool", None):
+            pool_items = list(self.spreading_comp.layer_1_pool.values())
+            ungroomed = [
+                item for item in pool_items if int(getattr(item, "groomed_at", 0) or 0) == 0
+            ]
+            if ungroomed:
+                ungroomed.sort(
+                    key=lambda item: (item.priority, item.last_similarity),
+                    reverse=True,
+                )
+                return ungroomed[0]
+
+            stale = [
+                item
+                for item in pool_items
+                if int(getattr(item, "groomed_at", 0) or 0) < stale_cutoff
+            ]
+            if stale:
+                stale.sort(key=lambda item: int(getattr(item, "groomed_at", 0) or 0))
+                return stale[0]
+
+        return self._select_candidate_from_qdrant_scroll(now_ts)
+
+    def _select_candidate_from_qdrant_scroll(self, now_ts: int) -> Optional[Any]:
+        if not self.vector_comp:
+            return None
+        client = getattr(self.vector_comp, "_client", None)
+        if client is None or not hasattr(client, "scroll"):
             return None
 
-        pool_items = list(self.spreading_comp.layer_1_pool.values())
-        ungroomed = [
-            item for item in pool_items if int(getattr(item, "groomed_at", 0) or 0) == 0
-        ]
-        if ungroomed:
-            ungroomed.sort(
-                key=lambda item: (item.priority, item.last_similarity),
-                reverse=True,
-            )
-            return ungroomed[0]
-
+        collection_name = getattr(self.vector_comp, "collection_name", None) or getattr(
+            self.vector_comp, "collection", "agent_memory"
+        )
         stale_cutoff = now_ts - 86400
-        stale = [
-            item
-            for item in pool_items
-            if int(getattr(item, "groomed_at", 0) or 0) < stale_cutoff
-        ]
-        if stale:
-            stale.sort(key=lambda item: int(getattr(item, "groomed_at", 0) or 0))
-            return stale[0]
+        try:
+            scroll_res = client.scroll(
+                collection_name=collection_name,
+                offset=self._qdrant_scroll_offset,
+                limit=10,
+                with_payload=True,
+                with_vectors=False,
+            )
+            if isinstance(scroll_res, tuple) and len(scroll_res) == 2:
+                points, next_offset = scroll_res
+            else:
+                points, next_offset = (scroll_res or []), None
+            self._qdrant_scroll_offset = next_offset
+        except Exception:
+            self._qdrant_scroll_offset = None
+            return None
+
+        from src.components.spreading_activation import Layer1Item
+
+        for pt in points or []:
+            payload = dict(getattr(pt, "payload", None) or {})
+            groomed_at = int(payload.get("groomed_at", 0) or 0)
+            if groomed_at == 0 or groomed_at < stale_cutoff:
+                content = str(payload.get("text") or payload.get("content") or "").strip()
+                if not content:
+                    continue
+                return Layer1Item(
+                    id=str(pt.id),
+                    content=content,
+                    metadata=payload,
+                    hits=1,
+                    age=0,
+                    last_similarity=0.0,
+                    groomed_at=groomed_at,
+                )
         return None
+
+    def _stamp_qdrant_groomed_at(self, point_id: str, now_ts: int) -> None:
+        if not self.vector_comp:
+            return
+        client = getattr(self.vector_comp, "_client", None)
+        if client is None or not hasattr(client, "set_payload"):
+            return
+        collection_name = getattr(self.vector_comp, "collection_name", None) or getattr(
+            self.vector_comp, "collection", "agent_memory"
+        )
+        try:
+            client.set_payload(
+                collection_name=collection_name,
+                payload={"groomed_at": int(now_ts)},
+                points=[str(point_id)],
+            )
+        except Exception:
+            pass
 
     def _collapse_in_layer1(
         self,
@@ -141,6 +207,10 @@ class MemoryGardenerComponent(BaseComponent):
         now_ts: int,
         fast_path: bool = False,
     ) -> None:
+        if not self.spreading_comp:
+            target.content = merged_content
+            target.groomed_at = now_ts
+            return
         pool = self.spreading_comp.layer_1_pool
         absorbed_set = {str(aid) for aid in absorbed_ids if str(aid) != str(target.id)}
 
@@ -185,7 +255,9 @@ class MemoryGardenerComponent(BaseComponent):
 
     @staticmethod
     def _parse_merge_json(raw_text: str) -> Dict[str, Any]:
-        clean = (raw_text or "").strip()
+        clean = re.sub(r"<think>.*?</think>", "", raw_text or "", flags=re.DOTALL).strip()
+        if "<think>" in clean:
+            clean = clean.split("<think>", 1)[0].strip()
         if clean.startswith("```"):
             clean = re.sub(r"^```(?:json)?\s*", "", clean)
             clean = re.sub(r"\s*```$", "", clean)
@@ -232,13 +304,14 @@ class MemoryGardenerComponent(BaseComponent):
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.2,
                 max_tokens=self.max_output_tokens,
+                extra_body={"think": False},
                 stream=True,
                 stream_options={"include_usage": True},
             )
             resp_text = ""
             usage = None
             async for chunk in stream:
-                parsed_usage = extract_chunk_usage(chunk)
+                parsed_usage = extract_chunk_usage(chunk, prev_usage=usage)
                 if parsed_usage is not None:
                     usage = parsed_usage
                 if (
@@ -247,6 +320,10 @@ class MemoryGardenerComponent(BaseComponent):
                     and chunk.choices[0].delta.content
                 ):
                     resp_text += chunk.choices[0].delta.content
+
+        resp_text = re.sub(r"<think>.*?</think>", "", resp_text or "", flags=re.DOTALL).strip()
+        if "<think>" in resp_text:
+            resp_text = resp_text.split("<think>", 1)[0].strip()
 
         if usage:
             if usage.get("prompt_tokens"):
@@ -262,7 +339,7 @@ class MemoryGardenerComponent(BaseComponent):
     async def run_gardening_pass(self) -> Dict[str, Any]:
         """Executes a single Layer-1-driven semantic deduplication pass (Daemon 1: Clutter Merger)."""
         self._discover_components()
-        if not self.spreading_comp or not self.vector_comp:
+        if not self.vector_comp:
             return {"status": "skipped_missing_components"}
 
         now_ts = int(time.time())
@@ -288,12 +365,13 @@ class MemoryGardenerComponent(BaseComponent):
 
             if not neighbors:
                 target.groomed_at = now_ts
-                if getattr(self.spreading_comp, "persist", False):
+                self._stamp_qdrant_groomed_at(target.id, now_ts)
+                if self.spreading_comp and getattr(self.spreading_comp, "persist", False):
                     self.spreading_comp._save_pool_to_db()
                 return {"status": "clean", "target_id": target.id}
 
             fast_neighbors = [
-                n for n in neighbors if float(n.get("score", 0.0)) >= 0.95
+                n for n in neighbors if float(n.get("score", 0.0)) >= 0.985
             ]
             if fast_neighbors:
                 candidates = [(len(target.content or ""), target.content)] + [
@@ -305,10 +383,14 @@ class MemoryGardenerComponent(BaseComponent):
                 redundant_ids = [str(n["id"]) for n in fast_neighbors]
 
                 with span.subtimer("db_save_ms"):
+                    updated_meta = dict(target.metadata or {})
+                    updated_meta["groomed_at"] = now_ts
                     if best_content != target.content:
                         self.vector_comp.upsert_point(
-                            target.id, best_content, target.metadata
+                            target.id, best_content, updated_meta
                         )
+                    else:
+                        self._stamp_qdrant_groomed_at(target.id, now_ts)
                     self.vector_comp.delete_points(redundant_ids)
                     self._collapse_in_layer1(
                         target,
@@ -325,14 +407,26 @@ class MemoryGardenerComponent(BaseComponent):
                     "deleted_ids": redundant_ids,
                 }
 
-            # LLM Synthesis Path (0.88 <= sim < 0.95)
+            # LLM Synthesis Path (0.88 <= sim < 0.985)
             decision = await self._ask_llm_to_merge(target, neighbors, span)
             merged_content = str(decision.get("merged_content") or "").strip()
-            if decision.get("should_merge") and merged_content:
+            cluster_lengths = [len(target.content or "")] + [
+                len(n.get("content") or "") for n in neighbors if n.get("content")
+            ]
+            min_cluster_len = min(cluster_lengths) if cluster_lengths else 0
+            min_required_len = int(0.5 * min_cluster_len)
+
+            if (
+                decision.get("should_merge")
+                and merged_content
+                and len(merged_content) >= min_required_len
+            ):
                 neighbor_ids = [str(n["id"]) for n in neighbors]
                 with span.subtimer("db_save_ms"):
+                    updated_meta = dict(target.metadata or {})
+                    updated_meta["groomed_at"] = now_ts
                     self.vector_comp.upsert_point(
-                        target.id, merged_content, target.metadata
+                        target.id, merged_content, updated_meta
                     )
                     self.vector_comp.delete_points(neighbor_ids)
                     self._collapse_in_layer1(
@@ -351,6 +445,7 @@ class MemoryGardenerComponent(BaseComponent):
                 }
 
             target.groomed_at = now_ts
-            if getattr(self.spreading_comp, "persist", False):
+            self._stamp_qdrant_groomed_at(target.id, now_ts)
+            if self.spreading_comp and getattr(self.spreading_comp, "persist", False):
                 self.spreading_comp._save_pool_to_db()
             return {"status": "kept_separate", "target_id": target.id}

@@ -201,9 +201,9 @@ class VectorMemoryComponent(BaseComponent):
                                             collection_name=self.collection,
                                             query_vector=vector,
                                             limit=1,
-                                            score_threshold=0.95,
+                                            score_threshold=0.985,
                                         )
-                                        if existing and float(existing[0].score) >= 0.95:
+                                        if existing and float(existing[0].score) >= 0.985:
                                             point_id = str(existing[0].id)
                                     except Exception:
                                         pass
@@ -276,7 +276,8 @@ class VectorMemoryComponent(BaseComponent):
                 hits.append(
                     {
                         "id": str(hit.id),
-                        "content": payload.get("text", ""),
+                        "content": payload.get("text") or payload.get("content") or "",
+                        "timestamp": payload.get("timestamp", ""),
                         "metadata": payload,
                         "score": float(hit.score),
                     }

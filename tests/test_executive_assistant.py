@@ -553,3 +553,127 @@ async def test_agent_startup_message_format_and_assistant_skip(tmp_path):
     await assistant.on_event("before_llm_call", {"agent": local_agent, "messages": messages})
     assert called["count"] == 0
     assert len(messages) == 2
+
+
+@pytest.mark.asyncio
+async def test_two_pass_query_fts5_qdrant_fallback_and_audit_log(tmp_path):
+    """
+    8. Verifies WP1.1, WP1.2, and WP1.3:
+    - _call_llm passes extra_body={'think': False} and strips <think>...</think>.
+    - Pass 1 outputs {'assistant_keys': [...], 'queries': [...]} -> searches FTS5 via search_notes_structured
+      -> falls back to VectorMemoryComponent.search_semantic_memory_raw when FTS5 hits < 2 -> Pass 2 injects briefing.
+    - Writes audit records to ea_briefings.jsonl and updates referenced_by_boss on after_llm_call.
+    """
+    notes_db = str(tmp_path / "notes_hybrid.db")
+    audit_path = str(tmp_path / "ea_briefings.jsonl")
+    notes = StructuredNotesComponent(db_path=notes_db)
+    notes.assistant_put_note(
+        "assistant/people/fireduck",
+        "Fireduck: System operator.",
+        "Fireduck is the operator running the local Ollama and Qdrant cluster.",
+    )
+    notes.put_note(
+        "projects/pinkcroc",
+        "The Pink Crocodile protocol is an inside joke from Chapter 7.",
+    )
+
+    class DummyVectorMemory:
+        def search_semantic_memory_raw(self, query: str, num_results: int = 3):
+            if "taravangian" in query.lower():
+                return [
+                    {
+                        "id": "vec_tara_1",
+                        "score": 0.89,
+                        "content": "Operation Taravangian is our joint memory and assistant architecture audit.",
+                        "timestamp": "2026-11-05T12:00:00Z",
+                    },
+                    {
+                        "id": "vec_low_score",
+                        "score": 0.55,
+                        "content": "Tangential low-score vector hit that should be filtered out.",
+                        "timestamp": "2026-11-01T00:00:00Z",
+                    },
+                ]
+            return []
+
+    agent = AgentCore(thread_id="social")
+    assistant = ExecutiveAssistantComponent(
+        enabled=True,
+        thread_id="social",
+        audit_log_path=audit_path,
+        notes_comp=notes,
+        vector_comp=DummyVectorMemory(),
+    )
+    agent.register_component(notes)
+    agent.register_component(assistant)
+    await agent.event_bus.publish("agent_started", {"agent": agent})
+
+    captured_calls = []
+
+    async def mock_create(**kwargs):
+        captured_calls.append(kwargs)
+        assert kwargs.get("extra_body") == {"think": False}
+        sys_msg = kwargs["messages"][0]["content"]
+        if "indexing assistant" in sys_msg:
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content='<think>internal thought</think>{"assistant_keys": ["assistant/people/fireduck"], "queries": ["pinkcroc", "taravangian"]}'
+                        )
+                    )
+                ]
+            )
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="<think>drafting</think>- Fireduck is the operator; Pink Crocodile is from Ch 7; Operation Taravangian is the joint memory audit."
+                    )
+                )
+            ]
+        )
+
+    assistant.client.chat.completions.create = mock_create
+
+    agent.messages = [
+        {"role": "system", "content": "Sys"},
+        {"role": "user", "content": "Fireduck asked how pinkcroc and taravangian are progressing."},
+    ]
+    await agent.event_bus.publish("before_llm_call", {"agent": agent, "messages": agent.messages})
+
+    assert len(captured_calls) == 2
+    # Verify Pass 2 received the FTS5 note ('projects/pinkcroc') AND the Qdrant fallback ('vec_tara_1'), excluding the low-score hit
+    pass2_user_prompt = captured_calls[1]["messages"][1]["content"]
+    assert "projects/pinkcroc" in pass2_user_prompt
+    assert "[Semantic Memory Fallback]" in pass2_user_prompt
+    assert "Operation Taravangian is our joint memory" in pass2_user_prompt
+    assert "Tangential low-score" not in pass2_user_prompt
+
+    # Verify <think> was stripped and briefing injected
+    assert agent.messages[-1].get("_transient_briefing") is True
+    assert "<think>" not in agent.messages[-1]["content"]
+    assert "Operation Taravangian" in agent.messages[-1]["content"]
+
+    # Trigger after_llm_call with a Boss response that references 'taravangian' -> flushes audit record with referenced_by_boss=True
+    await agent.event_bus.publish(
+        "after_llm_call",
+        {
+            "agent": agent,
+            "messages": agent.messages,
+            "response": {"content": "We are wrapping up Operation Taravangian right now!"},
+        },
+    )
+
+    with open(audit_path, "r", encoding="utf-8") as f:
+        records = [json.loads(line) for line in f if line.strip()]
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["assistant_keys"] == ["assistant/people/fireduck"]
+    assert rec["queries"] == ["pinkcroc", "taravangian"]
+    assert "projects/pinkcroc" in rec["fts5_hit_keys"]
+    assert len(rec["qdrant_fallback_hits"]) == 1
+    assert rec["qdrant_fallback_hits"][0]["id"] == "vec_tara_1"
+    assert rec["briefing_injected"] is True
+    assert rec["briefing_bytes"] > 0
+    assert rec["referenced_by_boss"] is True
