@@ -202,34 +202,44 @@ async def test_gemini_provider_adapter_streaming_and_thought_signatures():
 
     captured_calls = []
 
-    class DummyUsageMeta:
+    class PrelimUsageMeta:
+        prompt_token_count = 300
+        candidates_token_count = 12
+        cached_content_token_count = None
+        thoughts_token_count = 112
+
+    class FinalUsageMeta:
         prompt_token_count = 321
         candidates_token_count = 45
         cached_content_token_count = 280
-        thoughts_token_count = 112
+        thoughts_token_count = None
 
     sig_part = types.Part(
         function_call=types.FunctionCall(name="read_file", args={"library": "ebook", "filepath": "MrDarcy.epub"}),
         thought_signature=b"secret_thought_sig_bytes",
     )
     text_part = types.Part.from_text(text="Let me open Pride and Prejudice.")
+    empty_final_part = types.Part.from_text(text="")
 
     class DummyGemChunk:
-        def __init__(self, parts):
+        def __init__(self, parts, usage_meta):
             self.candidates = [
                 types.Candidate(
                     content=types.Content(role="model", parts=parts),
                     finish_reason=types.FinishReason.STOP,
                 )
             ]
-            self.usage_metadata = DummyUsageMeta()
+            self.usage_metadata = usage_meta
 
     class DummyAioModels:
         async def generate_content_stream(self, model, contents, config):
             captured_calls.append((model, contents, config))
 
             async def _gen():
-                yield DummyGemChunk([text_part, sig_part])
+                # Chunk 1: content + tool call with preliminary usage (cached_content_token_count=None)
+                yield DummyGemChunk([text_part, sig_part], PrelimUsageMeta())
+                # Chunk 2: trailing Part(text="") summary chunk carrying cached_content_token_count=280
+                yield DummyGemChunk([empty_final_part], FinalUsageMeta())
 
             return _gen()
 

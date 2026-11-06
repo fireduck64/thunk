@@ -93,14 +93,14 @@ def infer_exec_location(api_url: Optional[str] = None, default: str = "local") -
     return default
 
 
-def extract_chunk_usage(chunk: Any) -> Optional[Dict[str, int]]:
+def extract_chunk_usage(chunk: Any, prev_usage: Optional[Dict[str, int]] = None) -> Optional[Dict[str, int]]:
     """
     Extracts token usage (prompt_tokens, completion_tokens, cached_tokens, thinking_tokens)
-    from an OpenAI/Ollama or Gemini streaming chunk if present.
+    from an OpenAI/Ollama or Gemini streaming chunk if present, merging with prev_usage if provided.
     """
     chunk_usage = getattr(chunk, "usage", None)
     if chunk_usage is None:
-        return None
+        return prev_usage
     p_tok = getattr(chunk_usage, "prompt_tokens", None)
     c_tok = getattr(chunk_usage, "completion_tokens", None)
     cached_tok = getattr(chunk_usage, "cached_tokens", None)
@@ -118,16 +118,17 @@ def extract_chunk_usage(chunk: Any) -> Optional[Dict[str, int]]:
             cached_tok = getattr(details, "cached_tokens", None)
 
     if p_tok is None and c_tok is None and cached_tok is None and thought_tok is None:
-        return None
+        return prev_usage
 
+    prev = prev_usage or {}
     out: Dict[str, int] = {
-        "prompt_tokens": int(p_tok or 0),
-        "completion_tokens": int(c_tok or 0),
+        "prompt_tokens": max(int(p_tok or 0), int(prev.get("prompt_tokens", 0))),
+        "completion_tokens": max(int(c_tok or 0), int(prev.get("completion_tokens", 0))),
     }
-    if cached_tok is not None:
-        out["cached_tokens"] = int(cached_tok)
-    if thought_tok is not None:
-        out["thinking_tokens"] = int(thought_tok)
+    if cached_tok is not None or "cached_tokens" in prev:
+        out["cached_tokens"] = max(int(cached_tok or 0), int(prev.get("cached_tokens", 0)))
+    if thought_tok is not None or "thinking_tokens" in prev:
+        out["thinking_tokens"] = max(int(thought_tok or 0), int(prev.get("thinking_tokens", 0)))
     return out
 
 

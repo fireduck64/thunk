@@ -337,6 +337,7 @@ class GeminiOpenAIClientAdapter:
         tc_index = 0
         saw_tool_call = False
         last_finish_reason = "stop"
+        accumulated_usage: Optional[Dict[str, int]] = None
 
         async for chunk in response_stream:
             usage_dict = None
@@ -347,14 +348,17 @@ class GeminiOpenAIClientAdapter:
                 cached_tok = getattr(usage_meta, "cached_content_token_count", None)
                 thought_tok = getattr(usage_meta, "thoughts_token_count", None)
                 if p_tok is not None or c_tok is not None or cached_tok is not None or thought_tok is not None:
+                    prev = accumulated_usage or {}
                     usage_dict = {
-                        "prompt_tokens": int(p_tok or 0),
-                        "completion_tokens": int(c_tok or 0),
+                        "prompt_tokens": max(int(p_tok or 0), int(prev.get("prompt_tokens", 0))),
+                        "completion_tokens": max(int(c_tok or 0), int(prev.get("completion_tokens", 0))),
+                        "cached_tokens": max(int(cached_tok or 0), int(prev.get("cached_tokens", 0))),
                     }
-                    if cached_tok is not None:
-                        usage_dict["cached_tokens"] = int(cached_tok)
-                    if thought_tok is not None:
-                        usage_dict["thinking_tokens"] = int(thought_tok)
+                    if thought_tok is not None or "thinking_tokens" in prev:
+                        usage_dict["thinking_tokens"] = max(
+                            int(thought_tok or 0), int(prev.get("thinking_tokens", 0))
+                        )
+                    accumulated_usage = dict(usage_dict)
 
             candidates = getattr(chunk, "candidates", None) or []
             if not candidates:
@@ -373,6 +377,7 @@ class GeminiOpenAIClientAdapter:
 
             content_obj = getattr(cand, "content", None)
             parts = getattr(content_obj, "parts", None) or []
+            yielded_in_chunk = False
 
             for part in parts:
                 if getattr(part, "thought", False) and not getattr(part, "function_call", None):
@@ -407,6 +412,7 @@ class GeminiOpenAIClientAdapter:
                         ],
                     )
                     tc_index += 1
+                    yielded_in_chunk = True
                     yield _StreamChunk(
                         choices=[_StreamChoice(delta=delta, finish_reason=None)],
                         usage=usage_dict,
@@ -416,16 +422,17 @@ class GeminiOpenAIClientAdapter:
                 part_text = getattr(part, "text", None)
                 if part_text:
                     delta = _StreamDelta(content=str(part_text), tool_calls=None)
+                    yielded_in_chunk = True
                     yield _StreamChunk(
                         choices=[_StreamChoice(delta=delta, finish_reason=None)],
                         usage=usage_dict,
                     )
 
-            if usage_dict is not None and not parts:
+            if usage_dict is not None and not yielded_in_chunk:
                 yield _StreamChunk(choices=[], usage=usage_dict)
 
         final_reason = "tool_calls" if (saw_tool_call and last_finish_reason != "length") else last_finish_reason
         yield _StreamChunk(
             choices=[_StreamChoice(delta=_StreamDelta(), finish_reason=final_reason)],
-            usage=None,
+            usage=accumulated_usage,
         )

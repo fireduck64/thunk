@@ -363,7 +363,7 @@ class AgentCore:
         usage_dict = None
         
         async for chunk in stream:
-            parsed_usage = extract_chunk_usage(chunk)
+            parsed_usage = extract_chunk_usage(chunk, prev_usage=usage_dict)
             if parsed_usage is not None:
                 usage_dict = parsed_usage
 
