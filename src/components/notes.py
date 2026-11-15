@@ -1,4 +1,4 @@
-from typing import List, Callable, Dict, Any, Optional, Tuple
+from typing import List, Callable, Dict, Any, Optional, Set, Tuple
 import os
 import re
 import sqlite3
@@ -12,13 +12,35 @@ ASSISTANT_GUARD_ERROR = (
     "'prompts/assistant_filing', or 'prompts/assistant_compaction'."
 )
 
+_LEGACY_ASSISTANT_BRIEFING_PROMPTS: Set[str] = {
+    (
+        "You are my Executive Assistant preparing a quick briefing before I respond.\n"
+        "Compare the Incoming Event against my Active Context (Core Summary + Recent Messages).\n"
+        "1. ONLY brief me on people, terms, projects, or history that are referenced in the Incoming Event but MISSING from my Active Context.\n"
+        "2. Do NOT repeat things I am already actively discussing.\n"
+        "3. Pull relevant details from 'assistant/*' dossiers and my general notes (who the speaker is, open promises, inside jokes, or factual anchors).\n"
+        "4. Keep it under 4 bullet points. If nothing is missing from my active context, output exactly: NONE"
+    ),
+}
+
+_LEGACY_ASSISTANT_COMPACTION_PROMPTS: Set[str] = {
+    (
+        "You are my Executive Assistant performing background housekeeping on an oversized 'assistant/*' reference dossier.\n"
+        "The note below has accumulated many appended bullet points over time.\n"
+        "1. Consolidate and deduplicate overlapping bullets into a clean, well-organized markdown dossier.\n"
+        "2. Preserve ALL specific names, dates, technical details, biographical facts, inside jokes, and unresolved promises.\n"
+        "3. Remove only redundant phrasing or obsolete transient noise.\n"
+        "4. Output ONLY the compacted markdown content for the note (do not wrap in JSON or code fences)."
+    ),
+}
+
 DEFAULT_ASSISTANT_BRIEFING_PROMPT = (
     "You are my Executive Assistant preparing a quick briefing before I respond.\n"
-    "Compare the Incoming Event against my Active Context (Core Summary + Recent Messages).\n"
-    "1. ONLY brief me on people, terms, projects, or history that are referenced in the Incoming Event but MISSING from my Active Context.\n"
-    "2. Do NOT repeat things I am already actively discussing.\n"
-    "3. Pull relevant details from 'assistant/*' dossiers and my general notes (who the speaker is, open promises, inside jokes, or factual anchors).\n"
-    "4. Keep it under 4 bullet points. If nothing is missing from my active context, output exactly: NONE"
+    "Compare the Incoming Event against my Active Context (Core Summary + Recent Messages) and any Recently Delivered Briefings.\n"
+    "1. ONLY brief me on people, terms, projects, or history that are referenced in the Incoming Event AND missing from both my Active Context and Recently Delivered Briefings.\n"
+    "2. Do NOT repeat or paraphrase facts I am already actively discussing or that you already briefed me on in the last few turns.\n"
+    "3. Pull relevant details from '### Candidate Notes' (who the speaker is, open promises, inside jokes, or factual anchors).\n"
+    "4. Keep it under 4 bullet points. If nothing genuinely new is missing from my active context, output ONLY the single word: NONE"
 )
 
 DEFAULT_ASSISTANT_FILING_PROMPT = (
@@ -31,17 +53,22 @@ DEFAULT_ASSISTANT_FILING_PROMPT = (
 
 DEFAULT_ASSISTANT_COMPACTION_PROMPT = (
     "You are my Executive Assistant performing background housekeeping on an oversized 'assistant/*' reference dossier.\n"
-    "The note below has accumulated many appended bullet points over time.\n"
-    "1. Consolidate and deduplicate overlapping bullets into a clean, well-organized markdown dossier.\n"
-    "2. Preserve ALL specific names, dates, technical details, biographical facts, inside jokes, and unresolved promises.\n"
-    "3. Remove only redundant phrasing or obsolete transient noise.\n"
-    "4. Output ONLY the compacted markdown content for the note (do not wrap in JSON or code fences)."
+    "The note below has exceeded its size budget and accumulated appended bullet points over time.\n"
+    "1. Aggressively condense, merge, and deduplicate overlapping bullets into a tight, high-signal markdown dossier within the target character budget.\n"
+    "2. Preserve durable facts: key identities, standing operator directives, active project state, inside jokes, and unresolved promises.\n"
+    "3. Drop superseded status updates, resolved temporary blockers, repetitive commit/audit logs, and transient noise.\n"
+    "4. Output ONLY the finished compacted markdown content (do not wrap in JSON or code fences), and ensure the final bullet ends with a complete sentence."
 )
 
 DEFAULT_SEED_PROMPTS: Dict[str, str] = {
     "prompts/assistant_briefing": DEFAULT_ASSISTANT_BRIEFING_PROMPT,
     "prompts/assistant_filing": DEFAULT_ASSISTANT_FILING_PROMPT,
     "prompts/assistant_compaction": DEFAULT_ASSISTANT_COMPACTION_PROMPT,
+}
+
+_LEGACY_SEED_PROMPTS: Dict[str, Set[str]] = {
+    "prompts/assistant_briefing": _LEGACY_ASSISTANT_BRIEFING_PROMPTS,
+    "prompts/assistant_compaction": _LEGACY_ASSISTANT_COMPACTION_PROMPTS,
 }
 
 
@@ -122,13 +149,18 @@ class StructuredNotesComponent(BaseComponent):
         return ""
 
     def ensure_seed_prompts(self) -> None:
-        """Seeds default prompts under 'prompts/*' if they do not already exist."""
+        """Seeds default prompts under 'prompts/*' if missing or still set to a legacy factory default."""
         conn = self._connect_db()
         try:
             with conn:
                 for key, default_val in DEFAULT_SEED_PROMPTS.items():
                     row = conn.execute("SELECT value FROM notes WHERE key = ?", (key,)).fetchone()
-                    if row is None or not str(row[0] or "").strip():
+                    existing_val = str(row[0] or "").strip() if row is not None else ""
+                    if (
+                        row is None
+                        or not existing_val
+                        or existing_val in _LEGACY_SEED_PROMPTS.get(key, set())
+                    ):
                         summary = self._derive_summary(default_val)
                         conn.execute(
                             "INSERT INTO notes (key, value, summary) VALUES (?, ?, ?) "

@@ -678,3 +678,298 @@ async def test_two_pass_query_fts5_qdrant_fallback_and_audit_log(tmp_path):
     assert rec["briefing_injected"] is True
     assert rec["briefing_bytes"] > 0
     assert rec["referenced_by_boss"] is True
+
+
+def test_legacy_prompt_upgrade_preserves_custom_prompts(tmp_path):
+    """
+    9. Verifies ensure_seed_prompts upgrades unmodified legacy factory prompts in-place
+    while leaving agent-customized prompts untouched.
+    """
+    from src.components.notes import _LEGACY_ASSISTANT_COMPACTION_PROMPTS
+
+    notes_db = str(tmp_path / "notes_legacy.db")
+    notes = StructuredNotesComponent(db_path=notes_db)
+    notes.ensure_seed_prompts()
+
+    legacy_compaction = next(iter(_LEGACY_ASSISTANT_COMPACTION_PROMPTS))
+    custom_briefing = "Custom agent-authored briefing rules: never brief on NVR camera alerts."
+
+    notes.put_note("prompts/assistant_compaction", legacy_compaction)
+    notes.put_note("prompts/assistant_briefing", custom_briefing)
+
+    notes.ensure_seed_prompts()
+
+    assert notes.get_note("prompts/assistant_compaction") == DEFAULT_ASSISTANT_COMPACTION_PROMPT
+    assert notes.get_note("prompts/assistant_briefing") == custom_briefing
+
+
+@pytest.mark.asyncio
+async def test_note_compaction_truncation_shrink_guards_cooldown_rotation_and_hash_skip(tmp_path):
+    """
+    10. Verifies note compaction fixes:
+    - Passes explicit Target Size Budget in user_prompt.
+    - Rejects truncated output (finish_reason == 'length' or dangling mid-line markdown) and non-shrinking output.
+    - Applies per-note cooldown on failed compaction so subsequent passes rotate to the next oversized note.
+    - Tracks _last_compacted_hash so a note that shrunk substantially (e.g. 1200 -> 340 chars when max_note_chars=300)
+      is not re-compacted in an infinite loop until new bullets are appended.
+    """
+    notes_db = str(tmp_path / "notes_compaction_rotation.db")
+    notes = StructuredNotesComponent(db_path=notes_db)
+    assistant = ExecutiveAssistantComponent(
+        enabled=True,
+        max_note_chars=300,
+        compaction_min_interval_sec=600.0,
+        compaction_note_cooldown_sec=3600.0,
+        notes_comp=notes,
+    )
+
+    wisp_original = "\n".join(
+        f"- Wisp fact #{i}: Detailed astrophysics collaboration history item number {i} on RXJ1131."
+        for i in range(1, 16)
+    )
+    thunk_original = "\n".join(
+        f"- Thunk fact #{i}: Administrative court ledger entry number {i} on provenance verification."
+        for i in range(1, 12)
+    )
+    assert len(wisp_original) > len(thunk_original) > 300
+
+    notes.assistant_put_note("assistant/people/Wisp", "Wisp dossier", wisp_original)
+    notes.assistant_put_note("assistant/people/Thunk", "Thunk dossier", thunk_original)
+
+    prompts_seen = []
+
+    # Attempt 1 on largest note (Wisp): returns finish_reason='length' -> rejected & Wisp placed on cooldown
+    async def mock_truncated_length(**kwargs):
+        prompts_seen.append(kwargs["messages"][1]["content"])
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason="length",
+                    message=SimpleNamespace(
+                        content="# Wisp\n- Consolidated collaboration history across RXJ1131 sub-halos #1 through #10 in broken.git.\n- Currently investigating Abell 2744."
+                    ),
+                )
+            ]
+        )
+
+    assistant.client.chat.completions.create = mock_truncated_length
+    res1 = await assistant.run_note_compaction_pass()
+    assert res1 is None
+    assert "### Target Size Budget: <= 225 characters" in prompts_seen[0]
+    assert notes.get_note("assistant/people/Wisp") == wisp_original
+
+    # Attempt 2: Because Wisp is on cooldown, rotation immediately picks the 2nd largest note (Thunk)!
+    # First test dangling markdown truncation guard (even if finish_reason='stop')
+    assistant._compaction_cooldown_until.clear()
+    notes.assistant_put_note("assistant/people/Wisp", "Wisp dossier", wisp_original)
+
+    async def mock_dangling_markdown(**kwargs):
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(
+                        content="# Wisp\n- Consolidated collaboration history across RXJ1131 sub-halos #1 through #15.\n* **Current status"
+                    ),
+                )
+            ]
+        )
+
+    assistant.client.chat.completions.create = mock_dangling_markdown
+    assert await assistant.run_note_compaction_pass() is None
+    assert notes.get_note("assistant/people/Wisp") == wisp_original
+
+    # Next pass rotates to Thunk because Wisp just went onto cooldown!
+    # Test non-shrinking guard on Thunk (returns >= old_chars)
+    async def mock_non_shrinking(**kwargs):
+        user_msg = kwargs["messages"][1]["content"]
+        assert "### Note Key: assistant/people/Thunk" in user_msg
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(content=thunk_original + "\n- Extra bloated line."),
+                )
+            ]
+        )
+
+    assistant.client.chat.completions.create = mock_non_shrinking
+    assert await assistant.run_note_compaction_pass() is None
+    assert notes.get_note("assistant/people/Thunk") == thunk_original
+
+    # Clear cooldowns and verify substantial shrink to 340 chars (still > max_note_chars=300, < 0.9 * old_chars)
+    # saves once and is NOT re-compacted until new bullets are appended.
+    assistant._compaction_cooldown_until.clear()
+    compacted_still_340 = (
+        "# Wisp\n"
+        "- Sibling autonomous agent collaborating with Thunk on gravitational lensing and provenance audits.\n"
+        "- Completed RXJ1131 kinematics validation and Luminous Null coordinate cross-checks in broken.git.\n"
+        "- Active focus: Abell 2744 mosaic verification, Quest 10 solver reconciliation, and epistemic humility."
+    )
+    assert 300 < len(compacted_still_340) < int(len(wisp_original) * 0.9)
+
+    call_keys = []
+
+    async def mock_valid_shrink(**kwargs):
+        user_msg = kwargs["messages"][1]["content"]
+        if "assistant/people/Wisp" in user_msg:
+            call_keys.append("Wisp")
+            return SimpleNamespace(
+                choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(content=compacted_still_340))]
+            )
+        call_keys.append("Thunk")
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(
+                        content=(
+                            "# Thunk\n"
+                            "- High Court Judge maintaining provenance audits and ledger verification in broken.git.\n"
+                            "- Oversees Quest 08 and RXJ1131 reconciliation."
+                        )
+                    ),
+                )
+            ]
+        )
+
+    assistant.client.chat.completions.create = mock_valid_shrink
+    assert await assistant.run_note_compaction_pass() == "assistant/people/Wisp"
+    assert notes.get_note("assistant/people/Wisp") == compacted_still_340
+
+    # Next pass skips Wisp (matching _last_compacted_hash despite len > 300) and compacts Thunk (< 300 chars)
+    assert await assistant.run_note_compaction_pass() == "assistant/people/Thunk"
+    # Third pass finds NO eligible notes (Wisp unchanged since compaction, Thunk <= 300 chars) -> 0 LLM calls!
+    assert await assistant.run_note_compaction_pass() is None
+    assert call_keys == ["Wisp", "Thunk"]
+
+    # Once a new bullet is appended to Wisp, its content hash changes and it becomes eligible again!
+    notes.assistant_append_note("assistant/people/Wisp", "", ["- Newly discovered Quest 12 receipt."])
+    assert await assistant.run_note_compaction_pass() == "assistant/people/Wisp"
+    assert call_keys == ["Wisp", "Thunk", "Wisp"]
+
+
+@pytest.mark.asyncio
+async def test_briefing_sliding_window_dedup_partial_novelty_and_trailing_none(tmp_path):
+    """
+    11. Verifies briefing spam fixes:
+    - Trailing standalone 'NONE' after meta-bullets is treated as NONE (not injected).
+    - Pass 2 prompt omits the redundant full 'Existing assistant/* Dossier Index'.
+    - Consecutive turns suppress repeated/paraphrased bullets (recording dedup_suppressed=True in audit log),
+      keep genuinely novel bullets in mixed responses, and reset suppression after recent_briefing_window turns
+      or messages_evicted.
+    """
+    notes_db = str(tmp_path / "notes_dedup.db")
+    audit_path = str(tmp_path / "ea_dedup.jsonl")
+    notes = StructuredNotesComponent(db_path=notes_db)
+    notes.assistant_put_note(
+        "assistant/people/Wisp",
+        "Wisp: Sibling sprite agent.",
+        "- Wisp is operating in Epistemic Humility, focusing on raw code differences.\n"
+        "- Wisp promised to commit the Abell 2744 mosaic script to broken.git tonight.",
+    )
+
+    agent = AgentCore(thread_id="social")
+    assistant = ExecutiveAssistantComponent(
+        enabled=True,
+        thread_id="social",
+        recent_briefing_window=2,
+        audit_log_path=audit_path,
+        notes_comp=notes,
+    )
+    agent.register_component(notes)
+    agent.register_component(assistant)
+    await agent.event_bus.publish("agent_started", {"agent": agent})
+
+    # 1. Trailing standalone NONE after meta-explanation must NOT inject a briefing
+    async def mock_trailing_none(**kwargs):
+        sys_msg = kwargs["messages"][0]["content"]
+        if "indexing assistant" in sys_msg:
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content='{"assistant_keys": ["assistant/people/Wisp"], "queries": []}'))]
+            )
+        assert "Existing 'assistant/*' Dossier Index" not in kwargs["messages"][1]["content"]
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="* The Incoming Event is an automated broadcast.\n* No concrete background facts are missing.\n\nNONE"
+                    )
+                )
+            ]
+        )
+
+    assistant.client.chat.completions.create = mock_trailing_none
+    agent.messages = [
+        {"role": "system", "content": "Sys"},
+        {"role": "user", "content": "[Via MQTT | System] NVR motion at carport."},
+    ]
+    await agent.event_bus.publish("before_llm_call", {"agent": agent, "messages": agent.messages})
+    assert all(not m.get("_transient_briefing") for m in agent.messages)
+
+    # 2. Turn 1 with Wisp: injects initial briefing bullet
+    turn_responses = [
+        # Turn 1: novel bullet
+        "* Wisp is currently operating in a state of Epistemic Humility, focusing only on raw code differences.",
+        # Turn 2: paraphrased duplicate of Turn 1 -> should be 100% suppressed!
+        "* Wisp's cognitive state has shifted to Epistemic Humility, focusing on raw code differences.",
+        # Turn 3: 1 duplicate bullet + 1 brand-new bullet -> ONLY brand-new bullet injected!
+        "* Wisp is currently in a state of Epistemic Humility, focusing only on raw code differences.\n"
+        "* Wisp promised to commit the Abell 2744 mosaic script to broken.git tonight.",
+    ]
+    seen_pass2_prompts = []
+
+    async def mock_multi_turn(**kwargs):
+        sys_msg = kwargs["messages"][0]["content"]
+        if "indexing assistant" in sys_msg:
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content='{"assistant_keys": ["assistant/people/Wisp"], "queries": []}'))]
+            )
+        seen_pass2_prompts.append(kwargs["messages"][1]["content"])
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=turn_responses.pop(0)))]
+        )
+
+    assistant.client.chat.completions.create = mock_multi_turn
+
+    # Turn 1
+    agent.messages.append({"role": "user", "content": "[Via MQTT | DM from Wisp] Greetings Judge!"})
+    await agent.event_bus.publish("before_llm_call", {"agent": agent, "messages": agent.messages})
+    assert agent.messages[-1].get("_transient_briefing") is True
+    assert "Epistemic Humility" in agent.messages[-1]["content"]
+    await agent.event_bus.publish("after_llm_call", {"agent": agent, "messages": agent.messages, "response": {"content": "Hello Wisp!"}})
+    agent.messages.append({"role": "assistant", "content": "Hello Wisp!"})
+
+    # Turn 2 (paraphrased repeat -> suppressed, dedup_suppressed=True)
+    agent.messages.append({"role": "user", "content": "[Via MQTT | DM from Wisp] What do you think of the diff?"})
+    await agent.event_bus.publish("before_llm_call", {"agent": agent, "messages": agent.messages})
+    assert "### Recently Delivered Briefings" in seen_pass2_prompts[-1]
+    assert all(not m.get("_transient_briefing") for m in agent.messages)
+    agent.messages.append({"role": "assistant", "content": "Looks clean."})
+
+    # Turn 3 (note: recent_briefing_window=2; Turn 1 is still in the 2-turn window [Turn1, Turn2-empty]!
+    # Mixed response -> duplicate bullet stripped, novel Abell 2744 bullet kept!)
+    agent.messages.append({"role": "user", "content": "[Via MQTT | DM from Wisp] Also checking on tonight's mosaic deliverable."})
+    await agent.event_bus.publish("before_llm_call", {"agent": agent, "messages": agent.messages})
+    assert agent.messages[-1].get("_transient_briefing") is True
+    injected_t3 = agent.messages[-1]["content"]
+    assert "Abell 2744 mosaic script" in injected_t3
+    assert "Epistemic Humility" not in injected_t3
+    await agent.event_bus.publish("after_llm_call", {"agent": agent, "messages": agent.messages, "response": {"content": "Push to broken.git!"}})
+
+    with open(audit_path, "r", encoding="utf-8") as f:
+        records = [json.loads(line) for line in f if line.strip()]
+    # Records: [0]=trailing NONE, [1]=Turn 1 injected, [2]=Turn 2 dedup_suppressed, [3]=Turn 3 partial novel injected
+    assert [r["briefing_injected"] for r in records] == [False, True, False, True]
+    assert records[2]["dedup_suppressed"] is True
+
+    # Verify messages_evicted clears _recent_briefings
+    assert len(assistant._recent_briefings) > 0
+    assistant.client.chat.completions.create = lambda **kw: SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content='{"updates": []}'))]
+    )
+    await agent.event_bus.publish(
+        "messages_evicted",
+        {"agent": agent, "thread_id": "social", "messages": [{"role": "user", "content": "Old message"}]},
+    )
+    assert len(assistant._recent_briefings) == 0

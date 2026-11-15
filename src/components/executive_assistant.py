@@ -1,9 +1,11 @@
+from collections import deque
+import hashlib
 import inspect
 import json
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 import httpx
 from openai import AsyncOpenAI
 
@@ -34,6 +36,18 @@ _FILING_JSON_FORMAT_APPENDIX = (
     "Do not include any prose outside the JSON object."
 )
 
+_BRIEFING_STOPWORDS: Set[str] = {
+    "the", "and", "for", "that", "this", "with", "from", "are", "was", "were",
+    "has", "have", "had", "been", "being", "not", "but", "you", "your", "their",
+    "they", "them", "his", "her", "its", "our", "out", "into", "over", "under",
+    "about", "after", "before", "between", "through", "during", "currently",
+    "also", "only", "than", "then", "rather", "while", "where", "when", "which",
+    "who", "whom", "whose", "what", "there", "here", "still", "just", "very",
+    "more", "most", "some", "such", "each", "other", "both", "onto", "upon",
+    "within", "without", "assistant", "briefing", "note", "notes", "incoming",
+    "event", "focusing", "operating", "state", "defined", "shifted", "shifting",
+}
+
 
 class ExecutiveAssistantComponent(BaseComponent):
     """
@@ -60,6 +74,8 @@ class ExecutiveAssistantComponent(BaseComponent):
         max_note_chars: Optional[int] = None,
         compaction_tool_interval: Optional[int] = None,
         compaction_min_interval_sec: Optional[float] = None,
+        compaction_note_cooldown_sec: Optional[float] = None,
+        recent_briefing_window: Optional[int] = None,
         qdrant_score_threshold: Optional[float] = None,
         audit_log_path: Optional[str] = None,
         thread_id: str = "main",
@@ -137,6 +153,19 @@ class ExecutiveAssistantComponent(BaseComponent):
             if compaction_min_interval_sec is not None
             else ea_cfg.get("compaction_min_interval_sec", 600.0)
         )
+        if compaction_note_cooldown_sec is not None:
+            self.compaction_note_cooldown_sec = float(compaction_note_cooldown_sec)
+        elif "compaction_note_cooldown_sec" in ea_cfg:
+            self.compaction_note_cooldown_sec = float(ea_cfg["compaction_note_cooldown_sec"])
+        elif self.compaction_min_interval_sec <= 0.0:
+            self.compaction_note_cooldown_sec = 0.0
+        else:
+            self.compaction_note_cooldown_sec = 3600.0
+        self.recent_briefing_window = int(
+            recent_briefing_window
+            if recent_briefing_window is not None
+            else ea_cfg.get("recent_briefing_window", 5)
+        )
         self.qdrant_score_threshold = float(
             qdrant_score_threshold
             if qdrant_score_threshold is not None
@@ -161,11 +190,17 @@ class ExecutiveAssistantComponent(BaseComponent):
         self.memory_comp: Optional[Any] = memory_comp
         self.vector_comp: Optional[Any] = vector_comp
         self.last_usage: Optional[Dict[str, Any]] = None
+        self.last_finish_reason: Optional[str] = None
         self._last_briefed_sig: Optional[Tuple[int, str]] = None
 
         self.tool_counter: int = 0
         self.last_compaction_ts: float = 0.0
         self.pending_note_compaction: bool = False
+        self._compaction_cooldown_until: Dict[str, float] = {}
+        self._last_compacted_hash: Dict[str, str] = {}
+        self._recent_briefings: Deque[Dict[str, Any]] = deque(
+            maxlen=max(1, self.recent_briefing_window)
+        )
         self._pending_audit_record: Optional[Dict[str, Any]] = None
         self._pending_probe_tokens: Set[str] = set()
 
@@ -241,6 +276,155 @@ class ExecutiveAssistantComponent(BaseComponent):
     @classmethod
     def _strip_code_fences(cls, raw_text: str) -> str:
         return cls._strip_thinking_and_fences(raw_text)
+
+    @staticmethod
+    def _compaction_state_hash(content: str, prompt: str) -> str:
+        raw = f"{prompt}\0{content or ''}".encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()
+
+    @staticmethod
+    def _looks_truncated_markdown(text: str) -> bool:
+        lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+        if not lines:
+            return True
+        last_line = lines[-1]
+        # Empty bullet, numbered item, or markdown heading at the end of the note
+        if re.match(r"^(?:[-*+]|\d+[.)]|#+)\s*(?:\*{1,3}|_{1,3}|`)?$", last_line):
+            return True
+        # Unclosed bold or inline-code delimiter on the final line
+        if last_line.count("**") % 2 == 1 or last_line.count("`") % 2 == 1:
+            return True
+        # Dangling mid-identifier / mid-clause punctuation at the very end
+        if last_line[-1] in "_\\([,:":
+            return True
+        return False
+
+    @staticmethod
+    def _is_none_briefing(text: str) -> bool:
+        clean = (text or "").strip()
+        if not clean:
+            return True
+        first_norm = re.sub(r"^[\s\*_`#\-]+|[\s\*_`.\-:!]+$", "", clean)
+        if first_norm.upper() == "NONE":
+            return True
+        if re.match(r"^NONE\b[\s.:\-—]", clean, flags=re.IGNORECASE):
+            return True
+        for line in clean.splitlines():
+            line_norm = re.sub(r"^[\s\*_`#\-]+|[\s\*_`.\-:!]+$", "", line)
+            if line_norm.upper() == "NONE":
+                return True
+        return False
+
+    @staticmethod
+    def _split_briefing_items(body: str) -> List[str]:
+        items: List[str] = []
+        current: List[str] = []
+        for raw_line in (body or "").splitlines():
+            stripped = raw_line.strip()
+            if not stripped:
+                if current:
+                    items.append("\n".join(current))
+                    current = []
+                continue
+            is_bullet_start = bool(re.match(r"^(?:[-*+]|\d+[.)])\s+", stripped))
+            if is_bullet_start and current:
+                items.append("\n".join(current))
+                current = [raw_line.rstrip()]
+            else:
+                current.append(raw_line.rstrip())
+        if current:
+            items.append("\n".join(current))
+        return items
+
+    @staticmethod
+    def _content_tokens(text: str) -> Set[str]:
+        return {
+            tok
+            for tok in re.findall(r"[a-z0-9]{3,}", (text or "").lower())
+            if tok not in _BRIEFING_STOPWORDS
+        }
+
+    def _format_recent_briefings(self) -> str:
+        if self.recent_briefing_window <= 0 or not self._recent_briefings:
+            return ""
+        blocks: List[str] = []
+        for entry in self._recent_briefings:
+            items = entry.get("items") or []
+            if items:
+                blocks.extend(items)
+        return "\n".join(blocks)
+
+    def _record_turn_briefing(self, keys: List[str], items: List[str]) -> None:
+        if self.recent_briefing_window <= 0:
+            return
+        self._recent_briefings.append(
+            {
+                "keys": list(keys),
+                "items": list(items),
+            }
+        )
+
+    def _filter_novel_briefing_items(self, body: str) -> List[str]:
+        candidate_items = self._split_briefing_items(body)
+        if self.recent_briefing_window <= 0 or not self._recent_briefings:
+            return candidate_items
+
+        prior_entries: List[Tuple[str, Set[str]]] = []
+        for entry in self._recent_briefings:
+            for old_item in entry.get("items") or []:
+                old_norm = re.sub(r"\s+", " ", old_item.strip().lstrip("-*+ ").lower())
+                if old_norm:
+                    prior_entries.append((old_norm, self._content_tokens(old_item)))
+
+        if not prior_entries:
+            return candidate_items
+
+        novel: List[str] = []
+        for item in candidate_items:
+            item_norm = re.sub(r"\s+", " ", item.strip().lstrip("-*+ ").lower())
+            if not item_norm:
+                continue
+            item_tokens = self._content_tokens(item)
+            is_dup = False
+            for old_norm, old_tokens in prior_entries:
+                if item_norm == old_norm:
+                    is_dup = True
+                    break
+                if len(item_tokens) >= 3 and len(old_tokens) >= 3:
+                    inter = len(item_tokens & old_tokens)
+                    overlap = inter / min(len(item_tokens), len(old_tokens))
+                    jaccard = inter / len(item_tokens | old_tokens)
+                    if overlap >= 0.70 or jaccard >= 0.55:
+                        is_dup = True
+                        break
+            if not is_dup:
+                novel.append(item)
+                prior_entries.append((item_norm, item_tokens))
+
+        return novel
+
+    def _eligible_oversized_notes(
+        self,
+        all_notes: List[Dict[str, str]],
+        compaction_instructions: str,
+        now: Optional[float] = None,
+    ) -> List[Dict[str, str]]:
+        ts = time.time() if now is None else now
+        eligible: List[Dict[str, str]] = []
+        for n in all_notes:
+            key = n["key"]
+            content = n.get("content") or ""
+            if not key.startswith("assistant/") or len(content) <= self.max_note_chars:
+                continue
+            if self._last_compacted_hash.get(key) == self._compaction_state_hash(
+                content, compaction_instructions
+            ):
+                continue
+            if ts < self._compaction_cooldown_until.get(key, 0.0):
+                continue
+            eligible.append(n)
+        eligible.sort(key=lambda n: len(n.get("content") or ""), reverse=True)
+        return eligible
 
     def _write_audit_record(self, record: Dict[str, Any]) -> None:
         if not self.audit_log_path:
@@ -355,6 +539,7 @@ class ExecutiveAssistantComponent(BaseComponent):
         active_context_str: str,
         assistant_notes: List[Dict[str, str]],
         searchable_notes: Optional[List[Dict[str, str]]] = None,
+        recent_briefings_str: str = "",
     ) -> Tuple[List[str], List[str]]:
         """
         Pass 1 of Pre-Turn Briefing: Gap Detection & Query Generation (~1k-2k prompt tokens).
@@ -370,18 +555,30 @@ class ExecutiveAssistantComponent(BaseComponent):
             else "(No 'assistant/*' dossiers exist yet)"
         )
 
+        recent_rule = (
+            " Also skip dossiers or queries whose relevant facts were already covered in "
+            "Recently Delivered Briefings unless the Incoming Event introduces a new subtopic or question."
+            if recent_briefings_str
+            else ""
+        )
         system_prompt = (
             "You are an indexing assistant. Given my Active Context (Core Summary + Recent Messages), "
             "an Incoming Event, and a directory of available 'assistant/*' dossiers, identify people, "
             "projects, terms, or history mentioned in the Incoming Event that are missing or under-explained "
-            "in my Active Context.\n"
+            f"in my Active Context.{recent_rule}\n"
             "Return ONLY a JSON object with up to 5 relevant 'assistant/*' keys and up to 3 short keyword "
             "search queries for general notes/memories:\n"
             '{"assistant_keys": ["assistant/people/fireduck"], "queries": ["pinkcroc", "taravangian"]}\n'
             'If nothing is missing from my active context, return: {"assistant_keys": [], "queries": []}'
         )
+        recent_section = (
+            f"### Recently Delivered Briefings (Last Few Turns)\n{recent_briefings_str}\n\n"
+            if recent_briefings_str
+            else ""
+        )
         user_prompt = (
             f"### Active Context (Core Summary + Recent Messages)\n{active_context_str}\n\n"
+            f"{recent_section}"
             f"### Incoming Event\n{incoming_event}\n\n"
             f"### Available 'assistant/*' Dossiers\n{directory_str}\n"
         )
@@ -529,31 +726,42 @@ class ExecutiveAssistantComponent(BaseComponent):
 
                 content = ""
                 usage = None
+                finish_reason: Optional[str] = None
+                self.last_finish_reason = None
                 if hasattr(resp, "__aiter__"):
                     async for chunk in resp:
                         parsed_usage = extract_chunk_usage(chunk, prev_usage=usage)
                         if parsed_usage is not None:
                             usage = parsed_usage
-                        if (
-                            getattr(chunk, "choices", None)
-                            and chunk.choices[0].delta
-                            and getattr(chunk.choices[0].delta, "content", None)
-                        ):
-                            content += chunk.choices[0].delta.content
+                        if getattr(chunk, "choices", None) and chunk.choices:
+                            ch0 = chunk.choices[0]
+                            fr = getattr(ch0, "finish_reason", None)
+                            if fr:
+                                finish_reason = str(fr)
+                            if getattr(ch0, "delta", None) and getattr(ch0.delta, "content", None):
+                                content += ch0.delta.content
                 elif hasattr(resp, "choices") and resp.choices:
-                    msg = getattr(resp.choices[0], "message", None)
-                    if msg is not None and getattr(msg, "content", None):
-                        content = str(msg.content)
-                    elif isinstance(resp.choices[0], dict):
-                        content = str(resp.choices[0].get("message", {}).get("content") or "")
+                    ch0 = resp.choices[0]
+                    if isinstance(ch0, dict):
+                        fr = ch0.get("finish_reason")
+                        content = str(ch0.get("message", {}).get("content") or "")
+                    else:
+                        fr = getattr(ch0, "finish_reason", None)
+                        msg = getattr(ch0, "message", None)
+                        if msg is not None and getattr(msg, "content", None):
+                            content = str(msg.content)
+                    if fr:
+                        finish_reason = str(fr)
                 elif isinstance(resp, str):
                     content = resp
 
             content = re.sub(r"<think>.*?</think>", "", content or "", flags=re.DOTALL).strip()
             if "<think>" in content:
                 content = content.split("<think>", 1)[0].strip()
+                finish_reason = finish_reason or "length"
 
             self.last_usage = usage
+            self.last_finish_reason = finish_reason
             if usage:
                 if usage.get("prompt_tokens"):
                     span.set_counter("request_tokens", int(usage["prompt_tokens"]))
@@ -678,36 +886,42 @@ class ExecutiveAssistantComponent(BaseComponent):
 
     async def run_note_compaction_pass(self) -> Optional[str]:
         """
-        Finds the largest 'assistant/*' note exceeding self.max_note_chars and compacts/deduplicates
-        it using 'prompts/assistant_compaction'. Returns the compacted note key, or None if skipped.
+        Finds the largest eligible 'assistant/*' note exceeding self.max_note_chars and compacts/deduplicates
+        it using 'prompts/assistant_compaction'. Enforces target size budget, truncation/shrink guards, and
+        per-note cooldown rotation so one stubborn note cannot loop forever or starve other dossiers.
         """
         self._discover_components()
         if not self.enabled or self.notes_comp is None:
             return None
 
-        all_notes = self.notes_comp.get_all_notes()
-        oversized = [
-            n
-            for n in all_notes
-            if n["key"].startswith("assistant/")
-            and len(n.get("content") or "") > self.max_note_chars
-        ]
-        if not oversized:
-            return None
-
-        oversized.sort(key=lambda n: len(n.get("content") or ""), reverse=True)
-        target_note = oversized[0]
-        old_content = target_note.get("content") or ""
-        old_chars = len(old_content)
-
         compaction_instructions = self._get_prompt(
             "prompts/assistant_compaction", DEFAULT_ASSISTANT_COMPACTION_PROMPT
         )
+        all_notes = self.notes_comp.get_all_notes()
+        now = time.time()
+        eligible = self._eligible_oversized_notes(all_notes, compaction_instructions, now=now)
+        if not eligible:
+            return None
+
+        target_note = eligible[0]
+        target_key = target_note["key"]
+        old_content = target_note.get("content") or ""
+        old_chars = len(old_content)
+        target_chars = max(120, int(self.max_note_chars * 0.75))
+
         user_prompt = (
-            f"### Note Key: {target_note['key']}\n"
+            f"### Target Size Budget: <= {target_chars} characters "
+            f"(Hard maximum: {self.max_note_chars} characters; currently {old_chars} characters)\n"
+            f"### Note Key: {target_key}\n"
             f"### Current Summary: {target_note.get('summary') or ''}\n\n"
             f"### Current Note Content ({old_chars} chars)\n{old_content}\n"
         )
+
+        def _mark_cooldown() -> None:
+            if self.compaction_note_cooldown_sec > 0:
+                self._compaction_cooldown_until[target_key] = (
+                    time.time() + self.compaction_note_cooldown_sec
+                )
 
         try:
             raw_compacted = await self._call_llm(
@@ -717,26 +931,51 @@ class ExecutiveAssistantComponent(BaseComponent):
                 span_type="assistant_note_compaction",
             )
         except Exception as e:
+            _mark_cooldown()
             print(f"[ExecutiveAssistant:{self.thread_id}] Warning during note compaction pass: {e}")
             return None
 
         compacted_content = self._strip_thinking_and_fences(raw_compacted)
+        new_chars = len(compacted_content)
         if (
             not compacted_content
             or compacted_content.upper() == "NONE"
-            or len(compacted_content) < 100
+            or new_chars < 100
         ):
+            _mark_cooldown()
             print(
-                f"[ExecutiveAssistant:{self.thread_id}] Refusing to overwrite '{target_note['key']}' "
-                f"with invalid/too-short compacted content ({len(compacted_content)} chars)."
+                f"[ExecutiveAssistant:{self.thread_id}] Refusing to overwrite '{target_key}' "
+                f"with invalid/too-short compacted content ({new_chars} chars)."
+            )
+            return None
+
+        if self.last_finish_reason == "length" or self._looks_truncated_markdown(compacted_content):
+            _mark_cooldown()
+            print(
+                f"[ExecutiveAssistant:{self.thread_id}] Refusing to overwrite '{target_key}' "
+                f"with truncated compacted content (finish_reason={self.last_finish_reason!r}, {new_chars} chars)."
+            )
+            return None
+
+        if new_chars >= old_chars or (
+            new_chars > self.max_note_chars and new_chars > int(old_chars * 0.9)
+        ):
+            _mark_cooldown()
+            print(
+                f"[ExecutiveAssistant:{self.thread_id}] Refusing to overwrite '{target_key}' "
+                f"because compaction did not meaningfully shrink note ({old_chars} -> {new_chars} chars)."
             )
             return None
 
         self.notes_comp.assistant_put_note(
-            target_note["key"],
+            target_key,
             target_note.get("summary") or "",
             compacted_content,
         )
+        self._last_compacted_hash[target_key] = self._compaction_state_hash(
+            compacted_content, compaction_instructions
+        )
+        self._compaction_cooldown_until.pop(target_key, None)
 
         agent = getattr(self, "agent", None)
         if agent is not None and hasattr(agent, "event_bus"):
@@ -745,15 +984,15 @@ class ExecutiveAssistantComponent(BaseComponent):
                     "assistant_note_compacted",
                     {
                         "thread_id": self.thread_id,
-                        "key": target_note["key"],
+                        "key": target_key,
                         "old_chars": old_chars,
-                        "new_chars": len(compacted_content),
+                        "new_chars": new_chars,
                     },
                 )
             except Exception:
                 pass
 
-        return target_note["key"]
+        return target_key
 
     async def _handle_before_llm_call(self, payload: Dict[str, Any]) -> None:
         agent = payload.get("agent") or getattr(self, "agent", None)
@@ -822,12 +1061,14 @@ class ExecutiveAssistantComponent(BaseComponent):
         core_summary = self._get_core_summary()
         recent_messages_str = self._format_recent_messages(prior_messages, max_messages=5)
         active_context_str = f"Core Summary:\n{core_summary}\n\nRecent Messages:\n{recent_messages_str}"
+        recent_briefings_str = self._format_recent_briefings()
 
         selected_assistant_keys, selected_queries = await self._select_briefing_targets(
             incoming_event=incoming_event,
             active_context_str=active_context_str,
             assistant_notes=assistant_notes,
             searchable_notes=searchable_notes,
+            recent_briefings_str=recent_briefings_str,
         )
 
         fts5_hit_keys: List[str] = []
@@ -843,12 +1084,14 @@ class ExecutiveAssistantComponent(BaseComponent):
             "fts5_hit_keys": fts5_hit_keys,
             "qdrant_fallback_hits": [],
             "briefing_injected": False,
+            "dedup_suppressed": False,
             "briefing_bytes": 0,
             "briefing_preview": "",
             "referenced_by_boss": None,
         }
 
         if not selected_assistant_keys and not selected_queries:
+            self._record_turn_briefing(keys=[], items=[])
             self._write_audit_record(audit_record)
             return
 
@@ -932,6 +1175,7 @@ class ExecutiveAssistantComponent(BaseComponent):
         ]
 
         if not candidates and not qdrant_blocks:
+            self._record_turn_briefing(keys=[], items=[])
             self._write_audit_record(audit_record)
             return
 
@@ -947,19 +1191,18 @@ class ExecutiveAssistantComponent(BaseComponent):
         cand_blocks.extend(qdrant_blocks)
         candidates_section = "\n\n".join(cand_blocks)
 
-        assistant_index_lines = [
-            f"- {n['key']}: {n['summary']}" for n in assistant_notes
-        ]
-        assistant_index_section = (
-            "\n".join(assistant_index_lines)
-            if assistant_index_lines
-            else "(No 'assistant/*' dossiers exist yet)"
+        recent_briefing_section = (
+            "### Recently Delivered Briefings (Already shown to the Boss in recent turns — "
+            "DO NOT repeat or paraphrase these points; output NONE if nothing genuinely new is needed)\n"
+            f"{recent_briefings_str}\n\n"
+            if recent_briefings_str
+            else ""
         )
 
         user_prompt = (
             f"### Active Context (What the Boss already sees)\n{active_context_str}\n\n"
+            f"{recent_briefing_section}"
             f"### Incoming Event\n{incoming_event}\n\n"
-            f"### Existing 'assistant/*' Dossier Index\n{assistant_index_section}\n\n"
             f"### Candidate Notes (from 'assistant/*' and general notes)\n{candidates_section}\n"
         )
 
@@ -977,14 +1220,27 @@ class ExecutiveAssistantComponent(BaseComponent):
             return
 
         cleaned = (response_text or "").strip()
-        if not cleaned or cleaned.upper() == "NONE" or cleaned.upper().startswith("NONE\n"):
+        if cleaned.startswith("[Assistant Briefing]"):
+            cleaned = cleaned[len("[Assistant Briefing]") :].strip()
+
+        if self._is_none_briefing(cleaned):
+            self._record_turn_briefing(keys=[], items=[])
             self._write_audit_record(audit_record)
             return
 
-        if cleaned.startswith("[Assistant Briefing]"):
-            briefing_block = cleaned
-        else:
-            briefing_block = f"[Assistant Briefing]\n{cleaned}"
+        novel_items = self._filter_novel_briefing_items(cleaned)
+        if not novel_items:
+            audit_record["dedup_suppressed"] = True
+            self._record_turn_briefing(keys=[], items=[])
+            self._write_audit_record(audit_record)
+            return
+
+        novel_body = "\n".join(novel_items)
+        briefing_block = f"[Assistant Briefing]\n{novel_body}"
+        self._record_turn_briefing(
+            keys=[c["key"] for c in candidates],
+            items=novel_items,
+        )
 
         # Insert before any _transient_presence footer if present, else at the very bottom
         insert_idx = len(messages)
@@ -1080,6 +1336,9 @@ class ExecutiveAssistantComponent(BaseComponent):
         if not evicted_messages:
             return []
 
+        # Older messages just left active Layer-0 context, so reset recent-briefing suppression window.
+        self._recent_briefings.clear()
+
         transcript_lines: List[str] = []
         for msg in evicted_messages:
             if not isinstance(msg, dict):
@@ -1166,10 +1425,11 @@ class ExecutiveAssistantComponent(BaseComponent):
             now = time.time()
             if (now - self.last_compaction_ts) >= self.compaction_min_interval_sec:
                 latest_notes = self.notes_comp.get_all_notes()
-                if any(
-                    n["key"].startswith("assistant/")
-                    and len(n.get("content") or "") > self.max_note_chars
-                    for n in latest_notes
+                compaction_instructions = self._get_prompt(
+                    "prompts/assistant_compaction", DEFAULT_ASSISTANT_COMPACTION_PROMPT
+                )
+                if self._eligible_oversized_notes(
+                    latest_notes, compaction_instructions, now=now
                 ):
                     self.pending_note_compaction = True
 

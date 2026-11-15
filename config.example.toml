@@ -41,6 +41,8 @@ max_briefing_tokens = 1536
 max_note_chars = 2000
 compaction_tool_interval = 20
 compaction_min_interval_sec = 600.0
+compaction_note_cooldown_sec = 3600.0 # Per-note cooldown when compaction fails/stalls so other oversized notes rotate
+recent_briefing_window = 5            # Sliding turn window for suppressing duplicate '[Assistant Briefing]' bullets
 
 [tokenizer]
 # HuggingFace model path used strictly for token counting in tiered memory
