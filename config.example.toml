@@ -83,7 +83,7 @@ workspace = "data/thunk/workspace"
 
 [embeddings]
 # Embedding model for vector database ingestion and semantic search
-api_url = "http://localhost:11434/api/embeddings"
+api_url = "http://localhost:11434/api/embed"
 api_key = ""
 model_name = "nomic-embed-text"
 
