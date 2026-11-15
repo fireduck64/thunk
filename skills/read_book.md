@@ -6,7 +6,7 @@ summary: Use when you want to read a book from the library, managing the process
 
 Reading a book is a long-term process that requires structured planning, as you cannot read the entire text in a single turn. Follow these steps to read and synthesize a book effectively:
 
-1. **Find a Book:** Use `list_library` to see what books are available in the `/vault/ebook` directory.
+1. **Find a Book:** Use `list_library` to see what books are available in the `vault/ebook` directory.
 2. **Start the Book:** Use `open_book` with the filename to begin. This resets your reading progress for that file.
 3. **Plan the Reading:** Do not try to read without a plan. Use the `add_task` tool to create a sequence of manageable reading tasks in your Task Queue. 
    * Example task: "Read 'Mr. Darcy' chunks 1-10 and synthesize."

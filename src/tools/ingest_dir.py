@@ -51,7 +51,7 @@ def ingest_directory(directory: str, max_workers: int = 3):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Ingest a directory of EPUB files into Qdrant")
     parser.add_argument("-c", "--config", type=str, help="Path to the TOML configuration file")
-    parser.add_argument("directory", type=str, nargs="?", default="/vault/ebook", help="Path to directory of EPUBs")
+    parser.add_argument("directory", type=str, nargs="?", default="vault/ebook", help="Path to directory of EPUBs")
     args = parser.parse_args()
     if args.config:
         set_config_path(args.config)
