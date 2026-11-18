@@ -1336,9 +1336,6 @@ class ExecutiveAssistantComponent(BaseComponent):
         if not evicted_messages:
             return []
 
-        # Older messages just left active Layer-0 context, so reset recent-briefing suppression window.
-        self._recent_briefings.clear()
-
         transcript_lines: List[str] = []
         for msg in evicted_messages:
             if not isinstance(msg, dict):

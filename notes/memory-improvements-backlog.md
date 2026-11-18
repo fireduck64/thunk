@@ -7,6 +7,12 @@ Notes from the Nov 14, 2026 log & metrics audit across `data/{thunk,wisp}/{notes
   - Explicit target character budget (`<= 75%` of `max_note_chars`), `finish_reason == "length"` / mid-line truncation guard, shrink-check guard, and per-note compaction cooldown/hash tracking so a single oversized dossier cannot loop forever or starve other oversized notes.
   - Sliding-window recent-briefing memory (`recent_briefing_window` turns) + bullet-level overlap deduplication + removal of redundant full dossier index from Pass 2 so `[Assistant Briefing]` stops repeating the same dossiers on ~99% of turns.
 
+- **Follow-up (Nov 18):** Removed `_recent_briefings.clear()` on `messages_evicted`. Partial evictions happen roughly every other turn (~54–70 per 10h vs ~130 briefing turns), which was wiping the dedup window before it could work. The window now ages out only via `recent_briefing_window`.
+
+### Open: Briefings that restate the Incoming Event
+- ~20–26% of injected briefings are bullets like "The Incoming Event reports that…". They are new text every turn, so they pass the recent-briefing filter, but add nothing the agent can't already see. `gemma4:e2b` ignores prompt instructions not to do this.
+- Possible fix: drop bullets with high token overlap against the incoming event. Deferred pending the broader question of whether the briefing is part of the "organism" or lab equipment (see the exploration-project discussion).
+
 ---
 
 ## Remaining Ideas

@@ -856,8 +856,8 @@ async def test_briefing_sliding_window_dedup_partial_novelty_and_trailing_none(t
     - Trailing standalone 'NONE' after meta-bullets is treated as NONE (not injected).
     - Pass 2 prompt omits the redundant full 'Existing assistant/* Dossier Index'.
     - Consecutive turns suppress repeated/paraphrased bullets (recording dedup_suppressed=True in audit log),
-      keep genuinely novel bullets in mixed responses, and reset suppression after recent_briefing_window turns
-      or messages_evicted.
+      keep genuinely novel bullets in mixed responses, and age out suppression only after recent_briefing_window
+      turns (partial messages_evicted events do not reset it).
     """
     notes_db = str(tmp_path / "notes_dedup.db")
     audit_path = str(tmp_path / "ea_dedup.jsonl")
@@ -963,8 +963,10 @@ async def test_briefing_sliding_window_dedup_partial_novelty_and_trailing_none(t
     assert [r["briefing_injected"] for r in records] == [False, True, False, True]
     assert records[2]["dedup_suppressed"] is True
 
-    # Verify messages_evicted clears _recent_briefings
-    assert len(assistant._recent_briefings) > 0
+    # Partial evictions (frequent under heavy tool output) must NOT wipe the recent-briefing window;
+    # it ages out only via recent_briefing_window.
+    window_before = list(assistant._recent_briefings)
+    assert len(window_before) > 0
     assistant.client.chat.completions.create = lambda **kw: SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content='{"updates": []}'))]
     )
@@ -972,4 +974,4 @@ async def test_briefing_sliding_window_dedup_partial_novelty_and_trailing_none(t
         "messages_evicted",
         {"agent": agent, "thread_id": "social", "messages": [{"role": "user", "content": "Old message"}]},
     )
-    assert len(assistant._recent_briefings) == 0
+    assert list(assistant._recent_briefings) == window_before
