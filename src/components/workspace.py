@@ -142,7 +142,7 @@ class WorkspaceComponent(BaseComponent):
             "--- LINUX WORKSPACE & MIND MIRROR ---\n"
             f"You have a persistent, limited network Linux workspace at `{self.container_workdir}` (read-write), "
             f"including a cross-agent shared directory at `{self.container_workdir}/shared` (`shared/`), "
-            "equipped with Python 3 (numpy, pandas, networkx, sympy, matplotlib), Go, Java, Bazel, C/C++, sqlite3, ripgrep, jq, and standard CLI tools.\n"
+            "equipped with Python 3 (numpy, scipy, pandas, networkx, sympy, matplotlib, astropy, lenstronomy, fastell4py), Go, Java, Bazel, C/C++, Fortran, sqlite3, ripgrep, jq, and standard CLI tools.\n"
             f"You also have a read-only mirror of your own internal SQLite databases (`memory.db`, `notes.db`, `tasks.db`, `reader_state.db`) "
             f"and `skills/` mounted at `{self.container_mind_dir}` (see `{self.container_mind_dir}/README.md` for table schemas).\n"
             "Use `run_workspace_command`, `write_workspace_file`, `read_workspace_file`, `view_workspace_image`, and `list_workspace_files` "

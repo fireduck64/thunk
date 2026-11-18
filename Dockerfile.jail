@@ -2,18 +2,27 @@ FROM debian
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update
-RUN apt-get install -y python3-pip python3-dev python3-venv
+RUN apt-get update && apt-get install -y python3-pip python3-dev python3-venv
 
 COPY requirements.txt .
 
 RUN pip3 install --no-cache-dir --break-system-packages \
     --extra-index-url https://download.pytorch.org/whl/cpu \
     -r requirements.txt \
-    numpy pandas networkx sympy matplotlib
+    numpy pandas networkx sympy matplotlib lenstronomy
 
-RUN apt-get install -y dc jq curl wget sqlite3 imagemagick ffmpeg xxd util-linux default-jdk-headless 
-RUN apt-get install -y golang build-essential pkg-config libsqlite3-dev ripgrep git tree bc file procps ca-certificates
+RUN apt-get update && apt-get install -y dc jq curl wget sqlite3 imagemagick ffmpeg xxd util-linux default-jdk-headless \
+    golang build-essential gfortran meson ninja-build pkg-config libsqlite3-dev ripgrep git tree bc file procps ca-certificates
+
+RUN set -eu \
+    && git clone https://github.com/sibirrer/fastell4py.git /tmp/fastell4py \
+    && cd /tmp/fastell4py \
+    && python3 -m numpy.f2py -c fastell.pyf src/fastell.f \
+    && mv _fastell*.so fastell4py/ \
+    && printf 'from setuptools import setup\nsetup(name="fastell4py", version="0.1.0", packages=["fastell4py"], package_data={"fastell4py": ["*.so"]})\n' > setup.py \
+    && pip3 install --no-cache-dir --break-system-packages --no-build-isolation --use-pep517 . \
+    && cd / && rm -rf /tmp/fastell4py \
+    && python3 -c "import numpy as np; from fastell4py import fastell4py; from lenstronomy.LensModel.lens_model import LensModel; a1, _ = fastell4py.fastelldefl(1.0, 3.0, 0.9, 0.5, 0.9, 0.01); assert np.isclose(a1, 0.4980218703005841); kw = [{'theta_E': 1.2, 'gamma': 2.0, 'e1': 0.1, 'e2': -0.05, 'center_x': 0.0, 'center_y': 0.0}]; assert np.allclose(LensModel(['EPL']).alpha(0.6, 0.8, kw), LensModel(['PEMD']).alpha(0.6, 0.8, kw), rtol=1e-4)"
 
 RUN wget https://github.com/bazelbuild/bazelisk/releases/download/v1.29.0/bazelisk-amd64.deb
 RUN dpkg -i bazelisk-amd64.deb
@@ -23,6 +32,7 @@ RUN useradd -m -u 1000 -s /bin/bash agent
 USER agent
 ENV GOPATH=/home/agent/go
 ENV PATH="/home/agent/go/bin:${PATH}"
+ENV NUMBA_CACHE_DIR=/tmp/numba_cache
 
 RUN mkdir -p /home/agent/go-preload && cd /home/agent/go-preload \
     && go mod init preload \
