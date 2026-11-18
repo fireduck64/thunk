@@ -43,7 +43,7 @@ services:
       - "/tmp:size=512m"
     mem_limit: 4g
     cpus: 2.0
-    pids_limit: 128
+    pids_limit: 512
     networks: 
       - jail_net
     environment:
@@ -80,7 +80,7 @@ services:
       - "/tmp:size=512m"
     mem_limit: 4g
     cpus: 2.0
-    pids_limit: 128
+    pids_limit: 512
     networks: 
       - jail_net
     environment:
