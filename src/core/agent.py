@@ -267,9 +267,13 @@ class AgentCore:
         return self.normalize_wire_messages(self.messages)
 
     def _clear_ephemeral_images(self) -> None:
-        """Strips transient base64 `_images`, transient presence footers, and transient assistant briefings from working memory after they have been sent to the LLM once."""
+        """Strips transient base64 `_images`, transient presence footers, transient worldview blocks, and transient assistant briefings from working memory after they have been sent to the LLM once."""
         for idx in range(len(self.messages) - 1, -1, -1):
-            if self.messages[idx].get("_transient_presence") or self.messages[idx].get("_transient_briefing"):
+            if (
+                self.messages[idx].get("_transient_presence")
+                or self.messages[idx].get("_transient_briefing")
+                or self.messages[idx].get("_transient_worldview")
+            ):
                 del self.messages[idx]
             else:
                 self.messages[idx].pop("_images", None)

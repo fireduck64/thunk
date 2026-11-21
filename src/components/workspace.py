@@ -19,12 +19,16 @@ This directory contains an automatically updated, read-only snapshot of your own
 
 ## Databases & Schemas
 
-### 1. `memory.db` (Tiered & Subconscious Memory)
+### 1. `memory.db` (Tiered, Subconscious & Belief Graph Memory)
 - `archival_log`: `(id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT, content TEXT, timestamp DATETIME)` — Complete chronological log of all messages and tool executions.
 - `core_summary`: `(id INTEGER PRIMARY KEY, summary TEXT)` — Current active rolling core summary (row `id = 1`).
 - `core_summary_history`: `(id INTEGER PRIMARY KEY AUTOINCREMENT, summary TEXT, compacted_up_to_id INTEGER, timestamp DATETIME)` — Historical log of every memory compaction and summary revision.
-- `memory_settings`: `(key TEXT PRIMARY KEY, value TEXT)` — Compaction state pointers (e.g., `last_compacted_id`).
+- `memory_settings`: `(key TEXT PRIMARY KEY, value TEXT)` — Compaction and archivist state pointers (e.g., `last_compacted_id`, `belief_archivist_last_log_id`).
 - `layer_1_pool`: `(id TEXT PRIMARY KEY, content TEXT, metadata TEXT, hits INTEGER, age INTEGER, last_similarity REAL, updated_at DATETIME)` — Stateful Spreading Activation working pool candidates.
+- `beliefs`: `(id INTEGER PRIMARY KEY AUTOINCREMENT, claim TEXT, epistemic_bucket TEXT, status TEXT, confidence REAL, revision_note TEXT, evidence_refs TEXT, activation_count INTEGER, created_at DATETIME, updated_at DATETIME, last_accessed_at DATETIME)` — Epistemic belief nodes and retained retraction tombstones (`refuted`, `superseded`, `needs_review`).
+- `beliefs_fts`: FTS5 full-text virtual index over `beliefs(claim, revision_note)`.
+- `belief_edges`: `(source_id INTEGER, target_id INTEGER, relation TEXT, weight REAL, created_at DATETIME, updated_at DATETIME)` — Directed typed belief edges (`depends_on`, `supersedes`, `contradicts`, `related_to`).
+- `belief_inbox`: `(id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT, claim TEXT, stance TEXT, reason TEXT, processed INTEGER, created_at DATETIME)` — Staging queue for `record_belief` declarations awaiting `BeliefArchivist` review.
 
 ### 2. `notes.db` (Structured Notes)
 - `notes`: `(key TEXT PRIMARY KEY, value TEXT)` — Hierarchical key-value scratchpad notes (including `sticky`).

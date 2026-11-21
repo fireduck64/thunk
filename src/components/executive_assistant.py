@@ -82,6 +82,7 @@ class ExecutiveAssistantComponent(BaseComponent):
         notes_comp: Optional[StructuredNotesComponent] = None,
         memory_comp: Optional[Any] = None,
         vector_comp: Optional[Any] = None,
+        belief_comp: Optional[Any] = None,
     ):
         self.config = load_config()
         self.agent_name = self.config.get("agent", {}).get("name", "Thunk")
@@ -189,6 +190,7 @@ class ExecutiveAssistantComponent(BaseComponent):
         self.notes_comp: Optional[StructuredNotesComponent] = notes_comp
         self.memory_comp: Optional[Any] = memory_comp
         self.vector_comp: Optional[Any] = vector_comp
+        self.belief_comp: Optional[Any] = belief_comp
         self.last_usage: Optional[Dict[str, Any]] = None
         self.last_finish_reason: Optional[str] = None
         self._last_briefed_sig: Optional[Tuple[int, str]] = None
@@ -233,6 +235,8 @@ class ExecutiveAssistantComponent(BaseComponent):
                 self.memory_comp = comp
             elif cname in ("VectorMemoryComponent", "SemanticMemoryComponent") and self.vector_comp is None:
                 self.vector_comp = comp
+            elif cname == "BeliefGraphComponent" and self.belief_comp is None:
+                self.belief_comp = comp
         if self.notes_comp is not None:
             self.notes_comp.ensure_seed_prompts()
 
@@ -260,7 +264,9 @@ class ExecutiveAssistantComponent(BaseComponent):
         if not messages:
             return
         for idx in range(len(messages) - 1, -1, -1):
-            if isinstance(messages[idx], dict) and messages[idx].get("_transient_briefing"):
+            if isinstance(messages[idx], dict) and (
+                messages[idx].get("_transient_briefing") or messages[idx].get("_transient_worldview")
+            ):
                 del messages[idx]
 
     @staticmethod
@@ -994,13 +1000,93 @@ class ExecutiveAssistantComponent(BaseComponent):
 
         return target_key
 
+    def _inject_worldview_block(
+        self,
+        messages: List[Dict[str, Any]],
+        incoming_event: str,
+    ) -> None:
+        if self.belief_comp is None or not getattr(self.belief_comp, "enabled", True):
+            return
+
+        bg_cfg = self.config.get("belief_graph", {})
+        default_depth = int(
+            getattr(self.belief_comp, "default_spider_depth", bg_cfg.get("default_spider_depth", 1))
+        )
+        deep_depth = int(
+            getattr(self.belief_comp, "deep_spider_depth", bg_cfg.get("deep_spider_depth", 2))
+        )
+        min_weight = float(
+            getattr(self.belief_comp, "min_edge_weight", bg_cfg.get("min_edge_weight", 0.35))
+        )
+        node_budget = int(
+            getattr(self.belief_comp, "node_budget", bg_cfg.get("node_budget", 8))
+        )
+
+        try:
+            is_contemplative_thread = self.thread_id in ("mind", "main", "reader", "worker")
+            if is_contemplative_thread:
+                nodes = self.belief_comp.spider_beliefs(
+                    query=incoming_event,
+                    max_depth=deep_depth,
+                    min_weight=min_weight,
+                    node_budget=node_budget,
+                    record_access=True,
+                )
+            else:
+                probe_nodes = self.belief_comp.spider_beliefs(
+                    query=incoming_event,
+                    max_depth=default_depth,
+                    min_weight=min_weight,
+                    node_budget=node_budget,
+                    record_access=False,
+                )
+                probe_ids = [int(b["id"]) for b in probe_nodes]
+                if probe_nodes and deep_depth > default_depth and self.belief_comp.has_tension(probe_ids):
+                    nodes = self.belief_comp.spider_beliefs(
+                        query=incoming_event,
+                        max_depth=deep_depth,
+                        min_weight=min_weight,
+                        node_budget=node_budget,
+                        record_access=True,
+                    )
+                else:
+                    nodes = probe_nodes
+                    if probe_ids and hasattr(self.belief_comp, "record_belief_access"):
+                        self.belief_comp.record_belief_access(probe_ids)
+
+            if not nodes:
+                return
+
+            worldview_block = self.belief_comp.format_worldview_block(nodes)
+            if not worldview_block:
+                return
+
+            insert_idx = len(messages)
+            for idx in range(len(messages) - 1, -1, -1):
+                if isinstance(messages[idx], dict) and messages[idx].get("_transient_presence"):
+                    insert_idx = idx
+                else:
+                    break
+
+            messages.insert(
+                insert_idx,
+                {
+                    "role": "user",
+                    "content": worldview_block,
+                    "_transient_worldview": True,
+                },
+            )
+            self.belief_comp.reinforce_coactivated_edges([int(b["id"]) for b in nodes])
+        except Exception as e:
+            print(f"[ExecutiveAssistant:{self.thread_id}] Warning during belief worldview injection: {e}")
+
     async def _handle_before_llm_call(self, payload: Dict[str, Any]) -> None:
         agent = payload.get("agent") or getattr(self, "agent", None)
         self._discover_components(agent)
-        if not self.enabled or self.notes_comp is None:
+        if not self.enabled or (self.notes_comp is None and self.belief_comp is None):
             return
 
-        if self.pending_note_compaction:
+        if self.notes_comp is not None and self.pending_note_compaction:
             self.pending_note_compaction = False
             self.last_compaction_ts = time.time()
             try:
@@ -1022,6 +1108,7 @@ class ExecutiveAssistantComponent(BaseComponent):
             if isinstance(m, dict)
             and not m.get("_transient_presence")
             and not m.get("_transient_briefing")
+            and not m.get("_transient_worldview")
             and not m.get("_transient_nudge")
         ]
         if not non_transient:
@@ -1044,6 +1131,11 @@ class ExecutiveAssistantComponent(BaseComponent):
         if self._last_briefed_sig == sig:
             return
         self._last_briefed_sig = sig
+
+        self._inject_worldview_block(messages, incoming_event)
+
+        if self.notes_comp is None:
+            return
 
         all_notes = self.notes_comp.get_all_notes()
         searchable_notes = [

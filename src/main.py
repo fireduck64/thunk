@@ -27,6 +27,7 @@ from src.components.subconscious import SubconsciousRecallComponent
 from src.components.spreading_activation import SpreadingActivationComponent
 from src.components.memory_gardener import MemoryGardenerComponent
 from src.components.executive_assistant import ExecutiveAssistantComponent
+from src.components.belief_graph import BeliefGraphComponent, BeliefArchivist
 from src.components.file_reader import FileReaderComponent
 from src.components.oracle import OracleComponent
 from src.components.speaker import SpeakerComponent
@@ -112,10 +113,24 @@ def _register_thread_components(
     if _wants("notes", "structured_notes", "structurednotescomponent"):
         agent.register_component(StructuredNotesComponent())
 
+    bg_enabled_cfg = config.get("belief_graph", {}).get("enabled", False)
+    if bg_enabled_cfg or (
+        requested is not None and _wants("belief_graph", "beliefgraphcomponent")
+    ):
+        agent.register_component(BeliefGraphComponent(thread_id=thread_id))
+
     ea_enabled_cfg = config.get("executive_assistant", {}).get("enabled", False)
     if (requested is not None and _wants("executive_assistant", "executiveassistantcomponent")) or (
         ea_enabled_cfg
-        and _wants("notes", "structured_notes", "structurednotescomponent", "executive_assistant", "executiveassistantcomponent")
+        and _wants(
+            "notes",
+            "structured_notes",
+            "structurednotescomponent",
+            "executive_assistant",
+            "executiveassistantcomponent",
+            "belief_graph",
+            "beliefgraphcomponent",
+        )
     ):
         agent.register_component(ExecutiveAssistantComponent(thread_id=thread_id, enabled=True))
 
@@ -158,6 +173,8 @@ async def main():
     shared_log_file = _create_shared_log_file(config)
     threads_cfg = config.get("threads")
 
+    bg_enabled = bool(config.get("belief_graph", {}).get("enabled", False))
+
     if not isinstance(threads_cfg, dict) or not threads_cfg:
         agent = AgentCore(thread_id="main")
         _register_thread_components(
@@ -169,6 +186,10 @@ async def main():
         )
         mqtt_adapter = MQTTAdapter(agent)
         discord_adapter = DiscordAdapter(agent)
+        archivist_task = None
+        if bg_enabled or any(isinstance(c, BeliefGraphComponent) for c in agent.components):
+            archivist = BeliefArchivist(log_file=shared_log_file)
+            archivist_task = asyncio.create_task(archivist.run())
 
         try:
             await asyncio.gather(
@@ -178,6 +199,10 @@ async def main():
             )
         except asyncio.CancelledError:
             print("\nShutting down gracefully...")
+        finally:
+            if archivist_task is not None:
+                archivist_task.cancel()
+                await asyncio.gather(archivist_task, return_exceptions=True)
         return
 
     # Multi-thread initialization
@@ -189,6 +214,7 @@ async def main():
         registry.register_thread(thread_id, role)
 
     coroutines = []
+    agents = []
     for thread_id, t_cfg in threads_cfg.items():
         if not isinstance(t_cfg, dict):
             continue
@@ -201,6 +227,7 @@ async def main():
             provider=t_cfg.get("provider"),
             model_name=t_cfg.get("model_name"),
         )
+        agents.append(agent)
         registry.register_thread(thread_id, role, core=agent)
         _register_thread_components(
             agent,
@@ -221,10 +248,19 @@ async def main():
             discord_adapter = DiscordAdapter(agent)
             coroutines.append(discord_adapter.start())
 
+    archivist_task = None
+    if bg_enabled or any(isinstance(c, BeliefGraphComponent) for a in agents for c in a.components):
+        archivist = BeliefArchivist(log_file=shared_log_file)
+        archivist_task = asyncio.create_task(archivist.run())
+
     try:
         await asyncio.gather(*coroutines)
     except asyncio.CancelledError:
         print("\nShutting down gracefully...")
+    finally:
+        if archivist_task is not None:
+            archivist_task.cancel()
+            await asyncio.gather(archivist_task, return_exceptions=True)
 
 
 if __name__ == "__main__":

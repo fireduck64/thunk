@@ -44,6 +44,36 @@ compaction_min_interval_sec = 600.0
 compaction_note_cooldown_sec = 3600.0 # Per-note cooldown when compaction fails/stalls so other oversized notes rotate
 recent_briefing_window = 5            # Sliding turn window for suppressing duplicate '[Assistant Briefing]' bullets
 
+[belief_graph]
+enabled = false
+# Trigger a background review whenever this many new archival_log rows accumulate
+# past memory_settings['belief_archivist_last_log_id']
+archival_row_threshold = 30
+# Cap rows and per-row preview size per LLM call so backlogs and large tool outputs drain cleanly
+max_rows_per_batch = 60
+max_chars_per_row = 1500
+# Async background polling interval and minimum cooldown between LLM runs (seconds)
+poll_interval_sec = 60.0
+min_run_interval_sec = 120.0
+# If true, an explicit Boss record_belief() call triggers a pass on the next poll
+flush_inbox_immediately = true
+# Seed belief_archivist_last_log_id to MAX(archival_log.id) on first init so existing DBs don't replay ancient history
+bootstrap_from_latest = true
+
+# Big-model routing (point at a stateless/offload slot or Gemini so mind/social KV caches stay intact)
+# Falls back to [llm] provider/endpoint/model settings if omitted/empty
+provider = ""
+api_url = ""
+api_key = ""
+model = "gemma4:31b"
+extra_headers = { "X-Agent-ID" = "thunk-belief-archivist" }
+
+# ExecutiveAssistant spidering defaults
+default_spider_depth = 1
+deep_spider_depth = 2
+min_edge_weight = 0.35
+node_budget = 8
+
 [tokenizer]
 # HuggingFace model path used strictly for token counting in tiered memory
 model_name = "unsloth/gemma-7b"
