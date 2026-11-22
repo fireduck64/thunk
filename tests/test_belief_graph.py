@@ -671,3 +671,88 @@ def test_main_registration_provider_routing_and_workspace_docs(tmp_path):
     assert isinstance(gem_archivist.client, GeminiOpenAIClientAdapter)
     assert gem_archivist.exec_location == "cloud"
 
+
+@pytest.mark.asyncio
+async def test_archivist_16k_thinking_headroom_inbox_batch_cap_and_ephemeral_guard(tmp_path):
+    """
+    Verifies:
+    - BeliefArchivist defaults max_output_tokens to 16384 (>= 16k) with thinking enabled (no think=False),
+      cleanly parsing <think>...</think> blocks ahead of JSON.
+    - max_inbox_per_batch caps how many belief_inbox items are processed per run_once() call so large
+      inbox backlogs drain in bounded chunks.
+    - Tool instructions and Archivist system prompt explicitly discourage ephemeral status/traceback beliefs.
+    """
+    from src.components.belief_graph import DEFAULT_ARCHIVIST_SYSTEM_PROMPT
+
+    db_path = str(tmp_path / "chunked_inbox.db")
+    bg = BeliefGraphComponent(db_path=db_path, thread_id="mind")
+
+    assert "ephemeral" in bg.get_system_prompt_addition().lower()
+    assert "ephemeral" in (bg.record_belief.__doc__ or "").lower()
+    assert "ephemeral" in DEFAULT_ARCHIVIST_SYSTEM_PROMPT.lower()
+
+    mock_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=None))
+    )
+    archivist = BeliefArchivist(
+        db_path=db_path,
+        graph=bg,
+        max_inbox_per_batch=3,
+        flush_inbox_immediately=True,
+        provider="openai",
+        api_url="http://localhost:11435/v1",
+        model="gemma4:31b",
+        client=mock_client,
+    )
+    assert archivist.max_output_tokens >= 16384
+
+    for idx in range(7):
+        bg.record_belief(
+            claim=f"Durable hypothesis #{idx}",
+            stance="held",
+            reason=f"Evidence item {idx}",
+        )
+
+    observed_kwargs = []
+
+    def _thinking_llm(**kwargs):
+        observed_kwargs.append(kwargs)
+        user_text = kwargs["messages"][1]["content"]
+        # Count how many inbox items were included in this batch prompt
+        inbox_lines = [
+            ln for ln in user_text.splitlines() if ln.startswith("- [inbox_id=")
+        ]
+        assert len(inbox_lines) <= 3
+        long_thought = "<think>" + ("evaluating provenance and durability... " * 200) + "</think>\n"
+        payload = {
+            "add_beliefs": [],
+            "revise_beliefs": [],
+            "add_edges": [],
+        }
+        return _mock_completion(long_thought + json.dumps(payload))
+
+    mock_client.chat.completions.create = _thinking_llm
+
+    # Pass 1 processes 3 of 7
+    r1 = await archivist.run_once()
+    assert r1["triggered"] is True
+    assert r1["inbox_processed"] == 3
+    assert observed_kwargs[-1]["max_tokens"] >= 16384
+    assert "extra_body" not in observed_kwargs[-1]  # thinking stays enabled
+
+    # Pass 2 processes next 3 of 7
+    r2 = await archivist.run_once()
+    assert r2["triggered"] is True
+    assert r2["inbox_processed"] == 3
+
+    # Pass 3 processes final 1 of 7
+    r3 = await archivist.run_once()
+    assert r3["triggered"] is True
+    assert r3["inbox_processed"] == 1
+
+    # Pass 4 sees 0 remaining inbox rows and 0 archival_log rows -> does not trigger
+    r4 = await archivist.run_once()
+    assert r4["triggered"] is False
+    assert len(observed_kwargs) == 3
+
+

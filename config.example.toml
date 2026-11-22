@@ -49,9 +49,12 @@ enabled = false
 # Trigger a background review whenever this many new archival_log rows accumulate
 # past memory_settings['belief_archivist_last_log_id']
 archival_row_threshold = 30
-# Cap rows and per-row preview size per LLM call so backlogs and large tool outputs drain cleanly
+# Cap archival_log rows, belief_inbox rows, and per-row preview size per LLM call so backlogs drain cleanly
 max_rows_per_batch = 60
+max_inbox_per_batch = 10
 max_chars_per_row = 1500
+# Allow generous completion budget so thinking models (e.g. gemma4:31b <think>) never truncate before JSON
+max_output_tokens = 16384
 # Async background polling interval and minimum cooldown between LLM runs (seconds)
 poll_interval_sec = 60.0
 min_run_interval_sec = 120.0

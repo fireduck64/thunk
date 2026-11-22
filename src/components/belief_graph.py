@@ -182,8 +182,9 @@ Your job is to review new Boss belief declarations (`belief_inbox`) and recent t
 3. Tombstones & Retractions:
    - Never ignore an existing belief when new evidence contradicts or replaces it. Emit a `revise_beliefs` entry marking the old belief `"refuted"` or `"superseded"` with a concise `revision_note` (and `superseded_by_ref` when replaced by a newer belief).
    - If an existing belief is in `"needs_review"`, either reaffirm it (`"active"`/`"tentative"`), update it, or mark it `"refuted"`/`"superseded"` if the batch addresses it.
-4. High Signal Only:
+4. High Signal & Durable Claims Only (No Ephemeral State):
    - Ignore routine greetings, NVR camera motion alerts, clock ticks, raw book chunks, and transient CLI/network hiccups.
+   - NEVER record ephemeral operational state as beliefs—skip thread status-board changes (e.g. "mind status updated to X"), momentary task/step progress ("currently running/synthesizing X"), or mid-debugging SyntaxError/TypeError tracebacks. Only record durable claims that remain meaningful beyond the current turn.
    - If nothing durable or belief-worthy happened, return empty arrays: `{"add_beliefs": [], "revise_beliefs": [], "add_edges": []}`.
 5. Edges (`relation`):
    - `"depends_on"`: `source_ref` relies on `target_ref` being true (if `target_ref` is later refuted, `source_ref` will automatically flip to `needs_review`).
@@ -429,8 +430,10 @@ class BeliefGraphComponent(BaseComponent):
             return ""
         return (
             "You maintain an epistemic belief graph separately from raw memories. "
-            "Use `record_belief(claim, stance, reason)` whenever you deliberately adopt a new stance, "
+            "Use `record_belief(claim, stance, reason)` whenever you deliberately adopt a durable new stance, "
             "revise an old assumption, mark something `refuted`, or reclassify an idea as `lore`. "
+            "Only record durable facts, hypotheses, preferences, or lore—do NOT record ephemeral thread statuses, "
+            "momentary task progress ('currently running X'), or transient debugging errors/tracebacks. "
             "A background archivist maintains links and revisions automatically."
         )
 
@@ -441,11 +444,13 @@ class BeliefGraphComponent(BaseComponent):
 
     def record_belief(self, claim: str, stance: str = "held", reason: str = "") -> str:
         """
-        Records a deliberate epistemic stance, hypothesis revision, refutation, or piece of lore
-        into your belief inbox for background graph indexing.
+        Records a durable epistemic stance, hypothesis revision, refutation, or piece of lore
+        into your belief inbox for background graph indexing. Do NOT use this for ephemeral
+        thread status updates, momentary task progress ('currently running X'), or transient
+        syntax/runtime tracebacks during active debugging.
 
         Args:
-            claim: Clear, self-contained statement of the belief or retracted assumption.
+            claim: Clear, self-contained statement of the durable belief or retracted assumption.
             stance: One of 'held', 'tentative', 'refuted', or 'lore'.
             reason: Brief evidence, context, or reason for adopting or retracting this belief.
         """
@@ -1087,6 +1092,7 @@ class BeliefArchivist:
         graph: Optional[BeliefGraphComponent] = None,
         archival_row_threshold: Optional[int] = None,
         max_rows_per_batch: Optional[int] = None,
+        max_inbox_per_batch: Optional[int] = None,
         max_chars_per_row: Optional[int] = None,
         poll_interval_sec: Optional[float] = None,
         min_run_interval_sec: Optional[float] = None,
@@ -1136,6 +1142,14 @@ class BeliefArchivist:
             if max_rows_per_batch is not None
             else bg_cfg.get("max_rows_per_batch", 60)
         )
+        self.max_inbox_per_batch = max(
+            1,
+            int(
+                max_inbox_per_batch
+                if max_inbox_per_batch is not None
+                else bg_cfg.get("max_inbox_per_batch", 10)
+            ),
+        )
         self.max_chars_per_row = int(
             max_chars_per_row
             if max_chars_per_row is not None
@@ -1159,7 +1173,7 @@ class BeliefArchivist:
         self.max_output_tokens = int(
             max_output_tokens
             if max_output_tokens is not None
-            else bg_cfg.get("max_output_tokens", 4096)
+            else bg_cfg.get("max_output_tokens", llm_cfg.get("max_output_tokens", 16384))
         )
 
         cfg_api_url = str(api_url if api_url is not None else (bg_cfg.get("api_url") or "")).strip()
@@ -1533,7 +1547,9 @@ class BeliefArchivist:
                 FROM belief_inbox
                 WHERE processed = 0
                 ORDER BY id ASC
-                """
+                LIMIT ?
+                """,
+                (self.max_inbox_per_batch,),
             ).fetchall()
             log_rows = conn.execute(
                 """
