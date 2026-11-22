@@ -328,6 +328,7 @@ class AgentCore:
                     "subdir": ("path", "filepath", "file_path"),
                     "chunk": ("page_number", "page"),
                     "message": ("msg", "text"),
+                    "target_thread": ("thread", "thread_id", "target"),
                 }
                 for target_param, aliases in alias_map.items():
                     if target_param in valid_params and target_param not in normalized_args:

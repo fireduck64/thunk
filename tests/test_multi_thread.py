@@ -374,3 +374,152 @@ async def test_combined_audit_log_and_extract_monolog_filtering(tmp_path):
     assert "[reader] [AGENT MONOLOGUE]" in reader_out
     assert "Reader thread thought" in reader_out
     assert "Social thread thought" not in reader_out
+
+
+@pytest.mark.asyncio
+async def test_inspect_thread_introspection_noise_stripping_and_traceback_tail(tmp_path):
+    """
+    6. Sibling Thread Log Introspection (inspect_thread):
+    - Silently reads target_thread's archival_log without waking or modifying target_thread.
+    - Reports live status and pending inbox queue count.
+    - Strips [Subconscious Recall] wrappers and skips [System Clock] rows.
+    - Preserves both head and tail of long tool outputs so bottom tracebacks remain visible.
+    - Supports case-insensitive search filtering and AgentCore 'thread'/'target' parameter aliases.
+    """
+    db_path = str(tmp_path / "inspect_memory.db")
+    tok = FastDummyTokenizer()
+
+    registry = ThreadRegistry()
+    social_core = AgentCore(thread_id="social")
+    mind_core = AgentCore(thread_id="mind")
+
+    social_presence = ThreadPresenceComponent(
+        registry=registry,
+        thread_id="social",
+        role="Outward social voice",
+    )
+    mind_presence = ThreadPresenceComponent(
+        registry=registry,
+        thread_id="mind",
+        role="Deep workspace experimentation",
+    )
+
+    social_mem = TieredMemoryComponent(db_path=db_path, thread_id="social", tokenizer=tok)
+    mind_mem = TieredMemoryComponent(db_path=db_path, thread_id="mind", tokenizer=tok)
+
+    try:
+        social_core.register_component(social_presence)
+        social_core.register_component(social_mem)
+        mind_core.register_component(mind_presence)
+        mind_core.register_component(mind_mem)
+        social_core._build_tools()
+
+        await social_core.event_bus.publish("agent_started", {"agent": social_core})
+        await mind_core.event_bus.publish("agent_started", {"agent": mind_core})
+
+        # Validation errors
+        assert "already on thread 'social'" in social_presence.inspect_thread("social")
+        assert "Unknown target_thread 'nonexistent'" in social_presence.inspect_thread("nonexistent")
+        assert "target_thread is required" in social_presence.inspect_thread("")
+
+        mind_presence.set_thread_status("Validating UNCOVER DR4 catalog hashes")
+        await mind_core.inbox.put("[Internal Ping from thread 'social']: Any update?")
+        mind_core.suspended.clear()  # mind is currently sleeping/suspended
+
+        # Populate mind's archival_log with realistic turns (subconscious wrapper, clock tick, tool call, long traceback)
+        await mind_mem.on_event(
+            "message_added",
+            {
+                "message": {
+                    "role": "user",
+                    "content": (
+                        "[Subconscious Recall Triggered]\nOld memory blob that should not echo\n"
+                        "--- End Recall ---\n\nVerify SHA-256 hashes in uncover_dr4_core_provenance.txt"
+                    ),
+                }
+            },
+        )
+        await mind_mem.on_event(
+            "message_added",
+            {"message": {"role": "user", "content": "[System Clock] 2026-11-21 16:00:00"}},
+        )
+        await mind_mem.on_event(
+            "message_added",
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "function": {
+                                "name": "run_workspace_command",
+                                "arguments": '{"command": "python3 verify_dr4.py"}',
+                            },
+                        }
+                    ],
+                }
+            },
+        )
+        long_stdout = (
+            "Starting DR4 verification batch...\n"
+            + ("Checking shard...\n" * 60)
+            + "Traceback (most recent call last):\n"
+            + '  File "verify_dr4.py", line 42\n'
+            + "SyntaxError: unterminated string literal"
+        )
+        await mind_mem.on_event(
+            "message_added",
+            {
+                "message": {
+                    "role": "tool",
+                    "name": "run_workspace_command",
+                    "tool_call_id": "call_1",
+                    "content": long_stdout,
+                }
+            },
+        )
+        await social_mem.on_event(
+            "message_added",
+            {"message": {"role": "assistant", "content": "Social-only thought that must not appear in mind log"}},
+        )
+
+        # Call via AgentCore.execute_tool using alias 'thread' instead of 'target_thread'
+        report = await social_core.execute_tool(
+            "inspect_thread", json.dumps({"thread": "mind", "limit": 10})
+        )
+
+        # Must NOT wake mind or alter its inbox queue!
+        assert mind_core.suspended.is_set() is False
+        assert mind_core.inbox.qsize() == 1
+
+        # Header shows live status and pending inbox depth
+        assert "=== Thread Inspection: 'mind' ===" in report
+        assert "Validating UNCOVER DR4 catalog hashes" in report
+        assert "Pending Inbox Queue: 1 unread message(s)" in report
+
+        # Noise stripped & isolated to 'mind'
+        assert "Old memory blob that should not echo" not in report
+        assert "Verify SHA-256 hashes in uncover_dr4_core_provenance.txt" in report
+        assert "[System Clock]" not in report
+        assert "Social-only thought" not in report
+
+        # Tool call + head & tail of long tool output preserved (including bottom SyntaxError!)
+        assert "run_workspace_command" in report
+        assert "Starting DR4 verification batch..." in report
+        assert "chars omitted" in report
+        assert "SyntaxError: unterminated string literal" in report
+
+        # Chronological ordering (oldest -> newest)
+        assert report.index("Verify SHA-256 hashes") < report.index("SyntaxError: unterminated string literal")
+
+        # Optional search filter isolates matching entries
+        filtered = social_presence.inspect_thread("mind", search="SyntaxError")
+        assert "SyntaxError: unterminated string literal" in filtered
+        assert "Verify SHA-256 hashes" not in filtered
+
+        no_match = social_presence.inspect_thread("mind", search="cassowary_nonexistent")
+        assert "No substantive log entries found matching 'cassowary_nonexistent'" in no_match
+    finally:
+        social_mem._lock_file.close()
+        mind_mem._lock_file.close()

@@ -1,6 +1,11 @@
+import json
+import os
+import re
+import sqlite3
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from src.components.base import BaseComponent
+from src.utils.config import load_config
 
 
 class ThreadRegistry:
@@ -114,11 +119,13 @@ class ThreadPresenceComponent(BaseComponent):
         thread_id: str = "main",
         role: str = "General consciousness thread",
         auto_status_turns: int = 5,
+        db_path: Optional[str] = None,
     ):
         self.registry = registry
         self.thread_id = (thread_id or "main").strip() or "main"
         self.role = (role or "General consciousness thread").strip()
         self.auto_status_turns = int(auto_status_turns)
+        self.db_path = db_path
         self.registry.register_thread(self.thread_id, self.role)
 
     def get_system_prompt(self) -> str:
@@ -149,12 +156,13 @@ class ThreadPresenceComponent(BaseComponent):
             "Other agents on Discord/MQTT (e.g., Thunk, Wisp, Stuffleupagus) are separate entities running their own private threads that happen to use the same generic thread names (`social`, `mind`). "
             f"Your `[Parallel Streams of Mind (Live Status)]` board ONLY shows **your own (`{agent_name}`'s)** internal threads—never another agent's `mind` thread. "
             "When talking to other agents, refer to \"my `mind` thread\" rather than assuming `mind` is a single shared entity.\n\n"
-            "Stay focused on your current thread's domain. When a non-social thread stumbles across a wild coincidence, a hilarious passage, an inside joke connecting to a memory in your subconscious recall, or finishes a delegated quest, do not keep it to yourself—use `ping_thread('social', ...)` to tap your social thread on the shoulder so it can share it on Discord/MQTT."
+            "Stay focused on your current thread's domain. If you want to know what a sibling thread is working on, whether a script succeeded or errored, or what it recently produced, call `inspect_thread(target_thread)` to silently read its recent log entries instead of pinging it for a status update. When a non-social thread stumbles across a wild coincidence, a hilarious passage, an inside joke connecting to a memory in your subconscious recall, or finishes a delegated quest, do not keep it to yourself—use `ping_thread('social', ...)` to tap your social thread on the shoulder so it can share it on Discord/MQTT."
         )
 
     def get_tools(self) -> List[Callable]:
         return [
             self.set_thread_status,
+            self.inspect_thread,
             self.ping_thread,
         ]
 
@@ -171,9 +179,225 @@ class ThreadPresenceComponent(BaseComponent):
         self.registry.update_status(self.thread_id, clean, reset_turns=True)
         return f"Thread '{self.thread_id}' status updated to: {clean}"
 
+    def _resolve_memory_db_path(self, target_thread: Optional[str] = None) -> Optional[str]:
+        if self.db_path:
+            return self.db_path
+        candidate_cores = []
+        if target_thread and target_thread in self.registry.cores:
+            candidate_cores.append(self.registry.cores[target_thread])
+        own_agent = getattr(self, "agent", None)
+        if own_agent is not None:
+            candidate_cores.append(own_agent)
+        for core in self.registry.cores.values():
+            if core not in candidate_cores:
+                candidate_cores.append(core)
+        for core in candidate_cores:
+            for comp in getattr(core, "components", []) or []:
+                if comp.__class__.__name__ == "TieredMemoryComponent" and getattr(comp, "db_path", None):
+                    return str(comp.db_path)
+        try:
+            return load_config().get("memory", {}).get("db_path")
+        except Exception:
+            return None
+
+    @staticmethod
+    def _strip_subconscious_and_thinking(text: str) -> str:
+        raw = text or ""
+        if raw.startswith("[Subconscious Recall Triggered"):
+            parts = raw.split("--- End Recall ---\n\n", 1)
+            if len(parts) == 2:
+                raw = parts[1]
+        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        if "<think>" in raw:
+            raw = raw.split("<think>", 1)[0].strip()
+        return raw
+
+    @staticmethod
+    def _head_tail_truncate(text: str, head_chars: int = 350, tail_chars: int = 220) -> str:
+        clean = (text or "").strip()
+        max_len = head_chars + tail_chars + 30
+        if len(clean) <= max_len:
+            return clean
+        omitted = len(clean) - (head_chars + tail_chars)
+        return f"{clean[:head_chars].rstrip()}\n... [{omitted} chars omitted] ...\n{clean[-tail_chars:].lstrip()}"
+
+    def inspect_thread(
+        self,
+        target_thread: str,
+        limit: int = 12,
+        search: str = "",
+    ) -> str:
+        """
+        Silently read recent activity logs (thoughts, tool calls, and tool outputs/errors) of a sibling
+        thread without waking or interrupting it. Use this whenever you want to see what another thread
+        is actually doing or check whether a task/script succeeded before deciding whether to ping it.
+
+        Args:
+            target_thread: Sibling thread name to inspect (e.g. 'mind' or 'social').
+            limit: Number of recent substantive log entries to return (1-30, default 12).
+            search: Optional case-insensitive substring filter to search that thread's log.
+        """
+        target = (target_thread or "").strip()
+        if not target:
+            return "Error: target_thread is required."
+        if target == self.thread_id:
+            return (
+                f"Error: You are already on thread '{self.thread_id}'; "
+                "your recent messages are already in your active context."
+            )
+        if target not in self.registry.statuses and target not in self.registry.cores:
+            available = [t for t in self.registry.statuses.keys() if t != self.thread_id]
+            return f"Error: Unknown target_thread '{target}'. Available sibling threads: {available}"
+
+        try:
+            capped_limit = max(1, min(30, int(limit)))
+        except (TypeError, ValueError):
+            capped_limit = 12
+
+        clean_search = (search or "").strip()
+
+        status_info = self.registry.statuses.get(target, {})
+        status_text = status_info.get("status") or "Active"
+        elapsed = self._format_elapsed(status_info.get("updated_at", time.time()))
+        target_core = self.registry.cores.get(target)
+        inbox_depth = (
+            target_core.inbox.qsize()
+            if target_core is not None and hasattr(target_core, "inbox")
+            else 0
+        )
+
+        header_lines = [
+            f"=== Thread Inspection: '{target}' ===",
+            f"Live Status ({elapsed}): {status_text}",
+            f"Pending Inbox Queue: {inbox_depth} unread message(s)",
+        ]
+
+        resolved_db = self._resolve_memory_db_path(target_thread=target)
+        if not resolved_db or not os.path.exists(resolved_db):
+            header_lines.append("(No archival log database found yet.)")
+            return "\n".join(header_lines)
+
+        uri = f"file:{os.path.abspath(resolved_db)}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=5.0)
+        try:
+            cols = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(archival_log)").fetchall()
+            }
+            if not cols:
+                header_lines.append("(No archival_log table found yet.)")
+                return "\n".join(header_lines)
+
+            has_tc = "tool_calls" in cols
+            has_name = "name" in cols
+            has_thread = "thread_id" in cols
+
+            select_cols = [
+                "id",
+                "timestamp",
+                "role",
+                "content",
+                "tool_calls" if has_tc else "NULL AS tool_calls",
+                "name" if has_name else "NULL AS name",
+            ]
+            where_clauses = []
+            params: List[Any] = []
+
+            if has_thread:
+                where_clauses.append("thread_id = ?")
+                params.append(target)
+            elif target != "main":
+                header_lines.append("(No entries recorded for this thread yet.)")
+                return "\n".join(header_lines)
+
+            if clean_search:
+                like_pat = f"%{clean_search.lower()}%"
+                search_parts = ["LOWER(COALESCE(content, '')) LIKE ?"]
+                params.append(like_pat)
+                if has_tc:
+                    search_parts.append("LOWER(COALESCE(tool_calls, '')) LIKE ?")
+                    params.append(like_pat)
+                if has_name:
+                    search_parts.append("LOWER(COALESCE(name, '')) LIKE ?")
+                    params.append(like_pat)
+                where_clauses.append("(" + " OR ".join(search_parts) + ")")
+
+            where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+            fetch_cap = capped_limit * 3 + 15
+            params.append(fetch_cap)
+
+            rows = conn.execute(
+                f"SELECT {', '.join(select_cols)} FROM archival_log {where_sql} ORDER BY id DESC LIMIT ?",
+                tuple(params),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        formatted_entries: List[str] = []
+        for row_id, ts, role, raw_content, raw_tcs, tool_name in rows:
+            role_str = str(role or "unknown")
+            cleaned = self._strip_subconscious_and_thinking(str(raw_content or ""))
+
+            if cleaned.startswith("[System Clock]"):
+                continue
+
+            tc_summary = ""
+            if raw_tcs:
+                try:
+                    tcs = json.loads(raw_tcs)
+                    if isinstance(tcs, list) and tcs:
+                        parts = []
+                        for tc in tcs:
+                            if not isinstance(tc, dict):
+                                continue
+                            fn = tc.get("name") or (tc.get("function") or {}).get("name") or "tool"
+                            args_s = str(
+                                tc.get("arguments")
+                                if "arguments" in tc
+                                else (tc.get("function") or {}).get("arguments") or "{}"
+                            ).strip()
+                            args_s = re.sub(r"\s+", " ", args_s)
+                            if len(args_s) > 160:
+                                args_s = args_s[:157] + "..."
+                            parts.append(f"{fn}({args_s})")
+                        if parts:
+                            tc_summary = "Calls: " + "; ".join(parts)
+                except Exception:
+                    pass
+
+            if cleaned == "[Tool Calls Requested]" and tc_summary:
+                cleaned = ""
+
+            if role_str == "tool":
+                role_label = f"tool:{tool_name}" if tool_name else "tool"
+                body = self._head_tail_truncate(cleaned, head_chars=350, tail_chars=250)
+            else:
+                role_label = role_str
+                body = self._head_tail_truncate(cleaned, head_chars=320, tail_chars=160)
+
+            pieces = [p for p in (body, tc_summary) if p]
+            if not pieces:
+                continue
+
+            entry_text = f"[{ts or 'unknown'} | #{row_id} | {role_label}]\n" + "\n".join(pieces)
+            formatted_entries.append(entry_text)
+            if len(formatted_entries) >= capped_limit:
+                break
+
+        formatted_entries.reverse()
+        if not formatted_entries:
+            suffix = f" matching '{clean_search}'" if clean_search else ""
+            header_lines.append(f"(No substantive log entries found{suffix}.)")
+            return "\n".join(header_lines)
+
+        header_lines.append(
+            f"Recent Entries (oldest -> newest, showing {len(formatted_entries)}):"
+        )
+        return "\n".join(header_lines) + "\n\n" + "\n\n".join(formatted_entries)
+
     async def ping_thread(self, target_thread: str, message: str) -> str:
         """
-        Wake or notify another thread of your mind asynchronously. Use this to: (1) delegate a task suited for another thread's tools, (2) report back when a delegated task is completed, or (3) share an urgent 'stop the presses' discovery, joke, or serendipitous connection with your `social` thread so it can post about it. NEVER send a ping just to say thank you or acknowledge receipt.
+        Wake or notify another thread of your mind asynchronously. Check `inspect_thread` first if you simply want to see what a sibling thread is working on or whether a command failed. Use `ping_thread` to: (1) delegate a task suited for another thread's tools, (2) report back when a delegated task is completed, or (3) share an urgent 'stop the presses' discovery, joke, or serendipitous connection with your `social` thread so it can post about it. NEVER send a ping just to say thank you, acknowledge receipt, or ask for a status report.
         """
         target = (target_thread or "").strip()
         clean_msg = (message or "").strip()
