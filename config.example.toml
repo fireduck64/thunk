@@ -152,6 +152,13 @@ images_dir = "data/thunk/images"      # Directory where incoming Discord image a
 gemini_api_key = "YOUR_GEMINI_API_KEY_HERE"
 gemini_model = "gemini-3.8-flash"
 
+[image_gen]
+# Native Gemini Image generation & multi-reference character/scene editing (reuses [oracle].gemini_api_key if omitted)
+enabled = false
+default_model = "gemini-3-pro-image"  # Default model (agents can also override per call, e.g. 'gemini-nano-banana-2.1', 'gemini-3.1-flash-image')
+default_output_library = "discord_file"
+# gemini_api_key = ""                 # Optional override; defaults to [oracle].gemini_api_key or [llm].gemini_api_key
+
 [speaker]
 # Physical room speaker integration (lertspeak ApiSpeak HTTP endpoint)
 api_url = "http://ogog.1209k.com:13233/api/v1/say"

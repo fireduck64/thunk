@@ -30,6 +30,7 @@ from src.components.executive_assistant import ExecutiveAssistantComponent
 from src.components.belief_graph import BeliefGraphComponent, BeliefArchivist
 from src.components.file_reader import FileReaderComponent
 from src.components.oracle import OracleComponent
+from src.components.image_gen import ImageGenComponent
 from src.components.speaker import SpeakerComponent
 from src.components.skills import SkillComponent
 from src.components.workspace import WorkspaceComponent
@@ -153,6 +154,14 @@ def _register_thread_components(
         agent.register_component(FileReaderComponent())
     if _wants("oracle", "oraclecomponent"):
         agent.register_component(OracleComponent())
+
+    ig_enabled_cfg = config.get("image_gen", {}).get("enabled", False)
+    if ig_enabled_cfg or (
+        requested is not None
+        and _wants("image_gen", "imagegencomponent", "image", "gemini_image")
+    ):
+        agent.register_component(ImageGenComponent(enabled=True))
+
     if _wants("speaker", "speakercomponent"):
         agent.register_component(SpeakerComponent())
     if _wants("skills", "skillcomponent"):
