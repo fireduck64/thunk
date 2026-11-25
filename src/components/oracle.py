@@ -17,6 +17,7 @@ class OracleComponent(BaseComponent):
         self.oracle_config = self.config.get("oracle", {})
         self.api_key = self.oracle_config.get("gemini_api_key")
         self.model_name = self.oracle_config.get("gemini_model", "gemini-2.5-flash")
+        self.enable_google_search = bool(self.oracle_config.get("google_search", True))
         
         if self.api_key:
             self.client = genai.Client(api_key=self.api_key)
@@ -57,13 +58,17 @@ class OracleComponent(BaseComponent):
         ) as span:
             span.inc("request_bytes", len((query or "").encode("utf-8")))
             try:
+                gen_cfg_kwargs = {
+                    "automatic_function_calling": types.AutomaticFunctionCallingConfig(disable=True),
+                }
+                if self.enable_google_search:
+                    gen_cfg_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+
                 with span.subtimer("llm_call_ms"):
                     response = await self.client.aio.models.generate_content(
                         model=self.model_name,
                         contents=query,
-                        config=types.GenerateContentConfig(
-                            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
-                        ),
+                        config=types.GenerateContentConfig(**gen_cfg_kwargs),
                     )
                 text = response.text or ""
                 usage_meta = getattr(response, "usage_metadata", None)

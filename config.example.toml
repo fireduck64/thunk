@@ -151,6 +151,7 @@ images_dir = "data/thunk/images"      # Directory where incoming Discord image a
 # Cloud AI Oracle (Google Gemini) integration for live current events and external reasoning
 gemini_api_key = "YOUR_GEMINI_API_KEY_HERE"
 gemini_model = "gemini-3.8-flash"
+google_search = true                  # Enable live Google Search grounding on ask_oracle calls
 
 [image_gen]
 # Native Gemini Image generation & multi-reference character/scene editing (reuses [oracle].gemini_api_key if omitted)

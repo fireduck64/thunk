@@ -140,12 +140,15 @@ async def test_component_llm_call_and_tool_call_metrics_emission(tmp_path, monke
     oracle = OracleComponent()
     oracle.model_name = "gemini-3.8-flash"
 
+    captured_oracle_kwargs = []
+
     class DummyOracleResp:
         text = "Cloud oracle response text."
         usage_metadata = None
 
     class DummyAioModels:
         async def generate_content(self, **kwargs):
+            captured_oracle_kwargs.append(kwargs)
             return DummyOracleResp()
 
     class DummyOracleClient:
@@ -158,7 +161,10 @@ async def test_component_llm_call_and_tool_call_metrics_emission(tmp_path, monke
 
     # Execute ask_oracle via AgentCore.execute_tool so both tool_call and oracle llm_call are emitted
     tool_res = await agent.execute_tool("ask_oracle", json.dumps({"query": "What is the weather?"}))
-    assert "Cloud oracle response text." in tool_res
+    assert tool_res == "Cloud oracle response text."
+    assert len(captured_oracle_kwargs) == 1
+    sent_tools = captured_oracle_kwargs[0]["config"].tools
+    assert sent_tools and len(sent_tools) == 1 and sent_tools[0].google_search is not None
 
     files = os.listdir(metrics_dir)
     assert len(files) == 1
