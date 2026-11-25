@@ -106,6 +106,7 @@ verbose = true                        # When true, dumps full agent context on t
 
 [file_reader]
 db_path = "data/thunk/reader_state.db"# SQLite database file for EPUB/PDF bookmark state and metadata cache
+chunk_size = 9000                     # Target character budget per chapter/paragraph-aligned EPUB/HTML book chunk
 
 [file_reader.libraries]
 # Named libraries mapping alias names to local directories for reading books, PDFs, code, and images (REQUIRED)

@@ -151,7 +151,7 @@ def _register_thread_components(
         "pdf",
         "pdfviewercomponent",
     ):
-        agent.register_component(FileReaderComponent())
+        agent.register_component(FileReaderComponent(thread_id=thread_id))
     if _wants("oracle", "oraclecomponent"):
         agent.register_component(OracleComponent())
 

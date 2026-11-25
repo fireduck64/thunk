@@ -356,5 +356,120 @@ def test_file_reader_and_discord_shared_workspace_routing(tmp_path):
     assert agent.messages[0]["content"] == sys_before
 
 
+def test_epub_spine_order_paragraph_chunking_html_books_and_thread_bookmarks(tmp_path):
+    """
+    Verifies:
+    - EPUB reading follows book.spine rather than scrambled OPF manifest order.
+    - Paragraphs and headings stay separated by '\\n\\n' and split on paragraph/sentence boundaries (never mid-word).
+    - Substantive chapters start on fresh chunk boundaries with 'section_title' metadata.
+    - Gutenberg/ebook '.htm' files parse as clean prose while workspace '.html' stays raw source code.
+    - Per-thread bookmarks ('social' vs 'mind') persist independently in reader_state.db.
+    """
+    from ebooklib import epub
+
+    ebook_dir = tmp_path / "ebooks"
+    gutenberg_dir = tmp_path / "gutenberg"
+    ws_dir = tmp_path / "workspace"
+    ebook_dir.mkdir()
+    gutenberg_dir.mkdir()
+    ws_dir.mkdir()
+
+    book = epub.EpubBook()
+    book.set_identifier("spine-test-001")
+    book.set_title("Scrambled Manifest Novel")
+    book.set_language("en")
+    book.add_author("Test Author")
+
+    # Add Chapter 10 FIRST in the manifest so get_items_of_type(9) would yield ch10 before ch1!
+    ch10 = epub.EpubHtml(title="Chapter Ten", file_name="c10.xhtml", uid="c10")
+    ch10.content = (
+        "<html><body><h1>Chapter 10: The Finale</h1>"
+        "<p>" + ("Finale paragraph sentence one. Finale sentence two. " * 12) + "</p>"
+        "</body></html>"
+    )
+
+    ch1 = epub.EpubHtml(title="Chapter One", file_name="c9.xhtml", uid="c9")
+    para_a = "First paragraph opens the real story cleanly without midword slicing. " * 6
+    para_b = '"Watch the archway!" whispered Brother Diaz across the courtyard. ' * 6
+    ch1.content = (
+        "<html><body><h1>Part I</h1><h2>Chapter 1: The Beginning</h2>"
+        f"<p>{para_a.strip()}</p><p>{para_b.strip()}</p></body></html>"
+    )
+
+    ch2 = epub.EpubHtml(title="Chapter Two", file_name="cJ.xhtml", uid="cJ")
+    ch2.content = (
+        "<html><body><h2>Chapter 2: The Road</h2>"
+        "<p>" + ("Road travel continues steadily southward through the rain. " * 6) + "</p>"
+        "</body></html>"
+    )
+
+    book.add_item(ch10)
+    book.add_item(ch1)
+    book.add_item(ch2)
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+    # True reading order in spine: c9 (Ch 1) -> cJ (Ch 2) -> c10 (Ch 10)
+    book.spine = ["c9", "cJ", "c10"]
+
+    epub_path = ebook_dir / "Scrambled.epub"
+    epub.write_epub(str(epub_path), book)
+
+    # Gutenberg HTML book vs workspace HTML source file
+    (gutenberg_dir / "book.htm").write_text(
+        "<html><head><title>Ignored</title><style>body{color:red}</style></head>"
+        "<body><h1>Book Chapter Alpha</h1><p>Clean prose paragraph one.</p><p>Clean prose paragraph two.</p></body></html>",
+        encoding="utf-8",
+    )
+    (ws_dir / "index.html").write_text("<html>\n<body>Raw template</body>\n</html>", encoding="utf-8")
+
+    db_path = str(tmp_path / "reader_state.db")
+    libs = {"ebook": str(ebook_dir), "gutenberg": str(gutenberg_dir), "workspace": str(ws_dir)}
+
+    mind_reader = FileReaderComponent(libraries=libs, db_path=db_path, chunk_size=600, thread_id="mind")
+    social_reader = FileReaderComponent(libraries=libs, db_path=db_path, chunk_size=600, thread_id="social")
+
+    # 1. Spine order: Chunk 1 is Part I — Chapter 1 (NOT Chapter 10!), split cleanly between para_a and para_b
+    r1 = json.loads(mind_reader.read_file("ebook", "Scrambled.epub", chunk=1))
+    assert r1["format"] == "epub"
+    assert "Part I — Chapter 1: The Beginning (Part 1/2)" == r1["section_title"]
+    assert "First paragraph opens the real story" in r1["content"]
+    assert "Chapter 10" not in r1["content"]
+    assert "\n\n" in r1["content"]
+    # Never cut mid-word
+    assert r1["content"].endswith("slicing.")
+
+    r2 = json.loads(mind_reader.read_next_chunk())
+    assert "Part I — Chapter 1: The Beginning (Part 2/2)" == r2["section_title"]
+    assert '"Watch the archway!"' in r2["content"]
+    # Chapter 2 did not bleed into Chapter 1's second chunk
+    assert "Chapter 2: The Road" not in r2["content"]
+
+    r3 = json.loads(mind_reader.read_next_chunk())
+    assert "Chapter 2: The Road" in r3["section_title"]
+
+    r4 = json.loads(mind_reader.read_next_chunk())
+    assert "Chapter 10: The Finale" in r4["section_title"]
+
+    # 2. Gutenberg .htm parses as clean prose, while workspace .html stays raw code with line numbers
+    htm_res = json.loads(social_reader.read_file("gutenberg", "book.htm", chunk=1))
+    assert htm_res["format"] == "html_book"
+    assert htm_res["section_title"] == "Book Chapter Alpha"
+    assert "Clean prose paragraph one.\n\nClean prose paragraph two." in htm_res["content"]
+    assert "<html>" not in htm_res["content"]
+
+    ws_html = json.loads(social_reader.read_file("workspace", "index.html", chunk=1))
+    assert ws_html["format"] == "text"
+    assert "1: <html>" in ws_html["content"]
+
+    # 3. Per-thread bookmarks survive reload without clobbering each other
+    mind_reloaded = FileReaderComponent(libraries=libs, db_path=db_path, chunk_size=600, thread_id="mind")
+    social_reloaded = FileReaderComponent(libraries=libs, db_path=db_path, chunk_size=600, thread_id="social")
+    assert mind_reloaded.current_rel_path == "Scrambled.epub"
+    assert mind_reloaded.current_index == 4
+    assert social_reloaded.current_rel_path == "index.html"
+    assert social_reloaded.current_index == 1
+
+
+
 
 

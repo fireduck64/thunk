@@ -36,8 +36,9 @@ This directory contains an automatically updated, read-only snapshot of your own
 ### 3. `tasks.db` (Priority Task Queue)
 - `task_queue`: `(id INTEGER PRIMARY KEY AUTOINCREMENT, priority INTEGER, description TEXT)` — Pending autonomous tasks.
 
-### 4. `reader_state.db` (EPUB Sequential Reader)
-- `reader_state`: `(id INTEGER PRIMARY KEY, current_book TEXT, current_index INTEGER)` — Active EPUB bookmark state.
+### 4. `reader_state.db` (EPUB & Book Sequential Reader)
+- `reader_state`: `(id INTEGER PRIMARY KEY, current_book TEXT, current_index INTEGER, current_library TEXT, current_rel_path TEXT)` — Legacy/primary bookmark state.
+- `reader_thread_state`: `(thread_id TEXT PRIMARY KEY, current_book TEXT, current_index INTEGER, current_library TEXT, current_rel_path TEXT)` — Per-thread active book bookmark state.
 - `epub_metadata_cache`: `(filepath TEXT PRIMARY KEY, mtime REAL, title TEXT, author TEXT, description TEXT)` — Cached EPUB metadata.
 
 ### 5. `pdf_state.db` (PDF Viewer)

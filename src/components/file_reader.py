@@ -46,11 +46,13 @@ class FileReaderComponent(BaseComponent):
         self,
         libraries: Dict[str, str] = None,
         db_path: str = None,
-        chunk_size: int = 2500,
+        chunk_size: int = None,
         lines_per_chunk: int = 200,
         shared_workspace_dir: str = None,
+        thread_id: str = "main",
     ):
         self.config = load_config()
+        self.thread_id = (thread_id or "main").strip() or "main"
         file_cfg = self.config.get("file_reader", {})
         explicit_libs_passed = libraries is not None
 
@@ -102,8 +104,12 @@ class FileReaderComponent(BaseComponent):
             mem_db = self.config.get("memory", {}).get("db_path", "data/thunk/memory.db")
             self.db_path = os.path.join(os.path.dirname(os.path.abspath(mem_db)), "reader_state.db")
 
-        self.chunk_size = int(chunk_size)
-        self.lines_per_chunk = int(lines_per_chunk)
+        self.chunk_size = int(
+            chunk_size if chunk_size is not None else file_cfg.get("chunk_size", 9000)
+        )
+        self.lines_per_chunk = int(
+            lines_per_chunk if lines_per_chunk is not None else file_cfg.get("lines_per_chunk", 200)
+        )
 
         os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
         for lib_key in ("ebook", "ebooks", "pdf", "pdfs", "discord_file", "discord_images"):
@@ -116,6 +122,7 @@ class FileReaderComponent(BaseComponent):
         self.current_rel_path: Optional[str] = None
         self.current_book_label: Optional[str] = None
         self.current_chunks: List[str] = []
+        self.current_chunk_titles: List[str] = []
 
         self._init_db()
         self._load_state()
@@ -193,6 +200,39 @@ class FileReaderComponent(BaseComponent):
                     "INSERT OR IGNORE INTO reader_state (id, current_book, current_index, current_library, current_rel_path) "
                     "VALUES (1, NULL, 0, NULL, NULL)"
                 )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS reader_thread_state (
+                        thread_id TEXT PRIMARY KEY,
+                        current_book TEXT,
+                        current_index INTEGER,
+                        current_library TEXT,
+                        current_rel_path TEXT
+                    )
+                    """
+                )
+                if self.thread_id in ("main", "mind"):
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO reader_thread_state (
+                            thread_id, current_book, current_index, current_library, current_rel_path
+                        )
+                        SELECT ?, current_book, current_index, current_library, current_rel_path
+                        FROM reader_state
+                        WHERE id = 1
+                        """,
+                        (self.thread_id,),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO reader_thread_state (
+                            thread_id, current_book, current_index, current_library, current_rel_path
+                        )
+                        VALUES (?, NULL, 0, NULL, NULL)
+                        """,
+                        (self.thread_id,),
+                    )
         finally:
             conn.close()
 
@@ -202,12 +242,33 @@ class FileReaderComponent(BaseComponent):
             with conn:
                 conn.execute(
                     """
-                    UPDATE reader_state
-                    SET current_book = ?, current_index = ?, current_library = ?, current_rel_path = ?
-                    WHERE id = 1
+                    INSERT INTO reader_thread_state (
+                        thread_id, current_book, current_index, current_library, current_rel_path
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(thread_id) DO UPDATE SET
+                        current_book = excluded.current_book,
+                        current_index = excluded.current_index,
+                        current_library = excluded.current_library,
+                        current_rel_path = excluded.current_rel_path
                     """,
-                    (self.current_book, self.current_index, self.current_library, self.current_rel_path),
+                    (
+                        self.thread_id,
+                        self.current_book,
+                        self.current_index,
+                        self.current_library,
+                        self.current_rel_path,
+                    ),
                 )
+                if self.thread_id in ("main", "mind"):
+                    conn.execute(
+                        """
+                        UPDATE reader_state
+                        SET current_book = ?, current_index = ?, current_library = ?, current_rel_path = ?
+                        WHERE id = 1
+                        """,
+                        (self.current_book, self.current_index, self.current_library, self.current_rel_path),
+                    )
         finally:
             conn.close()
 
@@ -233,8 +294,14 @@ class FileReaderComponent(BaseComponent):
         try:
             with conn:
                 row = conn.execute(
-                    "SELECT current_book, current_index, current_library, current_rel_path FROM reader_state WHERE id = 1"
+                    "SELECT current_book, current_index, current_library, current_rel_path "
+                    "FROM reader_thread_state WHERE thread_id = ?",
+                    (self.thread_id,),
                 ).fetchone()
+                if row is None and self.thread_id == "main":
+                    row = conn.execute(
+                        "SELECT current_book, current_index, current_library, current_rel_path FROM reader_state WHERE id = 1"
+                    ).fetchone()
         finally:
             conn.close()
 
@@ -247,6 +314,7 @@ class FileReaderComponent(BaseComponent):
         self.current_rel_path = row[3]
         self.current_book_label = None
         self.current_chunks = []
+        self.current_chunk_titles = []
 
         if self.current_book and os.path.exists(self.current_book):
             if not self.current_library or not self.current_rel_path:
@@ -263,6 +331,12 @@ class FileReaderComponent(BaseComponent):
                     self._parse_epub_chunks(self.current_book)
                 except Exception as e:
                     print(f"[FileReader Warning] Failed to restore EPUB '{self.current_book}': {e}")
+            elif ext in (".htm", ".html", ".xhtml") and self._is_book_library(self.current_library):
+                self.current_book_label = self.current_rel_path or os.path.basename(self.current_book)
+                try:
+                    self._parse_html_book_chunks(self.current_book)
+                except Exception as e:
+                    print(f"[FileReader Warning] Failed to restore HTML book '{self.current_book}': {e}")
             elif ext == ".pdf":
                 self.current_book_label = self._format_pdf_label(
                     self.current_book, self.current_rel_path or os.path.basename(self.current_book)
@@ -583,19 +657,248 @@ class FileReaderComponent(BaseComponent):
         finally:
             conn.close()
 
+    @staticmethod
+    def _is_book_library(lib_name: Optional[str]) -> bool:
+        low = (lib_name or "").strip().lower()
+        return low in ("ebook", "ebooks", "gutenberg", "gutenburg", "project_gutenberg")
+
+    @staticmethod
+    def _iter_epub_spine_items(book: Any) -> List[Any]:
+        spine_items: List[Any] = []
+        seen_ids = set()
+        for entry in getattr(book, "spine", None) or []:
+            item_id = entry[0] if isinstance(entry, (tuple, list)) and entry else entry
+            if not item_id or item_id in seen_ids:
+                continue
+            item = book.get_item_with_id(item_id)
+            if item is not None and item.get_type() == 9:  # ITEM_DOCUMENT
+                seen_ids.add(item_id)
+                spine_items.append(item)
+        if spine_items:
+            return spine_items
+        return list(book.get_items_of_type(9))
+
+    @classmethod
+    def _extract_html_sections(
+        cls,
+        raw_html: Any,
+        fallback_title: str = "",
+    ) -> List[Tuple[str, List[str]]]:
+        soup = BeautifulSoup(raw_html, "html.parser")
+        doc_title = ""
+        if soup.title and soup.title.string:
+            t_cand = " ".join(soup.title.string.split()).strip()
+            if t_cand and t_cand.lower() not in ("unknown", "untitled", "index", "document"):
+                doc_title = t_cand
+
+        for noisy in soup(["script", "style", "head", "svg", "nav"]):
+            noisy.decompose()
+
+        root = soup.body if soup.body is not None else soup
+
+        for br in root.find_all("br"):
+            br.replace_with("\n")
+        for hr in root.find_all("hr"):
+            hr.replace_with("\n\n* * *\n\n")
+
+        for htag in root.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
+            htext = " ".join(htag.get_text(" ", strip=True).split()).strip()
+            if not htext:
+                htag.decompose()
+                continue
+            if htag.name in ("h1", "h2"):
+                htag.replace_with(f"\n\n__SECTION_H12__ {htext}\n\n")
+            else:
+                htag.replace_with(f"\n\n### {htext}\n\n")
+
+        for btag in root.find_all(
+            ["p", "div", "section", "article", "blockquote", "li", "tr", "pre", "table"]
+        ):
+            btag.insert_before("\n\n")
+            btag.insert_after("\n\n")
+
+        raw_text = root.get_text()
+        norm_lines = [re.sub(r"[ \t\f\v]+", " ", ln).strip() for ln in raw_text.splitlines()]
+        cleaned_blob = "\n".join(norm_lines)
+        raw_paras = [p.strip() for p in re.split(r"\n\s*\n", cleaned_blob) if p.strip()]
+        if not raw_paras:
+            return []
+
+        default_title = doc_title or fallback_title or ""
+        sections: List[Tuple[str, List[str]]] = []
+        cur_title = default_title
+        cur_paras: List[str] = []
+
+        for para in raw_paras:
+            if para.startswith("__SECTION_H12__ "):
+                h_title = para[len("__SECTION_H12__ ") :].strip()
+                heading_line = f"# {h_title}"
+                # If previous paragraphs only contain headings (e.g. "Part I" before "Chapter 1"), merge them
+                has_body = any(not p.startswith("# ") for p in cur_paras)
+                if cur_paras and has_body:
+                    sections.append((cur_title, cur_paras))
+                    cur_title = h_title
+                    cur_paras = [heading_line]
+                else:
+                    cur_title = f"{cur_title} — {h_title}" if (cur_title and cur_paras) else h_title
+                    cur_paras.append(heading_line)
+            else:
+                cur_paras.append(para)
+
+        if cur_paras:
+            sections.append((cur_title, cur_paras))
+        return sections
+
+    @staticmethod
+    def _split_oversized_paragraph(para: str, max_chars: int) -> List[str]:
+        if len(para) <= max_chars:
+            return [para]
+
+        # Split along sentence boundaries while keeping closing punctuation attached
+        parts = re.split(r'([.!?]["\'”’)\]]*)\s+', para)
+        sentences: List[str] = []
+        idx = 0
+        while idx < len(parts):
+            seg = parts[idx]
+            punct = parts[idx + 1] if (idx + 1) < len(parts) else ""
+            combined = (seg + punct).strip()
+            if combined:
+                sentences.append(combined)
+            idx += 2
+
+        out: List[str] = []
+        cur = ""
+        for sent in sentences:
+            if len(sent) > max_chars:
+                if cur:
+                    out.append(cur)
+                    cur = ""
+                rem = sent
+                while len(rem) > max_chars:
+                    cut = rem.rfind(" ", 0, max_chars)
+                    if cut <= 0:
+                        cut = max_chars
+                    out.append(rem[:cut].strip())
+                    rem = rem[cut:].strip()
+                if rem:
+                    cur = rem
+            elif not cur:
+                cur = sent
+            elif len(cur) + 1 + len(sent) <= max_chars:
+                cur = f"{cur} {sent}"
+            else:
+                out.append(cur)
+                cur = sent
+        if cur:
+            out.append(cur)
+        return out or [para[:max_chars]]
+
+    @classmethod
+    def _pack_sections_into_chunks(
+        cls,
+        sections: List[Tuple[str, List[str]]],
+        max_chars: int,
+    ) -> Tuple[List[str], List[str]]:
+        budget = max(100, int(max_chars))
+        min_standalone = min(600, max(80, budget // 8))
+
+        # Coalesce tiny frontmatter/divider sections with the following section when combined <= budget
+        merged_sections: List[Tuple[str, List[str]]] = []
+        for sec_title, paras in sections:
+            if not paras:
+                continue
+            if merged_sections:
+                prev_title, prev_paras = merged_sections[-1]
+                prev_text = "\n\n".join(prev_paras)
+                cur_text = "\n\n".join(paras)
+                if len(prev_text) < min_standalone and (len(prev_text) + 2 + len(cur_text)) <= budget:
+                    combined_title = sec_title or prev_title
+                    if prev_title and sec_title and prev_title != sec_title:
+                        combined_title = f"{prev_title} / {sec_title}"
+                    merged_sections[-1] = (combined_title, prev_paras + paras)
+                    continue
+            merged_sections.append((sec_title, list(paras)))
+
+        chunks: List[str] = []
+        titles: List[str] = []
+
+        for sec_title, paras in merged_sections:
+            sec_chunks: List[str] = []
+            cur_paras: List[str] = []
+            cur_len = 0
+
+            for p in paras:
+                sep = 2 if cur_paras else 0
+                # Never emit a chunk that consists solely of headings without body prose
+                only_headings_so_far = bool(cur_paras) and all(cp.startswith("#") for cp in cur_paras)
+                if only_headings_so_far and (cur_len + sep + len(p)) > budget:
+                    avail = max(40, budget - cur_len - sep)
+                    pieces = cls._split_oversized_paragraph(p, avail)
+                    cur_paras.append(pieces[0])
+                    sec_chunks.append("\n\n".join(cur_paras))
+                    cur_paras = []
+                    cur_len = 0
+                    rest_pieces: List[str] = []
+                    if len(pieces) > 1:
+                        rest_pieces.extend(cls._split_oversized_paragraph(" ".join(pieces[1:]), budget))
+                    for rp in rest_pieces:
+                        r_sep = 2 if cur_paras else 0
+                        if cur_paras and (cur_len + r_sep + len(rp)) > budget:
+                            sec_chunks.append("\n\n".join(cur_paras))
+                            cur_paras = [rp]
+                            cur_len = len(rp)
+                        else:
+                            cur_paras.append(rp)
+                            cur_len += r_sep + len(rp)
+                    continue
+
+                sub_paras = cls._split_oversized_paragraph(p, budget) if len(p) > budget else [p]
+                for sp in sub_paras:
+                    s_sep = 2 if cur_paras else 0
+                    if cur_paras and (cur_len + s_sep + len(sp)) > budget:
+                        sec_chunks.append("\n\n".join(cur_paras))
+                        cur_paras = [sp]
+                        cur_len = len(sp)
+                    else:
+                        cur_paras.append(sp)
+                        cur_len += s_sep + len(sp)
+
+            if cur_paras:
+                sec_chunks.append("\n\n".join(cur_paras))
+
+            total_parts = len(sec_chunks)
+            for idx, ch_text in enumerate(sec_chunks, start=1):
+                chunks.append(ch_text)
+                if sec_title:
+                    if total_parts > 1:
+                        titles.append(f"{sec_title} (Part {idx}/{total_parts})")
+                    else:
+                        titles.append(sec_title)
+                else:
+                    titles.append(f"Part {idx}/{total_parts}" if total_parts > 1 else "")
+
+        return chunks, titles
+
     def _parse_epub_chunks(self, abs_file_path: str) -> List[str]:
         book = epub.read_epub(abs_file_path)
-        full_text = []
-        for item in book.get_items_of_type(9):  # ITEM_DOCUMENT
-            soup = BeautifulSoup(item.get_body_content(), "html.parser")
-            text = soup.get_text(separator=" ", strip=True)
-            if text:
-                full_text.append(text)
-        combined_text = "\n\n".join(full_text)
-        self.current_chunks = [
-            combined_text[i : i + self.chunk_size]
-            for i in range(0, len(combined_text), self.chunk_size)
-        ]
+        all_sections: List[Tuple[str, List[str]]] = []
+        for item in self._iter_epub_spine_items(book):
+            raw_body = item.get_content() if hasattr(item, "get_content") else item.get_body_content()
+            item_sections = self._extract_html_sections(raw_body)
+            all_sections.extend(item_sections)
+
+        chunks, titles = self._pack_sections_into_chunks(all_sections, self.chunk_size)
+        self.current_chunks = chunks
+        self.current_chunk_titles = titles
+        return self.current_chunks
+
+    def _parse_html_book_chunks(self, abs_file_path: str) -> List[str]:
+        with open(abs_file_path, "rb") as f:
+            raw_bytes = f.read()
+        sections = self._extract_html_sections(raw_bytes)
+        chunks, titles = self._pack_sections_into_chunks(sections, self.chunk_size)
+        self.current_chunks = chunks
+        self.current_chunk_titles = titles
         return self.current_chunks
 
     def get_system_prompt_addition(self) -> str:
@@ -618,6 +921,9 @@ class FileReaderComponent(BaseComponent):
             if ext == ".epub":
                 total = max(1, len(self.current_chunks))
                 prompt += f"\n[Reader Status: Active EPUB is '{label}' (library '{self.current_library}') at chunk {self.current_index}/{total}.]"
+            elif ext in (".htm", ".html", ".xhtml") and self._is_book_library(self.current_library):
+                total = max(1, len(self.current_chunks))
+                prompt += f"\n[Reader Status: Active HTML book is '{label}' (library '{self.current_library}') at chunk {self.current_index}/{total}.]"
             elif ext == ".pdf":
                 _, _, total_pages = self._extract_pdf_metadata(self.current_book)
                 prompt += f"\n[Reader Status: Active PDF is '{label}' (library '{self.current_library}') at page {self.current_index}/{max(1, total_pages)}.]"
@@ -815,6 +1121,8 @@ class FileReaderComponent(BaseComponent):
 
             if ext == ".epub":
                 return self._read_epub_chunk(resolved_lib, abs_path, rel_path, chunk_idx)
+            elif ext in (".htm", ".html", ".xhtml") and self._is_book_library(resolved_lib):
+                return self._read_html_book_chunk(resolved_lib, abs_path, rel_path, chunk_idx)
             elif ext == ".pdf":
                 return self._read_pdf_chunk(resolved_lib, abs_path, rel_path, chunk_idx)
             elif ext in IMAGE_EXTENSIONS:
@@ -828,12 +1136,42 @@ class FileReaderComponent(BaseComponent):
         if self.current_book != abs_path or not self.current_chunks:
             self._parse_epub_chunks(abs_path)
         label = self._get_cached_file_label(abs_path, rel_path)
+        return self._format_book_chunk_response(
+            fmt="epub",
+            library=library,
+            abs_path=abs_path,
+            rel_path=rel_path,
+            label=label,
+            chunk=chunk,
+        )
+
+    def _read_html_book_chunk(self, library: str, abs_path: str, rel_path: str, chunk: int) -> str:
+        if self.current_book != abs_path or not self.current_chunks:
+            self._parse_html_book_chunks(abs_path)
+        return self._format_book_chunk_response(
+            fmt="html_book",
+            library=library,
+            abs_path=abs_path,
+            rel_path=rel_path,
+            label=rel_path,
+            chunk=chunk,
+        )
+
+    def _format_book_chunk_response(
+        self,
+        fmt: str,
+        library: str,
+        abs_path: str,
+        rel_path: str,
+        label: str,
+        chunk: int,
+    ) -> str:
         total_chunks = max(1, len(self.current_chunks))
 
         if chunk > total_chunks:
             return json.dumps(
                 {
-                    "format": "epub",
+                    "format": fmt,
                     "library": library,
                     "filepath": rel_path,
                     "document": label,
@@ -844,7 +1182,12 @@ class FileReaderComponent(BaseComponent):
                 indent=2,
             )
 
-        text = self.current_chunks[chunk - 1]
+        text = self.current_chunks[chunk - 1] if self.current_chunks else ""
+        sec_title = (
+            self.current_chunk_titles[chunk - 1]
+            if (chunk - 1) < len(self.current_chunk_titles)
+            else ""
+        )
         self.current_book = abs_path
         self.current_library = library
         self.current_rel_path = rel_path
@@ -860,19 +1203,19 @@ class FileReaderComponent(BaseComponent):
         else:
             next_hint = f"End of '{label}' reached ({total_chunks}/{total_chunks} chunks)."
 
-        return json.dumps(
-            {
-                "format": "epub",
-                "library": library,
-                "filepath": rel_path,
-                "document": label,
-                "chunk": chunk,
-                "total_chunks": total_chunks,
-                "content": text,
-                "next_hint": next_hint,
-            },
-            indent=2,
-        )
+        payload: Dict[str, Any] = {
+            "format": fmt,
+            "library": library,
+            "filepath": rel_path,
+            "document": label,
+            "chunk": chunk,
+            "total_chunks": total_chunks,
+        }
+        if sec_title:
+            payload["section_title"] = sec_title
+        payload["content"] = text
+        payload["next_hint"] = next_hint
+        return json.dumps(payload, indent=2)
 
     def _read_pdf_chunk(self, library: str, abs_path: str, rel_path: str, page_number: int) -> str:
         label = self._get_cached_file_label(abs_path, rel_path)
