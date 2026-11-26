@@ -44,7 +44,7 @@ class KnowledgeBaseComponent(BaseComponent):
         # so GlobalSearch doesn't explode the context window with too much text
         return self.search_knowledge_base(query, num_results=2)
 
-    def _get_embedding(self, text: str) -> list[float]:
+    def _get_embed(self, text: str) -> list[float]:
         """Helper to call the embeddings API."""
         agent_name = getattr(getattr(self, "agent", None), "name", None) or getattr(self, "agent_name", "Thunk")
         thread_id = getattr(getattr(self, "agent", None), "thread_id", None) or getattr(self, "thread_id", "main") or "main"
@@ -85,26 +85,27 @@ class KnowledgeBaseComponent(BaseComponent):
                     self._client = QdrantClient(host=self.host, port=self.port)
                     
                 with span.subtimer("embedding_ms"):
-                    query_vector = self._get_embedding(query)
+                    query_vectors = self._get_embed(query)
                 
-                with span.subtimer("db_lookup_ms"):
-                    search_result = self._client.search(
-                        collection_name=self.collection,
-                        query_vector=query_vector,
-                        limit=num_results
-                    )
-                span.inc("db_lookup", 1)
-                span.inc("db_lookup_records", len(search_result))
-                
-                if not search_result:
-                    return f"No relevant information found in the knowledge base for '{query}'."
-                    
                 results = []
-                for i, hit in enumerate(search_result):
-                    source = hit.payload.get('source', 'Unknown Document')
-                    text = hit.payload.get('text', '')
-                    score = round(hit.score, 3)
-                    results.append(f"--- Result {i+1} (Source: {source}, Relevance: {score}) ---\n{text}")
+                for query_vector in query_vectors:
+                    with span.subtimer("db_lookup_ms"):
+                        search_result = self._client.search(
+                            collection_name=self.collection,
+                            query_vector=query_vector,
+                            limit=num_results
+                        )
+                    span.inc("db_lookup", 1)
+                    span.inc("db_lookup_records", len(search_result))
+                    
+                    if not search_result:
+                        return f"No relevant information found in the knowledge base for '{query}'."
+                        
+                    for i, hit in enumerate(search_result):
+                        source = hit.payload.get('source', 'Unknown Document')
+                        text = hit.payload.get('text', '')
+                        score = round(hit.score, 3)
+                        results.append(f"--- Result {i+1} (Source: {source}, Relevance: {score}) ---\n{text}")
                     
                 return "\n\n".join(results)
                 

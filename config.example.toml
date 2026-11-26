@@ -130,7 +130,7 @@ lobster_watch_config = "/home/fireduck/projects/lobster-watch/config.toml"
 
 [embeddings]
 # Embedding model for vector database ingestion and semantic search
-api_url = "http://localhost:11434/api/embeddings"
+api_url = "http://localhost:11434/api/embed"
 api_key = ""
 model_name = "nomic-embed-text"
 

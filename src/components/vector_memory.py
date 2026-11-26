@@ -114,7 +114,7 @@ class VectorMemoryComponent(BaseComponent):
         """Standardized interface for GlobalSearchComponent."""
         return self.search_semantic_memory(query, num_results=2)
 
-    def _get_embedding(self, text: str) -> list[float]:
+    def _get_embed(self, text: str) -> list[float]:
         """Helper to call the embeddings API."""
         agent_name = getattr(getattr(self, "agent", None), "name", None) or getattr(self, "agent_name", "Thunk")
         thread_id = getattr(getattr(self, "agent", None), "thread_id", None) or getattr(self, "thread_id", "main") or "main"
@@ -126,16 +126,16 @@ class VectorMemoryComponent(BaseComponent):
             self.ollama_url, 
             json={
                 "model": self.embed_model,
-                "prompt": text
+                "input": text,
             },
             headers=headers
         )
         response.raise_for_status()
         data = response.json()
-        embedding = data.get("embedding")
-        if not embedding:
-            raise ValueError(f"Embeddings API returned empty embedding: {data}")
-        return embedding
+        embeddings = data.get("embeddings")
+        if not embeddings:
+            raise ValueError(f"Embeddings API returned empty embeddings: {data}")
+        return embeddings
 
     def _embed_with_auto_split(self, text: str) -> List[tuple[str, list[float]]]:
         """
@@ -144,7 +144,7 @@ class VectorMemoryComponent(BaseComponent):
         splits the chunk in half so no content is lost or rejected.
         """
         try:
-            return [(text, self._get_embedding(text))]
+            return [(text, vector) for vector in self._get_embed(text)]
         except requests.exceptions.HTTPError as e:
             resp_text = e.response.text if e.response is not None else ""
             if "exceeds the context length" in resp_text and len(text) > 200:
@@ -257,31 +257,32 @@ class VectorMemoryComponent(BaseComponent):
             if not self._client:
                 self._client = QdrantClient(host=self.host, port=self.port)
 
-            with span.subtimer("embedding_ms"):
-                query_vector = self._get_embedding(query)
-
-            with span.subtimer("db_lookup_ms"):
-                search_result = self._client.search(
-                    collection_name=self.collection,
-                    query_vector=query_vector,
-                    limit=num_results,
-                )
-
-            span.inc("db_lookup", 1)
-            span.inc("db_lookup_records", len(search_result))
-
             hits = []
-            for hit in search_result:
-                payload = dict(hit.payload or {})
-                hits.append(
-                    {
-                        "id": str(hit.id),
-                        "content": payload.get("text") or payload.get("content") or "",
-                        "timestamp": payload.get("timestamp", ""),
-                        "metadata": payload,
-                        "score": float(hit.score),
-                    }
-                )
+            with span.subtimer("embedding_ms"):
+                query_vectors = self._get_embed(query)
+
+            for query_vector in query_vectors:
+                with span.subtimer("db_lookup_ms"):
+                    search_result = self._client.search(
+                        collection_name=self.collection,
+                        query_vector=query_vector,
+                        limit=num_results
+                    )
+
+                span.inc("db_lookup", 1)
+                span.inc("db_lookup_records", len(search_result))
+    
+                for hit in search_result:
+                    payload = dict(hit.payload or {})
+                    hits.append(
+                        {
+                            "id": str(hit.id),
+                            "content": payload.get("text") or payload.get("content") or "",
+                            "timestamp": payload.get("timestamp", ""),
+                            "metadata": payload,
+                            "score": float(hit.score),
+                        }
+                    )
             return hits
 
     def search_semantic_memory(self, query: str, num_results: int = 3) -> str:
@@ -305,27 +306,28 @@ class VectorMemoryComponent(BaseComponent):
                 if not self._client:
                     self._client = QdrantClient(host=self.host, port=self.port)
                     
-                with span.subtimer("embedding_ms"):
-                    query_vector = self._get_embedding(query)
-                
-                with span.subtimer("db_lookup_ms"):
-                    search_result = self._client.search(
-                        collection_name=self.collection,
-                        query_vector=query_vector,
-                        limit=num_results
-                    )
-                span.inc("db_lookup", 1)
-                span.inc("db_lookup_records", len(search_result))
-                
-                if not search_result:
-                    return f"No relevant memories found for '{query}'."
-                    
                 results = []
-                for i, hit in enumerate(search_result):
-                    text = hit.payload.get('text', '')
-                    timestamp = hit.payload.get('timestamp', 'Unknown Time')
-                    score = round(hit.score, 3)
-                    results.append(f"--- Memory {i+1} (Relevance: {score}, Saved: {timestamp}) ---\n{text}")
+                with span.subtimer("embedding_ms"):
+                    query_vectors = self._get_embed(query)
+                
+                for query_vector in query_vectors:
+                    with span.subtimer("db_lookup_ms"):
+                        search_result = self._client.search(
+                            collection_name=self.collection,
+                            query_vector=query_vector,
+                            limit=num_results
+                        )
+                    span.inc("db_lookup", 1)
+                    span.inc("db_lookup_records", len(search_result))
+                    
+                    if not search_result:
+                        return f"No relevant memories found for '{query}'."
+                        
+                    for i, hit in enumerate(search_result):
+                        text = hit.payload.get('text', '')
+                        timestamp = hit.payload.get('timestamp', 'Unknown Time')
+                        score = round(hit.score, 3)
+                        results.append(f"--- Memory {i+1} (Relevance: {score}, Saved: {timestamp}) ---\n{text}")
                     
                 return "\n\n".join(results)
                 
@@ -432,7 +434,7 @@ class VectorMemoryComponent(BaseComponent):
         """Embeds `content` and upserts `point_id` in place in Qdrant."""
         if not self._client:
             self._client = QdrantClient(host=self.host, port=self.port)
-        vector = self._get_embedding(content)
+        vectors = self._get_embed(content)
         timestamp = datetime.utcnow().isoformat() + "Z"
         payload = {
             "text": content,
@@ -440,7 +442,9 @@ class VectorMemoryComponent(BaseComponent):
             "memory_type": "deliberate",
             **dict(metadata or {}),
         }
-        self._client.upsert(
-            collection_name=self.collection,
-            points=[PointStruct(id=str(point_id), vector=vector, payload=payload)],
-        )
+        for vector in vectors:
+            self._client.upsert(
+                collection_name=self.collection,
+                points=[PointStruct(id=str(point_id), vector=vector, payload=payload)],
+            )
+
