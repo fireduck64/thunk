@@ -117,6 +117,17 @@ discord_file = "data/thunk/images"
 thunk_source = "/home/fireduck/projects/thunk/src"
 workspace = "data/thunk/workspace"
 
+[video_watcher]
+# Multimodal movie & TV storyboard player backed by lobster-watch packages (on-demand background processing + inbox wake)
+enabled = false
+db_path = "data/thunk/video_state.db" # SQLite database file for per-thread video bookmarks and manifest cache
+media_root = "/vault/video"
+allowed_subdirs = ["movies", "shows"] # Strict allowlist of top-level subdirectories under media_root
+packages_root = "/vault/video/lobster-watch/packages"
+locks_dir = "/var/tmp/lobster-watch/locks"
+lobster_watch_bin = "/home/fireduck/projects/lobster-watch/lobster-watch"
+lobster_watch_config = "/home/fireduck/projects/lobster-watch/config.toml"
+
 [embeddings]
 # Embedding model for vector database ingestion and semantic search
 api_url = "http://localhost:11434/api/embeddings"

@@ -45,7 +45,11 @@ This directory contains an automatically updated, read-only snapshot of your own
 - `pdf_state`: `(id INTEGER PRIMARY KEY, current_pdf TEXT, current_page INTEGER)` — Active PDF bookmark state.
 - `pdf_metadata_cache`: `(filepath TEXT PRIMARY KEY, mtime REAL, page_count INTEGER, title TEXT, author TEXT, subject TEXT)` — Cached PDF metadata.
 
-### 6. `skills/` (Procedural Skills)
+### 6. `video_state.db` (Video Storyboard Watcher)
+- `video_thread_state`: `(thread_id TEXT PRIMARY KEY, current_rel_path TEXT, current_page INTEGER, current_label TEXT, updated_at REAL)` — Per-thread active movie/episode bookmark state.
+- `video_manifest_cache`: `(rel_no_ext TEXT PRIMARY KEY, mtime REAL, display_label TEXT, series_name TEXT, title TEXT, synopsis TEXT, cast_names TEXT, total_pages INTEGER, duration_sec REAL)` — Cached `lobster-watch` package metadata.
+
+### 7. `skills/` (Procedural Skills)
 - Markdown files (`*.md`) with YAML frontmatter containing your saved procedural workflows.
 """
 
@@ -117,6 +121,7 @@ class WorkspaceComponent(BaseComponent):
                 "notes.db": os.path.join(base_agent_dir, "notes.db"),
                 "tasks.db": os.path.join(base_agent_dir, "tasks.db"),
                 "reader_state.db": os.path.join(base_agent_dir, "reader_state.db"),
+                "video_state.db": os.path.join(base_agent_dir, "video_state.db"),
             }
         else:
             base_agent_dir = os.path.dirname(os.path.abspath(self.live_db_path))
@@ -125,10 +130,15 @@ class WorkspaceComponent(BaseComponent):
                 or self.config.get("reader", {}).get("db_path")
                 or os.path.join(base_agent_dir, "reader_state.db")
             )
+            video_db = (
+                self.config.get("video_watcher", {}).get("db_path")
+                or os.path.join(base_agent_dir, "video_state.db")
+            )
             self.extra_db_paths = {
                 "notes.db": self.config.get("notes", {}).get("db_path", ""),
                 "tasks.db": self.config.get("tasks", {}).get("db_path", ""),
                 "reader_state.db": reader_db,
+                "video_state.db": video_db,
             }
 
         if skills_dir is not None:
@@ -148,7 +158,7 @@ class WorkspaceComponent(BaseComponent):
             f"You have a persistent, limited network Linux workspace at `{self.container_workdir}` (read-write), "
             f"including a cross-agent shared directory at `{self.container_workdir}/shared` (`shared/`), "
             "equipped with Python 3 (numpy, scipy, pandas, networkx, sympy, matplotlib, astropy, lenstronomy, fastell4py), Go, Java, Bazel, C/C++, Fortran, sqlite3, ripgrep, jq, and standard CLI tools.\n"
-            f"You also have a read-only mirror of your own internal SQLite databases (`memory.db`, `notes.db`, `tasks.db`, `reader_state.db`) "
+            f"You also have a read-only mirror of your own internal SQLite databases (`memory.db`, `notes.db`, `tasks.db`, `reader_state.db`, `video_state.db`) "
             f"and `skills/` mounted at `{self.container_mind_dir}` (see `{self.container_mind_dir}/README.md` for table schemas).\n"
             "Use `run_workspace_command`, `write_workspace_file`, `read_workspace_file`, `view_workspace_image`, and `list_workspace_files` "
             "to write scripts, run experiments, inspect generated plots/PDFs, or query your own memory database."

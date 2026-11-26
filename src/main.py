@@ -29,6 +29,7 @@ from src.components.memory_gardener import MemoryGardenerComponent
 from src.components.executive_assistant import ExecutiveAssistantComponent
 from src.components.belief_graph import BeliefGraphComponent, BeliefArchivist
 from src.components.file_reader import FileReaderComponent
+from src.components.video_watcher import VideoWatcherComponent, LobsterWatchManager
 from src.components.oracle import OracleComponent
 from src.components.image_gen import ImageGenComponent
 from src.components.speaker import SpeakerComponent
@@ -152,6 +153,14 @@ def _register_thread_components(
         "pdfviewercomponent",
     ):
         agent.register_component(FileReaderComponent(thread_id=thread_id))
+
+    vw_enabled_cfg = config.get("video_watcher", {}).get("enabled", False)
+    if vw_enabled_cfg or (
+        requested is not None
+        and _wants("video_watcher", "videowatchercomponent", "video", "lobster_watch")
+    ):
+        agent.register_component(VideoWatcherComponent(thread_id=thread_id))
+
     if _wants("oracle", "oraclecomponent"):
         agent.register_component(OracleComponent())
 
@@ -209,6 +218,7 @@ async def main():
         except asyncio.CancelledError:
             print("\nShutting down gracefully...")
         finally:
+            await LobsterWatchManager.shutdown_all()
             if archivist_task is not None:
                 archivist_task.cancel()
                 await asyncio.gather(archivist_task, return_exceptions=True)
@@ -267,6 +277,7 @@ async def main():
     except asyncio.CancelledError:
         print("\nShutting down gracefully...")
     finally:
+        await LobsterWatchManager.shutdown_all()
         if archivist_task is not None:
             archivist_task.cancel()
             await asyncio.gather(archivist_task, return_exceptions=True)

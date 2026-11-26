@@ -323,10 +323,11 @@ class AgentCore:
 
                 # Normalize common path, message, and chunk/page parameter aliases
                 alias_map = {
-                    "path": ("filepath", "file_path", "filename", "subdir"),
-                    "filepath": ("path", "file_path", "filename"),
+                    "path": ("filepath", "file_path", "filename", "subdir", "video"),
+                    "filepath": ("path", "file_path", "filename", "video"),
                     "subdir": ("path", "filepath", "file_path"),
                     "chunk": ("page_number", "page"),
+                    "page": ("chunk", "page_number"),
                     "message": ("msg", "text"),
                     "target_thread": ("thread", "thread_id", "target"),
                 }
