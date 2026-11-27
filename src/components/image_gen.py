@@ -46,6 +46,12 @@ VALID_ASPECT_RATIOS = {
 
 VALID_IMAGE_SIZES = {"0.5K", "512", "1K", "2K", "4K"}
 
+# Keep inline reference images comfortably under Gemini's 20 MB total request limit
+# even when all 14 reference slots are populated with 4K images.
+MAX_REFERENCE_RAW_BYTES = 1_000_000
+MAX_REFERENCE_PIXEL_EDGE = 2048
+DOWNSIZED_REFERENCE_EDGE = 1536
+
 MIME_TO_EXT: Dict[str, str] = {
     "image/png": ".png",
     "image/jpeg": ".jpg",
@@ -324,20 +330,44 @@ class ImageGenComponent(BaseComponent):
     def _load_reference_part(abs_path: str) -> Tuple[types.Part, int]:
         with open(abs_path, "rb") as f:
             raw_bytes = f.read()
+
+        with Image.open(io.BytesIO(raw_bytes)) as im:
+            width, height = im.size
+            fmt = (im.format or "").upper()
+
+        needs_downsize = (
+            len(raw_bytes) > MAX_REFERENCE_RAW_BYTES
+            or max(width, height) > MAX_REFERENCE_PIXEL_EDGE
+        )
+        if needs_downsize:
+            raw_bytes, _, _ = downsize_image_bytes(
+                raw_bytes,
+                max_edge=DOWNSIZED_REFERENCE_EDGE,
+                quality=88,
+            )
+            if len(raw_bytes) > MAX_REFERENCE_RAW_BYTES:
+                raw_bytes, _, _ = downsize_image_bytes(
+                    raw_bytes,
+                    max_edge=1024,
+                    quality=80,
+                )
+            return types.Part.from_bytes(data=raw_bytes, mime_type="image/jpeg"), len(raw_bytes)
+
         ext = os.path.splitext(abs_path)[1].lower()
         mime = EXT_TO_MIME.get(ext)
         if not mime:
-            with Image.open(io.BytesIO(raw_bytes)) as im:
-                fmt = (im.format or "").upper()
-                if fmt == "PNG":
-                    mime = "image/png"
-                elif fmt in ("JPEG", "JPG"):
-                    mime = "image/jpeg"
-                elif fmt == "WEBP":
-                    mime = "image/webp"
-                else:
+            if fmt == "PNG":
+                mime = "image/png"
+            elif fmt in ("JPEG", "JPG"):
+                mime = "image/jpeg"
+            elif fmt == "WEBP":
+                mime = "image/webp"
+            elif fmt == "GIF":
+                mime = "image/gif"
+            else:
+                with Image.open(io.BytesIO(raw_bytes)) as im_conv:
                     buf = io.BytesIO()
-                    im.convert("RGB").save(buf, format="PNG")
+                    im_conv.convert("RGB").save(buf, format="PNG")
                     raw_bytes = buf.getvalue()
                     mime = "image/png"
         return types.Part.from_bytes(data=raw_bytes, mime_type=mime), len(raw_bytes)

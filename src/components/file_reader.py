@@ -3,7 +3,9 @@ import io
 import json
 import os
 import re
+import shutil
 import sqlite3
+import uuid
 import xml.etree.ElementTree as ET
 import zipfile
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -64,6 +66,9 @@ class FileReaderComponent(BaseComponent):
             legacy_pdf = self.config.get("pdf_viewer", {}).get("library_dir")
             if legacy_pdf and "pdf" not in raw_libs and "pdfs" not in raw_libs:
                 raw_libs["pdf"] = legacy_pdf
+            ws_dir_cfg = self.config.get("workspace", {}).get("workspace_dir")
+            if ws_dir_cfg and "workspace" not in raw_libs:
+                raw_libs["workspace"] = ws_dir_cfg
             if not raw_libs:
                 raise ValueError(
                     "FileReaderComponent requires 'libraries' to be explicitly defined in config under [file_reader.libraries]"
@@ -915,6 +920,11 @@ class FileReaderComponent(BaseComponent):
             "- Use `view_image(library, filepath, chunk=1)` to visually inspect an image file (e.g., in `discord_file` or `workspace`) "
             "or render page `chunk` of a PDF into your visual context."
         )
+        if "workspace" in self.libraries:
+            prompt += (
+                "\n- Use `copy_to_workspace(library, filepath, dest_path='')` to atomically copy any file or image from a library "
+                "(e.g., `'discord_file'`, `'ebook'`, `'pdf'`, or `'workspace'`) into your workspace or `'shared/...'` directory."
+            )
         if self.current_book and os.path.exists(self.current_book):
             label = self.current_book_label or os.path.basename(self.current_book)
             ext = os.path.splitext(self.current_book)[1].lower()
@@ -934,13 +944,16 @@ class FileReaderComponent(BaseComponent):
         return prompt
 
     def get_tools(self) -> List[Callable]:
-        return [
+        tools: List[Callable] = [
             self.list_libraries,
             self.list_files,
             self.read_file,
             self.read_next_chunk,
             self.view_image,
         ]
+        if "workspace" in self.libraries:
+            tools.append(self.copy_to_workspace)
+        return tools
 
     # --- Tool Implementations ---
 
@@ -1458,3 +1471,125 @@ class FileReaderComponent(BaseComponent):
             )
         except Exception as e:
             return f"Error viewing image '{filepath}': {str(e)}"
+
+    def _resolve_workspace_copy_dest(self, dest_path: str, src_basename: str) -> Tuple[str, str]:
+        if "workspace" not in self.libraries:
+            raise ValueError("Library 'workspace' is not configured.")
+
+        ws_base = self.libraries["workspace"]
+        raw_dest = (dest_path or "").strip()
+
+        if raw_dest == self.container_workdir:
+            raw_dest = ""
+        elif raw_dest.startswith(self.container_workdir + "/"):
+            raw_dest = raw_dest[len(self.container_workdir) + 1 :]
+        elif raw_dest.startswith("/"):
+            raise ValueError(
+                f"Access denied. Destination '{dest_path}' must be relative to workspace ('{self.container_workdir}')."
+            )
+
+        treat_as_dir = raw_dest.endswith("/")
+        clean_dest = raw_dest.strip("/")
+
+        if clean_dest:
+            norm_parts = os.path.normpath(clean_dest).split(os.sep)
+            if ".." in norm_parts:
+                raise ValueError(
+                    f"Access denied. Path traversal ('..') is not allowed in destination '{dest_path}'."
+                )
+
+        if not clean_dest or clean_dest == ".":
+            effective_rel = src_basename
+        elif clean_dest == "shared":
+            effective_rel = f"shared/{src_basename}"
+        elif treat_as_dir:
+            effective_rel = f"{clean_dest}/{src_basename}"
+        else:
+            effective_rel = clean_dest
+
+        if self.shared_workspace_dir and (
+            effective_rel == "shared" or effective_rel.startswith("shared/")
+        ):
+            sub_rel = effective_rel[len("shared") :].lstrip(os.sep)
+            if not sub_rel:
+                sub_rel = src_basename
+            dst_abs = os.path.abspath(os.path.join(self.shared_workspace_dir, sub_rel))
+            if os.path.commonpath([self.shared_workspace_dir, dst_abs]) != self.shared_workspace_dir:
+                raise ValueError(f"Access denied. Destination '{dest_path}' is outside shared workspace.")
+            if os.path.isdir(dst_abs):
+                dst_abs = os.path.abspath(os.path.join(dst_abs, src_basename))
+                if os.path.commonpath([self.shared_workspace_dir, dst_abs]) != self.shared_workspace_dir:
+                    raise ValueError(f"Access denied. Destination '{dest_path}' is outside shared workspace.")
+            dst_rel = f"shared/{os.path.relpath(dst_abs, self.shared_workspace_dir)}"
+            return dst_abs, dst_rel
+
+        dst_abs = os.path.abspath(os.path.join(ws_base, effective_rel))
+        if os.path.commonpath([ws_base, dst_abs]) != ws_base:
+            raise ValueError(f"Access denied. Destination '{dest_path}' is outside workspace.")
+        if os.path.isdir(dst_abs):
+            dst_abs = os.path.abspath(os.path.join(dst_abs, src_basename))
+            if os.path.commonpath([ws_base, dst_abs]) != ws_base:
+                raise ValueError(f"Access denied. Destination '{dest_path}' is outside workspace.")
+        dst_rel = os.path.relpath(dst_abs, ws_base)
+        return dst_abs, dst_rel
+
+    def copy_to_workspace(
+        self,
+        library: str,
+        filepath: str,
+        dest_path: str = "",
+        overwrite: bool = True,
+    ) -> str:
+        """
+        Atomically copies a file or image from any configured library (e.g. 'discord_file',
+        'ebook', 'pdf', 'gutenberg', or 'workspace') into your workspace ('/home/agent/workspace')
+        or shared workspace ('shared/...').
+
+        Args:
+            library: Source library name (e.g. 'discord_file', 'workspace', 'pdf', 'ebook').
+            filepath: Relative path of the source file inside the library.
+            dest_path: Optional destination file or directory path inside workspace (e.g. 'book/page_01.jpg' or 'shared/incoming/'). Defaults to the source filename in workspace root.
+            overwrite: Whether to overwrite an existing destination file (default True).
+        """
+        try:
+            src_lib, src_abs, src_rel = self._resolve_and_check_path(library, filepath)
+            if not os.path.exists(src_abs):
+                return f"Error: File '{filepath}' does not exist in library '{src_lib}'."
+            if not os.path.isfile(src_abs):
+                return f"Error: '{filepath}' in library '{src_lib}' is not a regular file."
+
+            src_basename = os.path.basename(src_abs)
+            dst_abs, dst_rel = self._resolve_workspace_copy_dest(dest_path, src_basename)
+
+            if os.path.abspath(src_abs) == os.path.abspath(dst_abs):
+                size_bytes = os.path.getsize(src_abs)
+                return (
+                    f"File '{dst_rel}' is already at '{self.container_workdir}/{dst_rel}' "
+                    f"({size_bytes} bytes; no copy needed)."
+                )
+
+            if not overwrite and os.path.exists(dst_abs):
+                return (
+                    f"Error: Destination '{dst_rel}' already exists in workspace "
+                    "(pass overwrite=True to replace)."
+                )
+
+            os.makedirs(os.path.dirname(dst_abs), exist_ok=True)
+            tmp_path = f"{dst_abs}.{uuid.uuid4().hex[:8]}.tmp"
+            try:
+                shutil.copyfile(src_abs, tmp_path)
+                os.replace(tmp_path, dst_abs)
+            finally:
+                if os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+
+            size_bytes = os.path.getsize(dst_abs)
+            return (
+                f"Copied '{src_rel}' from library '{src_lib}' to workspace '{dst_rel}' "
+                f"({self.container_workdir}/{dst_rel}, {size_bytes} bytes)."
+            )
+        except Exception as e:
+            return f"Error copying '{filepath}' to workspace: {str(e)}"

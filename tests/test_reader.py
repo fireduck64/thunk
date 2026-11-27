@@ -470,6 +470,80 @@ def test_epub_spine_order_paragraph_chunking_html_books_and_thread_bookmarks(tmp
     assert social_reloaded.current_index == 1
 
 
+@pytest.mark.asyncio
+async def test_copy_to_workspace_private_shared_aliases_and_traversal(tmp_path):
+    """
+    Verifies copy_to_workspace atomically copies files from discord_file/other libraries
+    into private workspace and shared/ workspace, honors overwrite=False, handles idempotent
+    self-copies, normalizes path/dest aliases via AgentCore, and blocks traversal.
+    """
+    discord_dir = tmp_path / "discord_images"
+    ws_dir = tmp_path / "workspace"
+    shared_dir = tmp_path / "shared_workspace"
+    discord_dir.mkdir()
+    ws_dir.mkdir()
+    shared_dir.mkdir()
+
+    payload = b"\xff\xd8\xff\xe0MOCK_TOASTER_JPEG_DATA_12345"
+    (discord_dir / "157468_toaster_sketch.jpg").write_bytes(payload)
+
+    reader = FileReaderComponent(
+        libraries={"discord_file": str(discord_dir), "workspace": str(ws_dir)},
+        shared_workspace_dir=str(shared_dir),
+        db_path=str(tmp_path / "reader_state.db"),
+        thread_id="social",
+    )
+    agent = AgentCore(thread_id="social")
+    agent.register_component(reader)
+    agent._build_tools()
+    assert "copy_to_workspace" in agent.tool_map
+    assert "copy_to_workspace" in reader.get_system_prompt_addition()
+
+    # 1. Default dest_path="" copies into workspace root keeping original filename
+    r1 = reader.copy_to_workspace("discord_file", "157468_toaster_sketch.jpg")
+    assert "Copied '157468_toaster_sketch.jpg'" in r1
+    assert (ws_dir / "157468_toaster_sketch.jpg").read_bytes() == payload
+
+    # 2. Nested path via AgentCore using 'path' + 'dest' aliases
+    r2 = await agent.execute_tool(
+        "copy_to_workspace",
+        json.dumps(
+            {
+                "library": "discord_file",
+                "path": "157468_toaster_sketch.jpg",
+                "dest": "book/art/page_01.jpg",
+            }
+        ),
+    )
+    assert "workspace 'book/art/page_01.jpg'" in r2
+    assert (ws_dir / "book" / "art" / "page_01.jpg").read_bytes() == payload
+
+    # 3. Copy from private workspace into shared/ directory target (trailing slash)
+    r3 = reader.copy_to_workspace("workspace", "book/art/page_01.jpg", dest_path="shared/toaster_book/")
+    assert "workspace 'shared/toaster_book/page_01.jpg'" in r3
+    assert (shared_dir / "toaster_book" / "page_01.jpg").read_bytes() == payload
+
+    # 4. overwrite=False refuses to overwrite existing file
+    (discord_dir / "other.jpg").write_bytes(b"DIFFERENT")
+    r_no_ow = reader.copy_to_workspace(
+        "discord_file", "other.jpg", dest_path="book/art/page_01.jpg", overwrite=False
+    )
+    assert "already exists" in r_no_ow
+    assert (ws_dir / "book" / "art" / "page_01.jpg").read_bytes() == payload
+
+    # 5. Self-copy to identical path is an idempotent no-op
+    r_same = reader.copy_to_workspace("workspace", "book/art/page_01.jpg", dest_path="book/art/page_01.jpg")
+    assert "no copy needed" in r_same
+    assert (ws_dir / "book" / "art" / "page_01.jpg").read_bytes() == payload
+
+    # 6. Path traversal and outside-workspace absolute paths are rejected
+    assert "Access denied" in reader.copy_to_workspace("discord_file", "157468_toaster_sketch.jpg", "../escape.jpg")
+    assert "Access denied" in reader.copy_to_workspace("discord_file", "157468_toaster_sketch.jpg", "shared/../../escape.jpg")
+    assert "Access denied" in reader.copy_to_workspace("discord_file", "157468_toaster_sketch.jpg", "/etc/passwd")
+    assert not (tmp_path / "escape.jpg").exists()
+
+
+
 
 
 

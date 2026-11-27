@@ -230,3 +230,69 @@ async def test_multi_reference_character_generation_and_security_guards(tmp_path
     )
     assert "References used (2):" in res_str_refs
     assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_4k_oversized_reference_images_downsized_in_memory(tmp_path):
+    """
+    Verifies oversized 4K (>2048px / >1 MB) reference images are downsized in memory
+    before calling Gemini so multi-page 4K reference chains never exceed the 20 MB
+    inline request limit, while leaving the master 4K files on disk untouched.
+    """
+    ws_dir = tmp_path / "workspace"
+    ws_dir.mkdir()
+
+    # Create a 3840x2160 (4K) image with fine pseudo-random pattern so raw JPEG > 1.2 MB
+    rng_bytes = os.urandom(960 * 540 * 3)
+    base_tile = Image.frombytes("RGB", (960, 540), rng_bytes)
+    img_4k = base_tile.resize((3840, 2160), Image.Resampling.NEAREST)
+    buf = io.BytesIO()
+    img_4k.save(buf, format="JPEG", quality=96)
+    raw_4k_bytes = buf.getvalue()
+    assert len(raw_4k_bytes) > 1_000_000
+
+    for idx in range(1, 5):
+        (ws_dir / f"toaster_page_{idx:02d}.jpg").write_bytes(raw_4k_bytes)
+
+    calls = []
+
+    async def _fake_generate_content(**kwargs):
+        calls.append(kwargs)
+        return _mock_genai_response(_make_png_bytes(512, 512))
+
+    mock_client = SimpleNamespace(
+        aio=SimpleNamespace(models=SimpleNamespace(generate_content=_fake_generate_content))
+    )
+    comp = ImageGenComponent(
+        api_key="dummy-key",
+        libraries={"workspace": str(ws_dir)},
+        default_output_library="workspace",
+        client=mock_client,
+    )
+
+    res = await comp.generate_image(
+        prompt="Revise page 5 keeping the chrome toaster consistent with pages 1-4.",
+        reference_images=[
+            f"workspace:toaster_page_{idx:02d}.jpg" for idx in range(1, 5)
+        ],
+        output_filename="toaster_page_05.png",
+    )
+    assert "References used (4):" in res
+    assert len(calls) == 1
+
+    sent_parts = calls[0]["contents"][:4]
+    total_inline_bytes = 0
+    for part in sent_parts:
+        part_bytes = part.inline_data.data
+        total_inline_bytes += len(part_bytes)
+        assert part.inline_data.mime_type == "image/jpeg"
+        assert len(part_bytes) <= 1_000_000
+        with Image.open(io.BytesIO(part_bytes)) as sent_im:
+            assert max(sent_im.size) <= 1536
+
+    # Extrapolating 14 max references stays comfortably below 20 MB
+    assert (total_inline_bytes / 4) * 14 < 15_000_000
+
+    # Original 4K master files on disk were NOT modified
+    assert (ws_dir / "toaster_page_01.jpg").read_bytes() == raw_4k_bytes
+

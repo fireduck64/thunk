@@ -326,6 +326,7 @@ class AgentCore:
                     "path": ("filepath", "file_path", "filename", "subdir", "video"),
                     "filepath": ("path", "file_path", "filename", "video"),
                     "subdir": ("path", "filepath", "file_path"),
+                    "dest_path": ("dest", "destination", "target_path", "output_path"),
                     "chunk": ("page_number", "page"),
                     "page": ("chunk", "page_number"),
                     "message": ("msg", "text"),
