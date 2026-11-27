@@ -100,6 +100,7 @@ The `scripts/` directory provides administrative and operational commands (all c
 * **`scripts/dump-vector-db.py`**: CLI utility for inspecting points stored in Qdrant collections (`-c data/thunk/config.toml`).
 * **`scripts/dump-vector-db-json.py`**: Dumps all records (with vectors and metadata) from a Qdrant collection as JSONL (`-c data/thunk/config.toml`).
 * **`scripts/dump-notes.py`**: Dumps structured notes from `notes.db` as JSON/JSONL with optional key prefix filtering (`./scripts/dump-notes.py -c data/thunk/config.toml [assistant|prompt]`).
+* **`scripts/dump-beliefs.py`**: Dumps the epistemic belief tables (`beliefs`, `belief_edges`, `belief_inbox`) from `memory.db` as JSONL in read-only mode (`./scripts/dump-beliefs.py -c data/thunk/config.toml [all|beliefs|edges|inbox]`).
 * **`scripts/ingest-vault.sh`**: Recursively chunks and embeds EPUB books from a directory into the Qdrant knowledge base collection (`-c data/thunk/config.toml`).
 
 ---

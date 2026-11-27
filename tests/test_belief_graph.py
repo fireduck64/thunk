@@ -756,3 +756,106 @@ async def test_archivist_16k_thinking_headroom_inbox_batch_cap_and_ephemeral_gua
     assert len(observed_kwargs) == 3
 
 
+def test_dump_beliefs_script_jsonl_table_filters_and_missing_tables(tmp_path):
+    """
+    Verifies scripts/dump-beliefs.py:
+    - Dumps beliefs, belief_edges, and belief_inbox as pure JSONL with decoded evidence_refs
+      and boolean processed flags.
+    - Supports table filters (beliefs, edges, inbox) via CLI.
+    - Handles an existing SQLite DB that lacks belief tables cleanly without mutating it.
+    """
+    import subprocess
+    import sys
+
+    db_path = tmp_path / "dump_test.db"
+    bg = BeliefGraphComponent(db_path=str(db_path), thread_id="mind")
+
+    b1 = bg.upsert_belief(
+        claim="Spine order preserves EPUB frontmatter and appendices",
+        epistemic_bucket="verified_fact",
+        status="active",
+        confidence=0.95,
+        evidence_refs=["log:101", "file_reader.py"],
+    )
+    b2 = bg.upsert_belief(
+        claim="Lobster-watch 2x2 storyboards fit cleanly in 1024px JPEG frames",
+        epistemic_bucket="working_hypothesis",
+        status="tentative",
+        confidence=0.8,
+    )
+    bg.upsert_edge(b2, b1, "related_to", weight=0.75)
+    bg.record_belief(
+        claim="Garak is more than a simple tailor",
+        stance="held",
+        reason="Observed in DS9 S01E02 Past Prologue",
+    )
+
+    script_path = "scripts/dump-beliefs.py"
+    res_all = subprocess.run(
+        [sys.executable, script_path, "-d", str(db_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    lines = [json.loads(ln) for ln in res_all.stdout.strip().splitlines()]
+    assert [r["table"] for r in lines] == ["beliefs", "beliefs", "belief_edges", "belief_inbox"]
+
+    belief_rows = [r for r in lines if r["table"] == "beliefs"]
+    assert belief_rows[0]["id"] == b1
+    assert belief_rows[0]["evidence_refs"] == ["log:101", "file_reader.py"]
+    assert belief_rows[1]["id"] == b2
+    assert belief_rows[1]["evidence_refs"] == []
+
+    edge_row = next(r for r in lines if r["table"] == "belief_edges")
+    assert edge_row["source_id"] == b2
+    assert edge_row["target_id"] == b1
+    assert edge_row["relation"] == "related_to"
+    assert edge_row["weight"] == pytest.approx(0.75)
+
+    inbox_row = next(r for r in lines if r["table"] == "belief_inbox")
+    assert inbox_row["thread_id"] == "mind"
+    assert inbox_row["claim"] == "Garak is more than a simple tailor"
+    assert inbox_row["stance"] == "held"
+    assert inbox_row["processed"] is False
+
+    # Filter to edges only via positional arg
+    res_edges = subprocess.run(
+        [sys.executable, script_path, "-d", str(db_path), "edges"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    edge_only_lines = [json.loads(ln) for ln in res_edges.stdout.strip().splitlines()]
+    assert len(edge_only_lines) == 1
+    assert edge_only_lines[0]["table"] == "belief_edges"
+
+    # Config resolution (-c) fallback to [memory].db_path
+    cfg_file = tmp_path / "mini_config.toml"
+    cfg_file.write_text(f'[memory]\ndb_path = "{db_path}"\n', encoding="utf-8")
+    res_cfg = subprocess.run(
+        [sys.executable, script_path, "-c", str(cfg_file), "inbox"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    cfg_lines = [json.loads(ln) for ln in res_cfg.stdout.strip().splitlines()]
+    assert len(cfg_lines) == 1
+    assert cfg_lines[0]["table"] == "belief_inbox"
+
+    # Legacy SQLite DB with no belief tables outputs 0 lines cleanly and does not create tables
+    bare_db = tmp_path / "bare.db"
+    conn = sqlite3.connect(str(bare_db))
+    conn.execute("CREATE TABLE dummy (id INTEGER PRIMARY KEY)")
+    conn.commit()
+    conn.close()
+
+    res_bare = subprocess.run(
+        [sys.executable, script_path, "-d", str(bare_db)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert res_bare.stdout == ""
+
+
+
