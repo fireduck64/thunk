@@ -414,12 +414,16 @@ class MQTTAdapter:
             if payload_raw.lstrip().startswith("{"):
                 try:
                     data = json.loads(payload_raw)
-                    if isinstance(data, dict) and ("text" in data or "file_bytes" in data):
-                        body_text = str(data.get("text") or "")
-                        sender = data.get("sender")
-                        if sender:
-                            body_text = f"{sender}: {body_text}" if body_text else str(sender)
-                        attached_images, attachment_notes = self._process_incoming_attachment(data)
+                    if isinstance(data, dict):
+                        if str(data.get("control") or "").strip().lower() == "boost":
+                            await self._handle_boost_control(data)
+                            return
+                        if "text" in data or "file_bytes" in data:
+                            body_text = str(data.get("text") or "")
+                            sender = data.get("sender")
+                            if sender:
+                                body_text = f"{sender}: {body_text}" if body_text else str(sender)
+                            attached_images, attachment_notes = self._process_incoming_attachment(data)
                 except Exception:
                     pass
 
@@ -429,6 +433,80 @@ class MQTTAdapter:
 
             formatted_payload = f"[Via MQTT | System] {body_text}"
             await self.agent.resume(formatted_payload, images=attached_images or None)
+
+    def _resolve_target_cores(self, target_thread: str) -> List[AgentCore]:
+        registry = getattr(self.agent, "thread_registry", None)
+        if registry is None:
+            for comp in getattr(self.agent, "components", []) or []:
+                reg = getattr(comp, "registry", None)
+                if reg is not None and hasattr(reg, "cores"):
+                    registry = reg
+                    break
+
+        cores_map: Dict[str, AgentCore] = {}
+        if registry is not None and getattr(registry, "cores", None):
+            cores_map.update(registry.cores)
+        own_tid = getattr(self.agent, "thread_id", "main") or "main"
+        cores_map.setdefault(own_tid, self.agent)
+
+        raw_target = (target_thread or "all").strip().lower()
+        if raw_target in ("", "all", "*", "both"):
+            return list(cores_map.values())
+
+        for tid, core in cores_map.items():
+            if tid.lower() == raw_target:
+                return [core]
+        return []
+
+    async def _handle_boost_control(self, data: Dict[str, Any]) -> None:
+        """Handles external CLI / cron boost control envelopes published to `<agent>/agent/inbox`."""
+        action = str(data.get("action") or "on").strip().lower()
+        target_thread = str(data.get("thread") or "all").strip()
+        wake = bool(data.get("wake", True))
+        reason = str(data.get("reason") or "").strip()
+
+        targets = self._resolve_target_cores(target_thread)
+        if not targets:
+            print(
+                f"[MQTT Boost Warning] Ignoring boost control for unknown thread '{target_thread}'.",
+                flush=True,
+            )
+            return
+
+        if action in ("off", "stop", "cancel", "disable"):
+            for core in targets:
+                res = await core.deactivate_boost(
+                    reason=reason or "deactivated via external command",
+                    append_notice=False,
+                )
+                if res.get("was_boosted"):
+                    notice = f"[System Notice] {res['summary']}"
+                    if wake:
+                        await core.resume(notice)
+                    else:
+                        await core.inbox.put(notice)
+            return
+
+        compactions = data.get("compactions")
+        turns = data.get("turns")
+        for core in targets:
+            res = core.activate_boost(
+                compactions=int(compactions) if compactions is not None else None,
+                turns=int(turns) if turns is not None else None,
+                reason=reason,
+                triggered_by="external_cli",
+            )
+            if not res.get("ok"):
+                print(
+                    f"[MQTT Boost Error:{core.thread_id}] {res.get('error')}",
+                    flush=True,
+                )
+                continue
+            notice = f"[System Notice] {res['summary']}"
+            if wake:
+                await core.resume(notice)
+            else:
+                await core.inbox.put(notice)
 
     async def start(self):
         """Connect to MQTT and start the listener loop with auto-reconnect."""

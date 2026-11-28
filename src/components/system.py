@@ -1,14 +1,22 @@
 import asyncio
 from typing import List, Callable, Dict, Any
 from src.components.base import BaseComponent
+from src.utils.config import load_config
 
 class SystemComponent(BaseComponent):
     """
     Provides the agent with explicit control over its lifecycle and communication.
     Separates the agent's internal monologue from what the operator actually sees.
     """
+    def _is_boost_enabled(self) -> bool:
+        agent = getattr(self, "agent", None)
+        if agent is not None and hasattr(agent, "boost_enabled"):
+            return bool(agent.boost_enabled)
+        boost_cfg = load_config().get("boost", {})
+        return bool(boost_cfg.get("enabled", bool(boost_cfg)))
+
     def get_system_prompt_addition(self) -> str:
-        return (
+        prompt = (
             "--- COMMUNICATION & LIFECYCLE ---\n"
             "Your standard text output is your INTERNAL MONOLOGUE (thoughts). Nobody outside can see it.\n"
             "To communicate externally (with the human operator or with peer agents), you MUST use the `send_message` or `react_to_message` tools.\n"
@@ -22,14 +30,25 @@ class SystemComponent(BaseComponent):
             "When conversing with another `[APP/Agent]`, engage substantively—exchange ideas, ask sharp questions, or challenge assumptions—but do NOT get stuck in endless polite sign-offs or repetitive agreement loops. Once a conversation reaches a natural conclusion, prefer using `react_to_message` for a lightweight acknowledgment (or simply returning to your own work) without needing the last word. Incoming `[Via Discord | Reaction]` events are informational and do not require a reply.\n"
             "You must only use the `suspend_until_next_event` tool as a last resort when you have absolutely zero tasks in your queue, no books left to explore, and require external input to proceed. Prefer finding new autonomous work over suspending your execution."
         )
+        if self._is_boost_enabled():
+            agent = getattr(self, "agent", None)
+            boost_model = getattr(agent, "boost_model", None) or load_config().get("boost", {}).get("model_name", "gemini-4-neon")
+            prompt += (
+                f"\nIf you notice yourself stuck in a rut, spinning in a tool/debugging loop, or tackling an unusually demanding reasoning problem, "
+                f"you can call `activate_boost_mode(reason=..., target_thread='self')` (or `'mind'`, `'social'`, `'all'`) to temporarily switch onto a higher-performance cloud model (`{boost_model}`)."
+            )
+        return prompt
 
     def get_tools(self) -> List[Callable]:
-        return [
+        tools: List[Callable] = [
             self.send_message,
             self.list_mqtt_agents,
             self.react_to_message,
             self.suspend_until_next_event,
         ]
+        if self._is_boost_enabled():
+            tools.append(self.activate_boost_mode)
+        return tools
 
     async def send_message(
         self,
@@ -112,3 +131,71 @@ class SystemComponent(BaseComponent):
         await self.agent.event_bus.publish("agent_suspended", {"agent": self.agent})
         await self.agent.suspended.wait()
         return "You were woken up by a new event or message."
+
+    def _resolve_target_cores(self, target_thread: str) -> tuple[List[Any], str]:
+        own_core = getattr(self, "agent", None)
+        if own_core is None:
+            return [], "Error: SystemComponent is not attached to an AgentCore."
+
+        registry = getattr(own_core, "thread_registry", None)
+        if registry is None:
+            for comp in getattr(own_core, "components", []) or []:
+                reg = getattr(comp, "registry", None)
+                if reg is not None and hasattr(reg, "cores"):
+                    registry = reg
+                    break
+
+        cores_map: Dict[str, Any] = {}
+        if registry is not None and getattr(registry, "cores", None):
+            cores_map.update(registry.cores)
+        own_tid = getattr(own_core, "thread_id", "main") or "main"
+        cores_map.setdefault(own_tid, own_core)
+
+        raw_target = (target_thread or "self").strip().lower()
+        if raw_target in ("", "self", "this", "current") or raw_target == own_tid.lower():
+            return [own_core], ""
+        if raw_target in ("all", "*", "both"):
+            return list(cores_map.values()), ""
+
+        for tid, core in cores_map.items():
+            if tid.lower() == raw_target:
+                return [core], ""
+
+        available = ", ".join(sorted(cores_map.keys()))
+        return [], (
+            f"Error: Unknown target_thread '{target_thread}'. "
+            f"Available threads: {available} (or 'self' / 'all')."
+        )
+
+    async def activate_boost_mode(
+        self,
+        reason: str = "",
+        target_thread: str = "self",
+    ) -> str:
+        """
+        Temporarily switches this thread (or 'mind', 'social', or 'all') onto the configured
+        high-performance boost model (e.g., gemini-4-neon) to break out of a loop, rut, or tough problem.
+
+        Args:
+            reason: Brief explanation of why boost mode is needed right now.
+            target_thread: Which thread to boost ('self', 'mind', 'social', or 'all'). Defaults to 'self'.
+        """
+        own_core = getattr(self, "agent", None)
+        targets, err = self._resolve_target_cores(target_thread)
+        if err:
+            return err
+
+        own_tid = getattr(own_core, "thread_id", "main") or "main"
+        summaries: List[str] = []
+        for core in targets:
+            res = core.activate_boost(
+                reason=reason,
+                triggered_by=f"agent:{own_tid}",
+            )
+            if not res.get("ok"):
+                return f"Error activating Boost Mode on thread '{core.thread_id}': {res.get('error')}"
+            summaries.append(res["summary"])
+            if core is not own_core:
+                await core.resume(f"[System Notice] {res['summary']}")
+
+        return "\n".join(summaries)

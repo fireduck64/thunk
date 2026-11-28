@@ -36,7 +36,7 @@ Thunk's architecture decouples agent cognition from capabilities through an even
 | **`SubconsciousRecallComponent`** | Automatically performs semantic vector recall on incoming user messages and injects relevant context without polluting persistent transcripts. | Transparent context injection |
 | **`ClockComponent`** | Injects current system time truncated to the hour to maximize `llama.cpp` / Ollama prefix cache hits. | System prompt time injection |
 | **`DirectivesComponent`** | Injects high-level directives (intellectual curiosity, knowledge curation, self-reliance, cross-thread synthesis). | Behavioral guidance prompt |
-| **`SystemComponent`** | Provides external communication and explicit lifecycle suspension. | `send_message`, `suspend_until_next_event` |
+| **`SystemComponent`** | Provides external communication, explicit lifecycle suspension, and temporary Boost Mode switching onto a higher-performance model (`[boost]`). | `send_message`, `list_mqtt_agents`, `react_to_message`, `suspend_until_next_event`, `activate_boost_mode` |
 | **`AuditLogComponent`** | Writes deterministic, structured JSONL logs of all events, tool calls, and LLM completions. | Session logging to `logs/` |
 | **`TieredMemoryComponent`** | Enforces token-based high/low watermarks, compacts older messages into a rolling core summary, archives all messages to SQLite, tracks `last_compacted_id` for crash resilience, and consolidates evicted contexts into vector memory. | Context compaction & archival |
 | **`CriticComponent`** | Subconscious monitor that reviews recent interaction history and injects gentle observations/intuitions to prevent loop stalls. | Progress monitoring & guidance |
@@ -94,6 +94,7 @@ The `scripts/` directory provides administrative and operational commands (all c
 * **`scripts/setup.sh`**: Sets up the Python virtual environment at `./venv` (or creates it externally at `THUNK_VENV_DIR` and symlinks `./venv` to it).
 * **`scripts/extract-monolog.py`**: Formats session JSONL audit logs into a clean, human-readable timeline showing internal monologues, tool calls, tool results, operator dispatches, critic intuitions, and user messages.
 * **`scripts/send-notification.py`**: Reads `stdin` to EOF and publishes the payload to the agent's MQTT inbox topic (`-c data/thunk/config.toml`).
+* **`scripts/boost.py`**: Triggers, cancels (`--off`), or inspects (`--status`) Boost Mode on a running agent via MQTT (`./scripts/boost.py -c data/thunk/config.toml [--thread all|mind|social] [--compactions N] [--turns N]`).
 * **`scripts/mqtt-chat.py`**: Interactive terminal chat client over MQTT (`-c data/thunk/config.toml`).
 * **`scripts/ask-oracle.py`**: Queries the configured Google Gemini model directly from the command line using `stdin` (`-c data/thunk/config.toml`).
 * **`scripts/list-oracle-models.py`**: Lists all available Gemini models for the configured API key (`-c data/thunk/config.toml`).

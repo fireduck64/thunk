@@ -32,32 +32,40 @@ class AgentCore:
         llm_cfg = self.config.get("llm", {})
         self.provider = (provider or llm_cfg.get("provider", "openai")).strip().lower()
         self.model = (model_name or llm_cfg.get("model_name", "gemma4:31b")).strip()
-        default_headers = {"X-Agent-ID": f"{self.name}-{self.thread_id}-core"}
-
-        if self.provider == "gemini":
-            gemini_key = (
-                llm_cfg.get("gemini_api_key")
-                or self.config.get("oracle", {}).get("gemini_api_key")
-                or llm_cfg.get("api_key")
-            )
-            self.client = GeminiOpenAIClientAdapter(
-                api_key=gemini_key,
-                default_headers=default_headers,
-            )
-            self.exec_location = "cloud"
-        else:
-            # Initialize OpenAI Client (Compatible with standard endpoints and Ollama)
-            # We disable the local client timeout entirely (timeout=None)
-            # and rely on the streaming keep-alive to bypass Nginx timeouts.
-            self.client = AsyncOpenAI(
-                base_url=llm_cfg["api_url"],
-                api_key=llm_cfg["api_key"],
-                default_headers=default_headers,
-                timeout=httpx.Timeout(None),
-            )
-            self.exec_location = infer_exec_location(llm_cfg.get("api_url"))
+        self._default_headers = {"X-Agent-ID": f"{self.name}-{self.thread_id}-core"}
+        self.client, self.exec_location = self._build_llm_client(
+            provider=self.provider,
+            section_cfg=llm_cfg,
+            default_headers=self._default_headers,
+        )
 
         self.max_output_tokens = int(llm_cfg.get("max_output_tokens", 16384))
+        self.base_provider = self.provider
+        self.base_model = self.model
+        self.base_client = self.client
+        self.base_exec_location = self.exec_location
+        self.base_max_output_tokens = self.max_output_tokens
+
+        boost_cfg = self.config.get("boost", {})
+        self.boost_enabled = bool(boost_cfg.get("enabled", bool(boost_cfg)))
+        self.boost_provider = str(boost_cfg.get("provider") or "gemini").strip().lower()
+        self.boost_model = str(
+            boost_cfg.get("model_name") or boost_cfg.get("model") or "gemini-4-neon"
+        ).strip()
+        self.boost_default_compactions = int(boost_cfg.get("default_compactions", 3))
+        self.boost_default_turns = int(boost_cfg.get("default_turns", 75))
+        self.boost_max_output_tokens = int(
+            boost_cfg.get("max_output_tokens", self.max_output_tokens)
+        )
+        self._boost_client = None
+        self._boost_exec_location = None
+        self.boost_state: dict | None = None
+        self._boost_seq: int = 0
+        self.thread_registry = None
+
+        self.event_bus.subscribe(
+            "memory_compaction_sweep_completed", self._on_memory_compaction_sweep_completed
+        )
         self.min_turn_interval_sec = float(llm_cfg.get("min_turn_interval_sec", 0.0))
         self.max_retries = int(llm_cfg.get("max_retries", 5))
         self.retry_base_delay = float(llm_cfg.get("retry_base_delay", 2.0))
@@ -86,6 +94,271 @@ class AgentCore:
         self.inbox: asyncio.Queue = asyncio.Queue()
         self.pending_tool_images: list[str] = []
 
+    def _build_llm_client(
+        self, provider: str, section_cfg: dict, default_headers: dict
+    ) -> tuple[object, str]:
+        prov = (provider or "openai").strip().lower()
+        llm_cfg = self.config.get("llm", {})
+        if prov == "gemini":
+            gemini_key = (
+                section_cfg.get("gemini_api_key")
+                or section_cfg.get("api_key")
+                or self.config.get("oracle", {}).get("gemini_api_key")
+                or llm_cfg.get("gemini_api_key")
+                or llm_cfg.get("api_key")
+            )
+            client = GeminiOpenAIClientAdapter(
+                api_key=gemini_key,
+                default_headers=default_headers,
+            )
+            return client, "cloud"
+
+        # Initialize OpenAI Client (Compatible with standard endpoints and Ollama)
+        # We disable the local client timeout entirely (timeout=None)
+        # and rely on the streaming keep-alive to bypass Nginx timeouts.
+        api_url = section_cfg.get("api_url") or llm_cfg["api_url"]
+        api_key = (
+            section_cfg["api_key"]
+            if "api_key" in section_cfg and section_cfg["api_key"] is not None
+            else llm_cfg["api_key"]
+        )
+        client = AsyncOpenAI(
+            base_url=api_url,
+            api_key=api_key,
+            default_headers=default_headers,
+            timeout=httpx.Timeout(None),
+        )
+        return client, infer_exec_location(api_url)
+
+    @property
+    def is_boosted(self) -> bool:
+        return bool(self.boost_state and self.boost_state.get("active"))
+
+    @staticmethod
+    def format_boost_budget(state: dict | None) -> str:
+        if not state or not state.get("active"):
+            return "inactive"
+        rem_comp = int(state.get("remaining_compactions") or 0)
+        rem_turns = int(state.get("remaining_turns") or 0)
+        parts = []
+        if rem_comp > 0:
+            parts.append(f"{rem_comp} compaction(s)")
+        if rem_turns > 0:
+            parts.append(f"{rem_turns} turn(s)")
+        return " or ".join(parts) if parts else "until deactivated"
+
+    def _ensure_boost_client(self) -> None:
+        if self._boost_client is not None:
+            if not self._boost_exec_location:
+                self._boost_exec_location = (
+                    "cloud"
+                    if self.boost_provider == "gemini"
+                    else infer_exec_location(
+                        self.config.get("boost", {}).get("api_url")
+                        or self.config.get("llm", {}).get("api_url")
+                    )
+                )
+            return
+        boost_cfg = self.config.get("boost", {})
+        self._boost_client, self._boost_exec_location = self._build_llm_client(
+            provider=self.boost_provider,
+            section_cfg=boost_cfg,
+            default_headers=self._default_headers,
+        )
+
+    def _persist_boost_state(self) -> None:
+        for comp in self.components:
+            save_fn = getattr(comp, "save_boost_state", None)
+            if callable(save_fn):
+                try:
+                    save_fn(self.boost_state)
+                except Exception as e:
+                    print(f"[Boost Warning:{self.thread_id}] Failed to persist boost state: {e}")
+                break
+
+    def activate_boost(
+        self,
+        compactions: int | None = None,
+        turns: int | None = None,
+        reason: str = "",
+        triggered_by: str = "agent",
+    ) -> dict:
+        """
+        Switches this AgentCore thread onto the configured [boost] provider and model
+        until `remaining_compactions` or `remaining_turns` reaches 0.
+        """
+        if not self.boost_enabled:
+            return {
+                "ok": False,
+                "error": "Boost mode is disabled (enable [boost] in config.toml).",
+            }
+
+        if compactions is None and turns is None:
+            rem_comp = max(0, int(self.boost_default_compactions))
+            rem_turns = max(0, int(self.boost_default_turns))
+        else:
+            rem_comp = max(0, int(compactions)) if compactions is not None else 0
+            rem_turns = max(0, int(turns)) if turns is not None else 0
+
+        if rem_comp <= 0 and rem_turns <= 0:
+            return {
+                "ok": False,
+                "error": "Boost duration must specify at least 1 compaction or 1 turn.",
+            }
+
+        try:
+            self._ensure_boost_client()
+        except Exception as e:
+            return {
+                "ok": False,
+                "error": f"Failed to initialize boost client ({self.boost_provider}/{self.boost_model}): {e}",
+            }
+
+        if not self.is_boosted:
+            self.base_provider = self.provider
+            self.base_model = self.model
+            self.base_client = self.client
+            self.base_exec_location = self.exec_location
+            self.base_max_output_tokens = self.max_output_tokens
+
+        self.provider = self.boost_provider
+        self.model = self.boost_model
+        self.client = self._boost_client
+        self.exec_location = self._boost_exec_location
+        self.max_output_tokens = self.boost_max_output_tokens
+
+        self._boost_seq += 1
+        self.boost_state = {
+            "active": True,
+            "provider": self.boost_provider,
+            "model": self.boost_model,
+            "remaining_compactions": rem_comp,
+            "remaining_turns": rem_turns,
+            "compactions_completed": 0,
+            "turns_completed": 0,
+            "reason": (reason or "").strip(),
+            "triggered_by": (triggered_by or "agent").strip(),
+            "activated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        self._persist_boost_state()
+
+        budget_str = self.format_boost_budget(self.boost_state)
+        reason_suffix = f" Reason: {self.boost_state['reason']}" if self.boost_state["reason"] else ""
+        summary = (
+            f"Boost Mode ACTIVATED on thread '{self.thread_id}' -> {self.model} "
+            f"(provider: {self.provider}, budget: {budget_str}, triggered_by: {self.boost_state['triggered_by']})."
+            f"{reason_suffix}"
+        )
+        print(f"[Boost:{self.thread_id}] {summary}", flush=True)
+        return {"ok": True, "state": dict(self.boost_state), "summary": summary}
+
+    def restore_boost_state(self, saved_state: dict) -> bool:
+        """Restores persisted boost state during startup if [boost] is enabled and remaining budget > 0."""
+        if not self.boost_enabled or not isinstance(saved_state, dict) or not saved_state.get("active"):
+            return False
+        rem_comp = max(0, int(saved_state.get("remaining_compactions") or 0))
+        rem_turns = max(0, int(saved_state.get("remaining_turns") or 0))
+        if rem_comp <= 0 and rem_turns <= 0:
+            self._persist_boost_state()
+            return False
+
+        try:
+            self._ensure_boost_client()
+        except Exception as e:
+            print(f"[Boost Warning:{self.thread_id}] Could not restore boost client on startup: {e}")
+            return False
+
+        self.provider = self.boost_provider
+        self.model = self.boost_model
+        self.client = self._boost_client
+        self.exec_location = self._boost_exec_location
+        self.max_output_tokens = self.boost_max_output_tokens
+        self._boost_seq += 1
+        self.boost_state = {
+            "active": True,
+            "provider": self.boost_provider,
+            "model": self.boost_model,
+            "remaining_compactions": rem_comp,
+            "remaining_turns": rem_turns,
+            "compactions_completed": int(saved_state.get("compactions_completed") or 0),
+            "turns_completed": int(saved_state.get("turns_completed") or 0),
+            "reason": str(saved_state.get("reason") or ""),
+            "triggered_by": str(saved_state.get("triggered_by") or "restored"),
+            "activated_at": str(
+                saved_state.get("activated_at") or datetime.now().isoformat(timespec="seconds")
+            ),
+        }
+        print(
+            f"[Boost:{self.thread_id}] Restored active Boost Mode -> {self.model} "
+            f"(remaining: {self.format_boost_budget(self.boost_state)}).",
+            flush=True,
+        )
+        return True
+
+    async def deactivate_boost(self, reason: str = "completed", append_notice: bool = True) -> dict:
+        """Restores this AgentCore thread back to its configured base provider and model."""
+        was_boosted = self.is_boosted
+        prev_model = self.model
+        prev_state = dict(self.boost_state) if self.boost_state else {}
+
+        self.provider = self.base_provider
+        self.model = self.base_model
+        self.client = self.base_client
+        self.exec_location = self.base_exec_location
+        self.max_output_tokens = self.base_max_output_tokens
+        self.boost_state = None
+        self._persist_boost_state()
+
+        if not was_boosted:
+            return {
+                "ok": True,
+                "was_boosted": False,
+                "summary": f"Thread '{self.thread_id}' is already running on base model '{self.model}'.",
+            }
+
+        summary = (
+            f"Boost Mode ended on thread '{self.thread_id}' ({reason}; completed "
+            f"{prev_state.get('turns_completed', 0)} turn(s) and "
+            f"{prev_state.get('compactions_completed', 0)} compaction(s) on {prev_model}). "
+            f"Returned to base model: {self.model} (provider: {self.provider})."
+        )
+        print(f"[Boost:{self.thread_id}] {summary}", flush=True)
+        if append_notice and self.messages:
+            await self.add_message("system", f"[System Notice] {summary}")
+        await self.event_bus.publish(
+            "boost_deactivated",
+            {"agent": self, "thread_id": self.thread_id, "reason": reason, "previous_state": prev_state},
+        )
+        return {"ok": True, "was_boosted": True, "summary": summary}
+
+    async def _on_memory_compaction_sweep_completed(self, event_name: str, payload: dict) -> None:
+        if not self.is_boosted or not self.boost_state:
+            return
+        self.boost_state["compactions_completed"] = int(self.boost_state.get("compactions_completed") or 0) + 1
+        rem_comp = int(self.boost_state.get("remaining_compactions") or 0)
+        if rem_comp > 0:
+            rem_comp -= 1
+            self.boost_state["remaining_compactions"] = rem_comp
+            if rem_comp <= 0:
+                await self.deactivate_boost(reason="compaction budget reached", append_notice=True)
+                return
+        self._persist_boost_state()
+
+    async def _record_boost_turn_completed(self, expected_seq: int | None = None) -> None:
+        if not self.is_boosted or not self.boost_state:
+            return
+        if expected_seq is not None and self._boost_seq != expected_seq:
+            return
+        self.boost_state["turns_completed"] = int(self.boost_state.get("turns_completed") or 0) + 1
+        rem_turns = int(self.boost_state.get("remaining_turns") or 0)
+        if rem_turns > 0:
+            rem_turns -= 1
+            self.boost_state["remaining_turns"] = rem_turns
+            if rem_turns <= 0:
+                await self.deactivate_boost(reason="turn budget reached", append_notice=True)
+                return
+        self._persist_boost_state()
+
     def register_component(self, component: BaseComponent):
         """Attaches a component to the agent."""
         subconscious_types = {"SubconsciousRecallComponent", "SpreadingActivationComponent"}
@@ -110,6 +383,9 @@ class AgentCore:
         self.event_bus.subscribe("after_llm_call", component.on_event)
         self.event_bus.subscribe("agent_suspended", component.on_event)
         self.event_bus.subscribe("messages_evicted", component.on_event)
+        self.event_bus.subscribe("memory_compaction_sweep_completed", component.on_event)
+        self.event_bus.subscribe("boost_activated", component.on_event)
+        self.event_bus.subscribe("boost_deactivated", component.on_event)
         self.event_bus.subscribe("assistant_briefing_injected", component.on_event)
         self.event_bus.subscribe("assistant_notes_updated", component.on_event)
         self.event_bus.subscribe("assistant_note_compacted", component.on_event)
@@ -735,10 +1011,16 @@ class AgentCore:
             if self.provider == "gemini"
             else infer_exec_location(self.config.get("llm", {}).get("api_url"))
         )
-        return (
+        msg = (
             f"[System Startup] Agent startup complete at {current_time} ({day_of_week}) "
             f"on thread '{self.thread_id}'. Main LLM: {self.model} ({exec_loc}, provider: {self.provider})."
         )
+        if self.is_boosted:
+            msg += (
+                f" [Boost Mode ACTIVE — remaining: {self.format_boost_budget(self.boost_state)}, "
+                f"base LLM: {self.base_model}]."
+            )
+        return msg
 
     async def start(self):
         """The main continuous thinking loop."""
@@ -779,6 +1061,7 @@ class AgentCore:
                 await self.event_bus.publish("before_llm_call", {"agent": self, "messages": self.messages})
                 
                 wire_messages = self._prepare_llm_messages()
+                turn_boost_seq = self._boost_seq if self.is_boosted else None
                 message = await self._call_llm_with_retries(wire_messages)
 
                 # Clear transient base64 images now that the LLM has seen them on this call
@@ -835,6 +1118,9 @@ class AgentCore:
                 # 3. Check for standard text output
                 if message.content:
                     print(f"[Agent Monologue:{self.thread_id}]: {message.content}")
+
+                if turn_boost_seq is not None:
+                    await self._record_boost_turn_completed(expected_seq=turn_boost_seq)
 
                 # 4. Apply post-turn no-tool-call & length-truncation circuit breaker (WP2.1 & WP2.2)
                 await self._handle_post_turn_loop_control(message)

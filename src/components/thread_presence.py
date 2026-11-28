@@ -40,6 +40,7 @@ class ThreadRegistry:
         }
         if core is not None:
             self.cores[tid] = core
+            core.thread_registry = self
 
     def update_status(self, thread_id: str, status: str, reset_turns: bool = True) -> None:
         tid = (thread_id or "main").strip() or "main"

@@ -14,6 +14,17 @@ model_name = "llama3"                 # When provider = "gemini", set e.g. model
 # gemini_api_key = ""                 # Optional override; defaults to [oracle].gemini_api_key when provider = "gemini"
 max_output_tokens = 16384             # Hard token ceiling per LLM completion to prevent runaway loops
 
+[boost]
+# Temporary high-performance model switch (triggered via activate_boost_mode tool or ./scripts/boost.py)
+enabled = true
+provider = "gemini"                   # "gemini" (reuses [oracle].gemini_api_key if omitted) or "openai"
+model_name = "gemini-4-neon"
+default_compactions = 3               # Number of full compaction sweeps before stepping back down to [llm]
+default_turns = 75                    # Turn ceiling before stepping back down (whichever finishes first)
+# api_url = ""                        # Optional override when provider = "openai"
+# api_key = ""                        # Optional override
+# gemini_api_key = ""                 # Optional override when provider = "gemini"
+
 [subconscious]
 # Mode: "standard" (stateless top-k SubconsciousRecallComponent) or "spreading_activation" (stateful Layer-1 Mind Gardener)
 mode = "spreading_activation"

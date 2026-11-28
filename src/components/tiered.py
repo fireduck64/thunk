@@ -38,7 +38,10 @@ class TieredMemoryComponent(BaseComponent):
         mem_cfg = self.config.get("memory", {})
         self.high_watermark = mem_cfg.get("high_watermark", 16000)
         self.low_watermark = mem_cfg.get("low_watermark", 8000)
-        self.prompt_token_watermark = int(mem_cfg.get("prompt_token_watermark", 24000))
+        default_prompt_watermark = max(24000, int(round(self.high_watermark * 1.5)))
+        self.prompt_token_watermark = int(
+            mem_cfg.get("prompt_token_watermark", default_prompt_watermark)
+        )
         self.max_summarize_tokens = mem_cfg.get("max_summarize_tokens", 6000)
         self.max_summary_tokens = mem_cfg.get("max_summary_tokens", 8192)
         self.max_retries = 5
@@ -197,6 +200,38 @@ class TieredMemoryComponent(BaseComponent):
         finally:
             conn.close()
 
+    def get_boost_state(self) -> Dict[str, Any] | None:
+        conn = self._connect_db()
+        try:
+            with conn:
+                row = conn.execute(
+                    "SELECT value FROM memory_settings WHERE key = ?",
+                    (self._settings_key("boost_state"),),
+                ).fetchone()
+                if not row or not row[0]:
+                    return None
+                parsed = json.loads(row[0])
+                return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            return None
+        finally:
+            conn.close()
+
+    def save_boost_state(self, state: Dict[str, Any] | None) -> None:
+        conn = self._connect_db()
+        try:
+            with conn:
+                key = self._settings_key("boost_state")
+                if not state or not state.get("active"):
+                    conn.execute("DELETE FROM memory_settings WHERE key = ?", (key,))
+                else:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO memory_settings (key, value) VALUES (?, ?)",
+                        (key, json.dumps(state)),
+                    )
+        finally:
+            conn.close()
+
     def _update_core_summary(self, new_summary: str, max_evicted_id: int = 0):
         if not new_summary or not new_summary.strip():
             raise ValueError("Refusing to overwrite core_summary with an empty summary.")
@@ -273,6 +308,10 @@ class TieredMemoryComponent(BaseComponent):
         if event_name == "agent_started":
             agent = payload["agent"]
             self._restore_working_memory(agent)
+            if hasattr(agent, "restore_boost_state"):
+                saved_boost = self.get_boost_state()
+                if saved_boost and saved_boost.get("active"):
+                    agent.restore_boost_state(saved_boost)
             
         elif event_name == "message_added":
             msg = payload["message"]
@@ -356,6 +395,7 @@ class TieredMemoryComponent(BaseComponent):
                 or 0
             )
             
+            swept_chunks = 0
             while (
                 total_tokens > self.high_watermark
                 or (last_prompt_tokens > self.prompt_token_watermark and len(agent.messages) > 6)
@@ -364,7 +404,10 @@ class TieredMemoryComponent(BaseComponent):
                     f"[Memory:{self.thread_id}] Context window exceeded "
                     f"(messages={total_tokens}/{self.high_watermark}, prompt_tokens={last_prompt_tokens}/{self.prompt_token_watermark}). Compressing..."
                 )
+                before_msg_count = len(agent.messages)
                 await self._compress_memory(agent, last_prompt_tokens=last_prompt_tokens)
+                if len(agent.messages) < before_msg_count:
+                    swept_chunks += 1
                 total_tokens = self._count_tokens(agent.messages)
                 removed = max(0, last_tokens - total_tokens)
                 if last_prompt_tokens > 0:
@@ -383,6 +426,17 @@ class TieredMemoryComponent(BaseComponent):
                 
             if total_tokens > self.high_watermark:
                 print(f"[Memory WARNING:{self.thread_id}] Context window is {total_tokens} tokens, exceeding {self.high_watermark}, but no further messages can be compressed.")
+
+            if swept_chunks > 0:
+                await agent.event_bus.publish(
+                    "memory_compaction_sweep_completed",
+                    {
+                        "agent": agent,
+                        "thread_id": self.thread_id,
+                        "chunks_compressed": swept_chunks,
+                        "remaining_tokens": total_tokens,
+                    },
+                )
 
     @staticmethod
     def _row_to_restored_message(
